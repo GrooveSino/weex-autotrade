@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a reproducible CLI or exchange-adapter problem.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Do not include API keys, signatures, balances, or unredacted account payloads.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include the dry-run command and sanitized output.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [demo, live, offline-test]
+    validations:
+      required: true

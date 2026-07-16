@@ -1,0 +1,62 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+keysecret
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Runtime data
+artifacts/
+data/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Editors and personal tooling
+.idea/
+*.code-workspace
+.fleet/
+.history/
+.claude/
+.codex/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100/
+.fseventsd/
+.Spotlight-V100/
+.TemporaryItems/
+.Trashes/
+
+# Linux and Windows
+*~
+.directory
+Thumbs.db
+Desktop.ini

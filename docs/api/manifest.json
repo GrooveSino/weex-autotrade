@@ -1,0 +1,583 @@
+{
+  "source": "https://www.weex.com/api-doc/sitemap.xml",
+  "synced_at": "2026-07-16T16:03:53+00:00",
+  "page_count": 68,
+  "pages": [
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/APIPublicParameters",
+      "path": "contract/APIPublicParameters.md",
+      "title": "公开API参数",
+      "endpoints": [],
+      "sha256": "3b558b04a7d7e8b0be0cf10f57a25dc9cdb4aabd0502de96abddf6e1eb06b6c8"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/AdjustPositionMarginTRADE",
+      "path": "contract/Account_API/AdjustPositionMarginTRADE.md",
+      "title": "调整逐仓保证金 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/account/positionMargin"
+      ],
+      "sha256": "1135e2565b3a76c651ef89c92ee132ca06918fe005a8baff764000d0075c228a"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/ChangeMarginModeTRADE",
+      "path": "contract/Account_API/ChangeMarginModeTRADE.md",
+      "title": "切换保证金模式 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/account/marginType"
+      ],
+      "sha256": "a6d550e3e670131a577c0ef3ad1c14b08367b7879f677729e006d97381840af7"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetAccountBalance",
+      "path": "contract/Account_API/GetAccountBalance.md",
+      "title": "查询账户余额 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/account/balance"
+      ],
+      "sha256": "c955113683d320fd7ef6a6dc6db434d98e804bb815e87547b72a919bb9258094"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetAccountConfig",
+      "path": "contract/Account_API/GetAccountConfig.md",
+      "title": "查询账户配置 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/account/accountConfig"
+      ],
+      "sha256": "6f85c69ba6734563bdf2a03207ae405ea30a42136bcffed51c9f83c995c5dc46"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetAllPositions",
+      "path": "contract/Account_API/GetAllPositions.md",
+      "title": "查询全部仓位 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/account/position/allPosition"
+      ],
+      "sha256": "324476b5f3d122258c05a6be4f216ad94c5673b565c90eeb87f2d05340372ef7"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetCommissionRate",
+      "path": "contract/Account_API/GetCommissionRate.md",
+      "title": "查询手续费率 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/account/commissionRate"
+      ],
+      "sha256": "718d4bfed3c9db1046b8d5a185f96cc48d8ecae6c7753b14c8d92c06bc2baff8"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetContractBills",
+      "path": "contract/Account_API/GetContractBills.md",
+      "title": "获取账户资金流水 (USER_DATA)",
+      "endpoints": [
+        "POST /capi/v3/account/income"
+      ],
+      "sha256": "e5b45fdf747650bbf03d74ec1cb713ad045c39e4fe2efc61ecc25b7d5ac83261"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetSinglePosition",
+      "path": "contract/Account_API/GetSinglePosition.md",
+      "title": "查询单个仓位 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/account/position/singlePosition"
+      ],
+      "sha256": "3a351090a2fac8e071ee2580e9f8101dab9439a67d5da3dd5eb03daa93de2109"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/GetSymbolConfig",
+      "path": "contract/Account_API/GetSymbolConfig.md",
+      "title": "查询交易对配置 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/account/symbolConfig"
+      ],
+      "sha256": "9ef53b5d2408d8857ebb95c53b7081f4e45eba12015402dc617ea4cce55e3d2f"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/ModifyAutoAppendMarginTRADE",
+      "path": "contract/Account_API/ModifyAutoAppendMarginTRADE.md",
+      "title": "设置自动追加保证金 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/account/modifyAutoAppendMargin"
+      ],
+      "sha256": "fe34689d97661cfa7ff39344a4a47e6d370ff7ca731fe185d73bc6510ce9b119"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Account_API/UpdateLeverageTRADE",
+      "path": "contract/Account_API/UpdateLeverageTRADE.md",
+      "title": "调整杠杆设置 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/account/leverage"
+      ],
+      "sha256": "2d5f47232819041d22562309b3384c203f43c8890e235194d97a451e68209be6"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/ContactUs",
+      "path": "contract/ContactUs.md",
+      "title": "联系我们",
+      "endpoints": [],
+      "sha256": "58df3a19a2d57d831588fdf830a36ea7c6c1937d2e6ef8f6c7ec1e045b695590"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/ExampleOfErrorCode",
+      "path": "contract/ExampleOfErrorCode.md",
+      "title": "错误代码",
+      "endpoints": [],
+      "sha256": "182876328e943fff8578c205e05c9d10c5bcb4da09181380edfb43a57b229187"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetApiTradingSymbols",
+      "path": "contract/Market_API/GetApiTradingSymbols.md",
+      "title": "获取合约交易对",
+      "endpoints": [
+        "GET /capi/v3/market/apiTradingSymbols"
+      ],
+      "sha256": "1ba0fa13d2c1df09869dffec29d4664f78f1c6ac8f14ea2bc5d549b08f2fb7bb"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetBookTicker",
+      "path": "contract/Market_API/GetBookTicker.md",
+      "title": "获取最优挂单",
+      "endpoints": [
+        "GET /capi/v3/market/ticker/bookTicker"
+      ],
+      "sha256": "9fc0474d402730600b165270419c5f6ab1e4cd0bd82369946bdeff595f2da7eb"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetContractInfo",
+      "path": "contract/Market_API/GetContractInfo.md",
+      "title": "获取合约信息",
+      "endpoints": [
+        "GET /capi/v3/market/exchangeInfo"
+      ],
+      "sha256": "018fb363c631f6dfedc370b0a932c94d0941f18a24f0d177752b2dbd42539bab"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetCurrentFundingRate",
+      "path": "contract/Market_API/GetCurrentFundingRate.md",
+      "title": "获取最新资金费率",
+      "endpoints": [
+        "GET /capi/v3/market/premiumIndex"
+      ],
+      "sha256": "62159cab834ebe2e35ecba5d7191f6f16125d94fa7782fbfbec9bead5aaa455e"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetDepthData",
+      "path": "contract/Market_API/GetDepthData.md",
+      "title": "获取深度数据",
+      "endpoints": [
+        "GET /capi/v3/market/depth"
+      ],
+      "sha256": "17e6f34a73e907dd62ce84638bef2e5f5cee7d49fb330f69e02c1ae0ac5402e3"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetFundingRateHistory",
+      "path": "contract/Market_API/GetFundingRateHistory.md",
+      "title": "获取历史资金费率",
+      "endpoints": [
+        "GET /capi/v3/market/fundingRate"
+      ],
+      "sha256": "1231616307ed3350d209849f4e849ee3d5df5b380ba149dcdad83dfccc900122"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetHistoryKlines",
+      "path": "contract/Market_API/GetHistoryKlines.md",
+      "title": "获取历史K线",
+      "endpoints": [
+        "GET /capi/v3/market/historyKlines"
+      ],
+      "sha256": "3f6e4ee78572459608dfe54b7228e2bc5db88e270748743d226dc456c90a435a"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetIndexPriceKlines",
+      "path": "contract/Market_API/GetIndexPriceKlines.md",
+      "title": "获取指数价格K线",
+      "endpoints": [
+        "GET /capi/v3/market/indexPriceKlines"
+      ],
+      "sha256": "44c2a1fa08b5745cde4e995a622da3086c9491f41edd1ba7b8a924b1f6dcfd2a"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetKlines",
+      "path": "contract/Market_API/GetKlines.md",
+      "title": "获取K线数据",
+      "endpoints": [
+        "GET /capi/v3/market/klines"
+      ],
+      "sha256": "6ccf4d165c4c9393c34fecea31d2fa715c01001fb15d8015055246ca0c72098c"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetMarkPriceKlines",
+      "path": "contract/Market_API/GetMarkPriceKlines.md",
+      "title": "获取标记价格K线",
+      "endpoints": [
+        "GET /capi/v3/market/markPriceKlines"
+      ],
+      "sha256": "0a073984d2485e31250d0fec298a90173898078ac4a04255e84c73ea68a3d948"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetOpenInterest",
+      "path": "contract/Market_API/GetOpenInterest.md",
+      "title": "获取未平仓合约数",
+      "endpoints": [
+        "GET /capi/v3/market/openInterest"
+      ],
+      "sha256": "c6b3ba362ef44ee13a2fe8a10256d919814d9a0512846f32675b1dab2f83e0c2"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetRecentTrades",
+      "path": "contract/Market_API/GetRecentTrades.md",
+      "title": "获取最新成交",
+      "endpoints": [
+        "GET /capi/v3/market/trades"
+      ],
+      "sha256": "b2b9f0b866e499a2e391c5ed0b9d2cd3e22beb03207d727263655ecc0142f739"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetServerTime",
+      "path": "contract/Market_API/GetServerTime.md",
+      "title": "获取服务器时间",
+      "endpoints": [
+        "GET /capi/v3/market/time"
+      ],
+      "sha256": "b141d607fae5620e09a74482f8c6ec470b19e0ed209214c89b2894aca7f09e98"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetSymbolPrice",
+      "path": "contract/Market_API/GetSymbolPrice.md",
+      "title": "获取交易对价格",
+      "endpoints": [
+        "GET /capi/v3/market/symbolPrice"
+      ],
+      "sha256": "4fac2b7f321951ab90495959d2f7b876888a883cc0416df24ac0cb213bccad70"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Market_API/GetTicker24h",
+      "path": "contract/Market_API/GetTicker24h.md",
+      "title": "获取24小时行情统计",
+      "endpoints": [
+        "GET /capi/v3/market/ticker/24hr"
+      ],
+      "sha256": "cbe1bbbeea27ebbc7a520857df6107355c4e462e31f415cb79e04ef93f82632e"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/QuickStart/APIDomain",
+      "path": "contract/QuickStart/APIDomain.md",
+      "title": "API域名",
+      "endpoints": [],
+      "sha256": "a618b1ea2060a111d5afaf6bc348ad3b303ce857cfb519733afd3c3b3cf0c697"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/QuickStart/AccessRestrictions",
+      "path": "contract/QuickStart/AccessRestrictions.md",
+      "title": "访问限制",
+      "endpoints": [],
+      "sha256": "4e821e6beb93923fa9d4f0677227ffa11f4fb8bd93adef3dd9eba112be1e026f"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/QuickStart/IntegrationPreparation",
+      "path": "contract/QuickStart/IntegrationPreparation.md",
+      "title": "接入准备",
+      "endpoints": [],
+      "sha256": "cfd3359cb96fc7210daaa370f0ae7b55d010231d03744c1f4946cdcd8fa87d84"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/QuickStart/InterfaceType",
+      "path": "contract/QuickStart/InterfaceType.md",
+      "title": "接口类型",
+      "endpoints": [],
+      "sha256": "9a14609cb323399fba5e8c2a947224737d0bba617c9fcca30b809e33988803bb"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/QuickStart/RequestInteraction",
+      "path": "contract/QuickStart/RequestInteraction.md",
+      "title": "请求交互",
+      "endpoints": [],
+      "sha256": "877a292ad8239901190c99cc8d0507d4f731fa9391b7b41e95d2be3e5d2ee3dd"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/QuickStart/Signature",
+      "path": "contract/QuickStart/Signature.md",
+      "title": "签名",
+      "endpoints": [],
+      "sha256": "2a18d6bb56202106a9b069d58fa78cca732196cf419a7eea90051a60b86b90eb"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/CancelAllOrders",
+      "path": "contract/Transaction_API/CancelAllOrders.md",
+      "title": "撤销全部挂单 (TRADE)",
+      "endpoints": [
+        "DELETE /capi/v3/allOpenOrders"
+      ],
+      "sha256": "2e722b4f3e1e7d34e8a05a6cbe6915d8f140bc350e8bbc85d8fd128250ac4341"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/CancelAllPendingOrders",
+      "path": "contract/Transaction_API/CancelAllPendingOrders.md",
+      "title": "撤销全部条件单 (TRADE)",
+      "endpoints": [
+        "DELETE /capi/v3/algoOpenOrders"
+      ],
+      "sha256": "ff39f092550c8c731659a2fd69b7dda955fc6f380bb542830fc15f07a3f6e88d"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/CancelOrder",
+      "path": "contract/Transaction_API/CancelOrder.md",
+      "title": "撤单 (TRADE)",
+      "endpoints": [
+        "DELETE /capi/v3/order"
+      ],
+      "sha256": "af9401f64ebb03e7f96bc2dcc461795251baab88bfafda453be1e5401ca5b83c"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/CancelOrdersBatch",
+      "path": "contract/Transaction_API/CancelOrdersBatch.md",
+      "title": "批量撤单 (TRADE)",
+      "endpoints": [
+        "DELETE /capi/v3/batchOrders"
+      ],
+      "sha256": "97d55da4908e8b01c96b9ebd97214372466c0fb3518b2e66ebf17d72c092e237"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/CancelPendingOrder",
+      "path": "contract/Transaction_API/CancelPendingOrder.md",
+      "title": "撤销条件单 (TRADE)",
+      "endpoints": [
+        "DELETE /capi/v3/algoOrder"
+      ],
+      "sha256": "45337c32c61ef6c39f2e58d3adb7a44b17e23679e8b627bedb087d4262961f25"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/ClosePositions",
+      "path": "contract/Transaction_API/ClosePositions.md",
+      "title": "一键市价平仓 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/closePositions"
+      ],
+      "sha256": "bc8e3514c89f83e3956aa1b4a5a9d535b6d6f79ba806cfc865811bd01ee96429"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/GetCurrentOrderStatus",
+      "path": "contract/Transaction_API/GetCurrentOrderStatus.md",
+      "title": "查询当前委托 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/openOrders"
+      ],
+      "sha256": "cdddc81ad8e06e76f495acf467feca11f6134d3d032a42753defe7f0db88a879"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/GetCurrentPendingOrders",
+      "path": "contract/Transaction_API/GetCurrentPendingOrders.md",
+      "title": "查询当前条件单 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/openAlgoOrders"
+      ],
+      "sha256": "528a450aec2b862eda13816e4203c966569a890ab513f09af5d7eaa9e18eddc2"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/GetHistoricalPendingOrders",
+      "path": "contract/Transaction_API/GetHistoricalPendingOrders.md",
+      "title": "查询条件单历史 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/allAlgoOrders"
+      ],
+      "sha256": "283bad1a0916237541cbf3c42e75971f803c29dad2acf6e40e1cbb02434fab45"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/GetOrderHistory",
+      "path": "contract/Transaction_API/GetOrderHistory.md",
+      "title": "查询历史委托 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/order/history"
+      ],
+      "sha256": "9cddd8c29b281df610d62cac951e4280d18c35dc0c528b910e15b041e3ca1d0c"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/GetSingleOrderInfo",
+      "path": "contract/Transaction_API/GetSingleOrderInfo.md",
+      "title": "查询订单详情 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/order"
+      ],
+      "sha256": "d3b41f41e2489423db1faa109a6f310cbf42c17e5d2697418b521dc52390c666"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/GetTradeDetails",
+      "path": "contract/Transaction_API/GetTradeDetails.md",
+      "title": "查询成交明细 (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/userTrades"
+      ],
+      "sha256": "d5099c2ddc7ab4038470b59de228f11170da023f60f0429ded2f0d4b67926d5c"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/ModifyTpSlOrder",
+      "path": "contract/Transaction_API/ModifyTpSlOrder.md",
+      "title": "修改止盈止损条件单 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/modifyTpSlOrder"
+      ],
+      "sha256": "4591fe6dbd3f9c911da638b4031d34d8d3ca1cd97e51b9942d410956fccfea58"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/PlaceOrder",
+      "path": "contract/Transaction_API/PlaceOrder.md",
+      "title": "下单 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/order"
+      ],
+      "sha256": "d0637de9bce5274de1d6633aa7995cb2cd9210623501704d429be4147018237e"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/PlaceOrdersBatch",
+      "path": "contract/Transaction_API/PlaceOrdersBatch.md",
+      "title": "批量下单 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/batchOrders"
+      ],
+      "sha256": "e816147246695195ea70c99dce5313e35434fd55934e8812e24b55acd1dda7c7"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/PlacePendingOrder",
+      "path": "contract/Transaction_API/PlacePendingOrder.md",
+      "title": "下条件单 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/algoOrder"
+      ],
+      "sha256": "ec4d0c6ae0269f359faf9cb54dde2fab1de6550289d317124dd4922e287d8080"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Transaction_API/PlaceTpSlOrder",
+      "path": "contract/Transaction_API/PlaceTpSlOrder.md",
+      "title": "下止盈止损条件单 (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/placeTpSlOrder"
+      ],
+      "sha256": "399a639e2e5f3de5a9df9f6f4cce26366ed52598dc1cc37cc543f52fbb794fcb"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/private/Account-Channel",
+      "path": "contract/Websocket/private/Account-Channel.md",
+      "title": "账户频道",
+      "endpoints": [],
+      "sha256": "29d2c8ac50218d7450319000d9ffde1be5512a2dc6b306c676f568777b2a0d90"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/private/Fill-Channel",
+      "path": "contract/Websocket/private/Fill-Channel.md",
+      "title": "成交明细频道",
+      "endpoints": [],
+      "sha256": "dcbc27b83f6e43e70a150fc9da19208cd4327dbe8e9b0884aa75ac926f9310a8"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/private/Order-Channel",
+      "path": "contract/Websocket/private/Order-Channel.md",
+      "title": "订单频道",
+      "endpoints": [],
+      "sha256": "7fd7d4be8ca91b8d1e8e1d367efff7badcfb3c422ab8912552decbda161738e0"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/private/Positions-Channel",
+      "path": "contract/Websocket/private/Positions-Channel.md",
+      "title": "持仓频道",
+      "endpoints": [],
+      "sha256": "9be80d863febff92c261d3765f0aadcbe44fb5a97a3eee9b917cf92c6cd07aaa"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/public/Candlesticks-Channel",
+      "path": "contract/Websocket/public/Candlesticks-Channel.md",
+      "title": "K线频道",
+      "endpoints": [],
+      "sha256": "05d45bc088fd899c90283542eed21c0fca0487f8d662c57df2fd338aa33b57f5"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/public/Depth-Channel",
+      "path": "contract/Websocket/public/Depth-Channel.md",
+      "title": "深度频道",
+      "endpoints": [],
+      "sha256": "e44ca32a58afe0ea186973e98fafcb9c32368056b59e9e99173ec30cab6a719b"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/public/Tickers-Channel",
+      "path": "contract/Websocket/public/Tickers-Channel.md",
+      "title": "行情频道",
+      "endpoints": [],
+      "sha256": "9fce8442d14471cbecf1800df0a9a73e51f4052ba3ce616206b4def031ffe123"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/public/Trades-Channel",
+      "path": "contract/Websocket/public/Trades-Channel.md",
+      "title": "平台成交详情频道",
+      "endpoints": [],
+      "sha256": "a2a8f925ea33ec9a1a82fa470287544da93f0a523d1dfa6a310d3d724712746b"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/Websocket/websocket-intro",
+      "path": "contract/Websocket/websocket-intro.md",
+      "title": "概述",
+      "endpoints": [],
+      "sha256": "a65e5daa016cc84fd906c2d26ccc0418048452e2691c93efeaf29346c0015e9c"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/apifaq",
+      "path": "contract/apifaq.md",
+      "title": "FAQs",
+      "endpoints": [
+        "GET /capi/v3/account/position/allPosition",
+        "GET /capi/v3/sim/balance",
+        "GET /capi/v3/sim/order/history",
+        "GET /capi/v3/sim/position/allPosition",
+        "POST /capi/v3/sim/order"
+      ],
+      "sha256": "055eeb67d6ca4c57e15fbb62e56e8aea7e971bbc783e26a209ec4ede6568204a"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/changelog",
+      "path": "contract/changelog.md",
+      "title": "更新日志",
+      "endpoints": [],
+      "sha256": "d6cd70ffdcba7d1d64a15574f88ef47d6cf5a0f9c468dd8e7bcedcdf75f8f0b4"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/demo/GetAccountBalance",
+      "path": "contract/demo/GetAccountBalance.md",
+      "title": "查询账户余额 Demo (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/sim/balance"
+      ],
+      "sha256": "71708499893410ec45d10a399ee0d8b1576190ba573349f618e7970e75415816"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/demo/GetAllPositions",
+      "path": "contract/demo/GetAllPositions.md",
+      "title": "查询全部仓位 Demo (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/sim/position/allPosition"
+      ],
+      "sha256": "bb789a8a566efc8362734ce3e3dc0781bfb6b116a67b6dfca524dc49da642f6f"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/demo/GetOrderHistory",
+      "path": "contract/demo/GetOrderHistory.md",
+      "title": "查询历史委托 Demo (USER_DATA)",
+      "endpoints": [
+        "GET /capi/v3/sim/order/history"
+      ],
+      "sha256": "87bf3eeba46035c08fc52b8085ab7bd3fea0b95bb024d5afeda545fd12f9953c"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/demo/PlaceOrder",
+      "path": "contract/demo/PlaceOrder.md",
+      "title": "下单 Demo (TRADE)",
+      "endpoints": [
+        "POST /capi/v3/sim/order"
+      ],
+      "sha256": "9f108467e3d4b3b889bde32d076b4acb0ee466f5eda1619932313a7069ba674e"
+    },
+    {
+      "url": "https://www.weex.com/api-doc/zh-CN/contract/intro",
+      "path": "contract/intro.md",
+      "title": "概述",
+      "endpoints": [],
+      "sha256": "8cfa6045f3ae437f156df8497ad8452a23e864bafd75e796e202ddcb661bdae2"
+    }
+  ]
+}

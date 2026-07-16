@@ -1,0 +1,4 @@
+interface:
+  display_name: "WEEX API Development"
+  short_description: "Build and verify WEEX V3 contract integrations"
+  default_prompt: "Use $weex-api-development to implement or review a WEEX contract API change."
