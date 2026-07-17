@@ -1,0 +1,723 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+
+import pytest
+
+from weex_cli.adaptive_executor import TargetRequest, VenueOrder, execute_adaptive_maker_target
+from weex_cli.adaptive_maker import (
+    AdaptiveMakerPolicy,
+    MakerPolicyConfig,
+    MarketSnapshot,
+    QuoteDecision,
+    Side,
+    WorkingQuote,
+)
+from weex_cli.errors import ValidationError
+from weex_cli.maker_benchmark import BenchmarkConfig, run_benchmark, run_trial
+from weex_cli.maker_simulator import SimulatedMakerVenue, SimulationConfig
+
+
+def snapshot(*, timestamp_ms: int = 1000, bid: float = 100, ask: float = 100.2) -> MarketSnapshot:
+    return MarketSnapshot(
+        timestamp_ms=timestamp_ms,
+        bid=bid,
+        ask=ask,
+        bid_size=0.02,
+        ask_size=0.02,
+        buy_flow_per_sec=0.04,
+        sell_flow_per_sec=0.04,
+        volatility_ticks=1.0,
+        tick_size=0.1,
+    )
+
+
+def test_policy_quotes_never_cross_the_book() -> None:
+    policy = AdaptiveMakerPolicy(MakerPolicyConfig())
+    market = snapshot()
+
+    buy = policy.decide(market, "buy", 0.01, 0)
+    sell = policy.decide(market, "sell", 0.01, 0)
+
+    assert buy.action == "quote" and buy.price is not None and buy.price < market.ask
+    assert sell.action == "quote" and sell.price is not None and sell.price > market.bid
+
+
+def test_passive_guard_quotes_one_tick_behind_bbo() -> None:
+    policy = AdaptiveMakerPolicy(MakerPolicyConfig(passive_guard_ticks=1))
+    market = snapshot()
+
+    buy = policy.decide(market, "buy", 0.01, 0)
+    sell = policy.decide(market, "sell", 0.01, 0)
+
+    assert buy.price == pytest.approx(market.bid - market.tick_size)
+    assert sell.price == pytest.approx(market.ask + market.tick_size)
+
+
+def test_dynamic_guard_scales_with_volatility_and_respects_cap() -> None:
+    policy = AdaptiveMakerPolicy(
+        MakerPolicyConfig(
+            passive_guard_ticks=5,
+            max_passive_guard_ticks=20,
+            volatility_guard_multiplier=2,
+        )
+    )
+    market = replace(snapshot(), volatility_ticks=8.2)
+
+    buy = policy.decide(market, "buy", 0.01, 0)
+    sell = policy.decide(market, "sell", 0.01, 0)
+
+    assert buy.price == pytest.approx(market.bid - 17 * market.tick_size)
+    assert sell.price == pytest.approx(market.ask + 17 * market.tick_size)
+    capped = policy.decide(replace(market, volatility_ticks=100), "sell", 0.01, 0)
+    assert capped.price == pytest.approx(market.ask + 20 * market.tick_size)
+
+
+def test_guard_tapers_toward_bbo_as_deadline_approaches() -> None:
+    policy = AdaptiveMakerPolicy(
+        MakerPolicyConfig(
+            passive_guard_ticks=5,
+            urgent_guard_ticks=2,
+            max_passive_guard_ticks=20,
+            volatility_guard_multiplier=2,
+        )
+    )
+    market = replace(snapshot(), volatility_ticks=1)
+
+    early = policy.decide(market, "sell", 0.01, 0)
+    urgent = policy.decide(market, "sell", 0.01, 1)
+
+    assert early.price == pytest.approx(market.ask + 5 * market.tick_size)
+    assert urgent.price == pytest.approx(market.ask + 2 * market.tick_size)
+
+
+def test_invalid_nonfinite_inputs_are_rejected() -> None:
+    with pytest.raises(ValidationError):
+        snapshot().__class__(
+            timestamp_ms=0,
+            bid=100,
+            ask=101,
+            bid_size=1,
+            ask_size=1,
+            buy_flow_per_sec=1,
+            sell_flow_per_sec=1,
+            volatility_ticks=float("nan"),
+            tick_size=0.1,
+        )
+    with pytest.raises(ValidationError):
+        TargetRequest("buy", float("nan"))
+    with pytest.raises(ValidationError):
+        TargetRequest("buy", 0.01, max_observation_errors=0)
+    with pytest.raises(ValidationError):
+        TargetRequest("buy", 0.01, max_cancel_verification_attempts=0)
+
+
+def test_simulator_rejects_marketable_post_only_order() -> None:
+    venue = fast_venue()
+    market = venue.snapshot()
+    order = venue.submit_post_only("buy", 0.01, market.ask, "would-cross")
+    assert order.status == "rejected"
+    assert order.filled_quantity == 0
+    assert venue.position_quantity() == 0
+
+
+def test_policy_cancels_stale_quote_but_holds_competitive_queue() -> None:
+    policy = AdaptiveMakerPolicy(
+        MakerPolicyConfig(min_rest_ms=100, max_rest_ms=1500, stale_ticks=1, adverse_threshold=1)
+    )
+    competitive = WorkingQuote("buy", 100, 0, 0.001, 0.005)
+    stale = WorkingQuote("buy", 99.8, 0, 0.001, 0.005)
+
+    assert policy.decide(snapshot(), "buy", 0.005, 0.5, competitive).action == "hold"
+    decision = policy.decide(snapshot(), "buy", 0.005, 0.5, stale)
+    assert decision.action == "cancel"
+    assert decision.reason == "stale_price"
+
+
+@dataclass
+class CancelOncePolicy:
+    config: MakerPolicyConfig = MakerPolicyConfig(min_rest_ms=100, max_rest_ms=10_000)
+    canceled: bool = False
+
+    def decide(
+        self,
+        market: MarketSnapshot,
+        side: Side,
+        remaining_quantity: float,
+        urgency: float,
+        working: WorkingQuote | None = None,
+    ) -> QuoteDecision:
+        if working is None:
+            price = market.bid if side == "buy" else market.ask
+            return QuoteDecision("quote", price, 1, 0, 0, "test_quote")
+        if not self.canceled:
+            self.canceled = True
+            return QuoteDecision("cancel", None, 0, 0, 0, "test_partial_cancel")
+        return QuoteDecision("hold", working.price, 1, 0, 0, "test_hold")
+
+
+@dataclass
+class ImmediateCancelPolicy:
+    config: MakerPolicyConfig = MakerPolicyConfig(min_rest_ms=100, max_rest_ms=10_000)
+
+    def decide(
+        self,
+        market: MarketSnapshot,
+        side: Side,
+        remaining_quantity: float,
+        urgency: float,
+        working: WorkingQuote | None = None,
+    ) -> QuoteDecision:
+        if working is None:
+            price = market.bid if side == "buy" else market.ask
+            return QuoteDecision("quote", price, 1, 0, 0, "test_quote")
+        return QuoteDecision("cancel", None, 0, 0, 0, "test_cancel")
+
+
+def fast_venue(seed: int = 7, *, fault: str | None = None) -> SimulatedMakerVenue:
+    return SimulatedMakerVenue(
+        seed,
+        SimulationConfig(queue_factor=0.01, base_depth=0.001, base_flow_per_sec=0.05),
+        fault=fault,
+    )
+
+
+def test_partial_fill_is_reconciled_before_cancel_and_target_finishes_exactly() -> None:
+    venue = fast_venue()
+    result = execute_adaptive_maker_target(
+        venue,
+        CancelOncePolicy(),
+        TargetRequest("buy", 0.02, deadline_ms=10_000, poll_interval_ms=100),
+    )
+
+    assert result.status == "completed"
+    assert result.cancels == 1
+    assert result.fill_count >= 2
+    assert result.quote_volume > 0
+    assert abs(result.final_position - 0.02) <= 1e-9
+    assert result.maker_only is True
+
+
+def test_transient_unknown_order_state_recovers_without_resubmission() -> None:
+    result = execute_adaptive_maker_target(
+        fast_venue(fault="unknown"),
+        AdaptiveMakerPolicy(MakerPolicyConfig()),
+        TargetRequest("buy", 0.01),
+    )
+
+    assert result.status == "completed"
+    assert 1 <= result.observation_errors < 12
+    assert result.submissions == 1
+
+
+def test_persistent_unknown_order_state_halts_without_resubmission() -> None:
+    venue = fast_venue()
+    original_fetch = venue.fetch_order
+
+    def unknown_fetch(order_id: str, client_order_id: str):
+        return replace(original_fetch(order_id, client_order_id), status="unknown")
+
+    venue.fetch_order = unknown_fetch  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        AdaptiveMakerPolicy(MakerPolicyConfig()),
+        TargetRequest("buy", 0.01),
+    )
+
+    assert result.status == "uncertain"
+    assert result.reason == "order_observation_unavailable"
+    assert result.submissions == 1
+    assert result.observation_errors == 12
+
+
+def test_transient_observation_error_retries_query_without_resubmission() -> None:
+    venue = fast_venue()
+    original_fetch = venue.fetch_order
+    calls = 0
+
+    def flaky_fetch(order_id: str, client_order_id: str):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValidationError("temporary query failure")
+        return original_fetch(order_id, client_order_id)
+
+    venue.fetch_order = flaky_fetch  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        TargetRequest("buy", 0.01, deadline_ms=30_000),
+    )
+
+    assert result.status == "completed"
+    assert result.observation_errors == 1
+    assert result.submissions == 1
+
+
+def test_successful_reads_reset_consecutive_observation_error_budget() -> None:
+    class IntermittentVenue:
+        def __init__(self) -> None:
+            self._now = 0
+            self.position = 0.0
+            self.order = None
+            self.fetch_calls = 0
+
+        @property
+        def now_ms(self):
+            return self._now
+
+        def position_quantity(self):
+            return self.position
+
+        def wait_for_submission_slot(self):
+            return None
+
+        def snapshot(self):
+            return snapshot(timestamp_ms=self._now)
+
+        def submit_post_only(self, side, quantity, price, client_order_id):
+            self.order = VenueOrder("intermittent-1", client_order_id, side, price, quantity, 0, 0, "new", True, None)
+            return self.order
+
+        def fetch_order(self, order_id, client_order_id):
+            self.fetch_calls += 1
+            if self.fetch_calls in {1, 3, 5}:
+                raise ValidationError("intermittent visibility failure")
+            if self.fetch_calls == 6:
+                self.position = self.order.quantity
+                self.order = replace(
+                    self.order,
+                    filled_quantity=self.order.quantity,
+                    cumulative_quote=self.order.quantity * self.order.price,
+                    status="filled",
+                    maker=True,
+                )
+            return self.order
+
+        def cancel_order(self, order_id, client_order_id):
+            raise AssertionError("intermittent observations must not submit a cancel")
+
+        def advance(self, milliseconds):
+            self._now += milliseconds
+
+    result = execute_adaptive_maker_target(
+        IntermittentVenue(),
+        CancelOncePolicy(canceled=True),
+        TargetRequest("buy", 0.01, deadline_ms=30_000, max_observation_errors=2),
+    )
+
+    assert result.status == "completed"
+    assert result.observation_errors == 3
+    assert result.submissions == 1
+
+
+def test_submission_throttle_wait_happens_before_quote_snapshot() -> None:
+    class DelayedVenue:
+        def __init__(self) -> None:
+            self._now = 0
+            self.position = 0.0
+            self.order = None
+            self.waited = False
+
+        @property
+        def now_ms(self):
+            return self._now
+
+        def position_quantity(self):
+            return self.position
+
+        def wait_for_submission_slot(self):
+            self._now += 10_100
+            self.waited = True
+
+        def snapshot(self):
+            bid = 101.0 if self.waited else 100.0
+            return snapshot(timestamp_ms=self._now, bid=bid, ask=bid + 0.1)
+
+        def submit_post_only(self, side, quantity, price, client_order_id):
+            assert self.waited is True
+            assert price == pytest.approx(101.0)
+            self.position = quantity
+            self.order = VenueOrder(
+                "fresh-1", client_order_id, side, price, quantity, quantity, quantity * price, "filled", True, True
+            )
+            return self.order
+
+        def fetch_order(self, order_id, client_order_id):
+            return self.order
+
+        def cancel_order(self, order_id, client_order_id):
+            raise AssertionError("filled order must not be canceled")
+
+        def advance(self, milliseconds):
+            self._now += milliseconds
+
+    result = execute_adaptive_maker_target(
+        DelayedVenue(),
+        AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        TargetRequest("buy", 0.01, deadline_ms=30_000),
+    )
+
+    assert result.status == "completed"
+    assert result.submissions == 1
+
+
+def test_local_preflight_skip_requotes_without_counting_submission() -> None:
+    class SkipOnceVenue:
+        def __init__(self) -> None:
+            self._now = 0
+            self.position = 0.0
+            self.skipped = False
+            self.order = None
+
+        @property
+        def now_ms(self):
+            return self._now
+
+        def position_quantity(self):
+            return self.position
+
+        def wait_for_submission_slot(self):
+            return None
+
+        def snapshot(self):
+            return snapshot(timestamp_ms=self._now)
+
+        def submit_post_only(self, side, quantity, price, client_order_id):
+            if not self.skipped:
+                self.skipped = True
+                return VenueOrder(
+                    "",
+                    client_order_id,
+                    side,
+                    price,
+                    quantity,
+                    0,
+                    0,
+                    "not_submitted",
+                    True,
+                    None,
+                    cancellation_reason="LOCAL_PRICE_WOULD_TAKE",
+                )
+            self.position = quantity
+            self.order = VenueOrder(
+                "accepted-1",
+                client_order_id,
+                side,
+                price,
+                quantity,
+                quantity,
+                quantity * price,
+                "filled",
+                True,
+                True,
+            )
+            return self.order
+
+        def fetch_order(self, order_id, client_order_id):
+            return self.order
+
+        def cancel_order(self, order_id, client_order_id):
+            raise AssertionError("filled order must not be canceled")
+
+        def advance(self, milliseconds):
+            self._now += milliseconds
+
+    result = execute_adaptive_maker_target(
+        SkipOnceVenue(),
+        AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        TargetRequest("buy", 0.01, deadline_ms=10_000),
+    )
+
+    assert result.status == "completed"
+    assert result.preflight_skips == 1
+    assert result.submissions == 1
+    assert any(event["event"] == "preflight_skip" for event in result.events)
+
+
+def test_deadline_cancel_fill_is_reconciled_as_target_reached() -> None:
+    class FillOnCancelVenue:
+        def __init__(self) -> None:
+            self._now = 0
+            self.position = 0.01
+            self.order = None
+
+        @property
+        def now_ms(self):
+            return self._now
+
+        def position_quantity(self):
+            return self.position
+
+        def wait_for_submission_slot(self):
+            return None
+
+        def snapshot(self):
+            return snapshot(timestamp_ms=self._now)
+
+        def submit_post_only(self, side, quantity, price, client_order_id):
+            self.order = VenueOrder("close-1", client_order_id, side, price, quantity, 0, 0, "new", True, None)
+            return self.order
+
+        def fetch_order(self, order_id, client_order_id):
+            return self.order
+
+        def cancel_order(self, order_id, client_order_id):
+            self.position = 0
+            self.order = replace(
+                self.order,
+                filled_quantity=self.order.quantity,
+                cumulative_quote=self.order.quantity * self.order.price,
+                status="filled",
+                maker=True,
+            )
+            return self.order
+
+        def advance(self, milliseconds):
+            self._now += milliseconds
+
+    result = execute_adaptive_maker_target(
+        FillOnCancelVenue(),
+        AdaptiveMakerPolicy(MakerPolicyConfig(min_rest_ms=2_000, max_rest_ms=10_000, adverse_threshold=1)),
+        TargetRequest("sell", 0, deadline_ms=1_000, poll_interval_ms=100),
+    )
+
+    assert result.status == "completed"
+    assert result.reason == "target_reached"
+    assert result.final_position == 0
+
+
+def test_exchange_could_not_fill_is_terminal_post_only_rejection() -> None:
+    venue = fast_venue()
+    original_fetch = venue.fetch_order
+
+    def rejected_fetch(order_id: str, client_order_id: str):
+        order = original_fetch(order_id, client_order_id)
+        return order.__class__(
+            order.order_id,
+            order.client_order_id,
+            order.side,
+            order.price,
+            order.quantity,
+            0,
+            0,
+            "canceled",
+            True,
+            None,
+            order.queue_ahead,
+            "COULD_NOT_FILL",
+        )
+
+    venue.fetch_order = rejected_fetch  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        TargetRequest("buy", 0.01),
+    )
+
+    assert result.status == "failed"
+    assert result.reason == "post_only_rejected"
+    assert result.submissions == 1
+    assert result.post_only_rejections == 1
+    assert result.venue_cancels == 1
+
+
+def test_taker_fill_is_a_hard_failure() -> None:
+    result = execute_adaptive_maker_target(
+        fast_venue(fault="taker_fill"),
+        AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        TargetRequest("buy", 0.01),
+    )
+    assert result.status == "failed"
+    assert result.reason == "taker_fill_detected"
+    assert result.maker_only is False
+
+
+def test_unconfirmed_cancel_halts_as_uncertain() -> None:
+    result = execute_adaptive_maker_target(
+        fast_venue(fault="unconfirmed_cancel"),
+        ImmediateCancelPolicy(),
+        TargetRequest("buy", 0.05),
+    )
+    assert result.status == "uncertain"
+    assert result.reason == "cancel_not_confirmed"
+    assert result.submissions == 1
+    assert result.cancel_verification_attempts == 5
+
+
+def test_cancel_verification_polls_until_history_reaches_terminal_state() -> None:
+    venue = fast_venue()
+    original_cancel = venue.cancel_order
+    original_fetch = venue.fetch_order
+    cancel_started = False
+    delayed_reads = 0
+
+    def delayed_cancel(order_id: str, client_order_id: str):
+        nonlocal cancel_started
+        canceled = original_cancel(order_id, client_order_id)
+        cancel_started = True
+        return replace(canceled, status="unknown")
+
+    def delayed_fetch(order_id: str, client_order_id: str):
+        nonlocal delayed_reads
+        order = original_fetch(order_id, client_order_id)
+        if cancel_started and delayed_reads < 2:
+            delayed_reads += 1
+            return replace(order, status="unknown")
+        return order
+
+    venue.cancel_order = delayed_cancel  # type: ignore[method-assign]
+    venue.fetch_order = delayed_fetch  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        CancelOncePolicy(),
+        TargetRequest("buy", 0.02, deadline_ms=10_000, poll_interval_ms=100),
+    )
+
+    assert result.status == "completed"
+    assert result.cancels == 1
+    assert result.cancel_verification_attempts >= 3
+    assert result.cancel_verification_errors == 0
+    assert any(event["event"] == "cancel_verification" and event["attempt"] == 3 for event in result.events)
+
+
+def test_cancel_request_error_is_reconciled_without_second_cancel_submission() -> None:
+    venue = fast_venue()
+    original_cancel = venue.cancel_order
+    cancel_calls = 0
+
+    def accepted_then_disconnected(order_id: str, client_order_id: str):
+        nonlocal cancel_calls
+        cancel_calls += 1
+        original_cancel(order_id, client_order_id)
+        raise ValidationError("connection lost after cancel acceptance")
+
+    venue.cancel_order = accepted_then_disconnected  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        CancelOncePolicy(),
+        TargetRequest("buy", 0.02, deadline_ms=10_000, poll_interval_ms=100),
+    )
+
+    assert result.status == "completed"
+    assert cancel_calls == 1
+    assert result.cancel_verification_errors == 1
+    assert any(event["event"] == "cancel_request_error" for event in result.events)
+
+
+def test_absent_order_with_unchanged_position_is_safely_reconciled() -> None:
+    venue = fast_venue()
+    original_cancel = venue.cancel_order
+    original_fetch = venue.fetch_order
+    canceled_order_id = ""
+
+    def absent_cancel(order_id: str, client_order_id: str):
+        nonlocal canceled_order_id
+        canceled = original_cancel(order_id, client_order_id)
+        canceled_order_id = order_id
+        return replace(canceled, status="unknown", cancellation_reason="OPEN_ORDER_ABSENT")
+
+    def lagging_fetch(order_id: str, client_order_id: str):
+        order = original_fetch(order_id, client_order_id)
+        if order_id == canceled_order_id:
+            return replace(order, status="unknown", cancellation_reason="OPEN_ORDER_ABSENT")
+        return order
+
+    venue.cancel_order = absent_cancel  # type: ignore[method-assign]
+    venue.fetch_order = lagging_fetch  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        CancelOncePolicy(),
+        TargetRequest("buy", 0.02, deadline_ms=30_000, poll_interval_ms=100),
+    )
+
+    assert result.status == "completed"
+    assert result.cancel_verification_attempts >= 1
+    assert any(event["event"] == "cancel_reconciled_absent" for event in result.events)
+
+
+def test_absent_order_is_not_reconciled_when_position_changed() -> None:
+    venue = fast_venue(fault="unconfirmed_cancel")
+    original_cancel = venue.cancel_order
+
+    def changed_position_cancel(order_id: str, client_order_id: str):
+        canceled = original_cancel(order_id, client_order_id)
+        venue._position += 0.001
+        return replace(canceled, status="unknown", cancellation_reason="OPEN_ORDER_ABSENT")
+
+    venue.cancel_order = changed_position_cancel  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        ImmediateCancelPolicy(),
+        TargetRequest("buy", 0.05),
+    )
+
+    assert result.status == "uncertain"
+    assert result.reason == "cancel_not_confirmed"
+    assert not any(event["event"] == "cancel_reconciled_absent" for event in result.events)
+
+
+def test_absent_cancel_response_is_not_enough_when_order_still_reads_active() -> None:
+    venue = fast_venue(fault="unconfirmed_cancel")
+    original_cancel = venue.cancel_order
+
+    def stale_absent_response(order_id: str, client_order_id: str):
+        order = original_cancel(order_id, client_order_id)
+        return replace(order, status="unknown", cancellation_reason="OPEN_ORDER_ABSENT")
+
+    venue.cancel_order = stale_absent_response  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        ImmediateCancelPolicy(),
+        TargetRequest("buy", 0.05),
+    )
+
+    assert result.status == "uncertain"
+    assert result.reason == "cancel_not_confirmed"
+    assert not any(event["event"] == "cancel_reconciled_absent" for event in result.events)
+
+
+def test_fill_observed_at_deadline_is_still_completed() -> None:
+    venue = fast_venue()
+    original_fetch = venue.fetch_order
+
+    def fetch_after_deadline(order_id: str, client_order_id: str):
+        order = original_fetch(order_id, client_order_id)
+        if order.status == "filled":
+            venue.advance(10_000)
+        return order
+
+    venue.fetch_order = fetch_after_deadline  # type: ignore[method-assign]
+    result = execute_adaptive_maker_target(
+        venue,
+        AdaptiveMakerPolicy(MakerPolicyConfig(max_rest_ms=20_000, adverse_threshold=1)),
+        TargetRequest("buy", 0.001, deadline_ms=10_000, poll_interval_ms=100),
+    )
+
+    assert result.status == "completed"
+    assert result.reason == "target_reached"
+
+
+def test_benchmark_reaches_10000_with_five_cycles_and_beats_fixed_baseline() -> None:
+    report = run_benchmark(BenchmarkConfig(train_trials=5, validation_trials=5))
+
+    assert report["status"] == "passed"
+    assert all(report["acceptance"].values())
+    assert report["adaptive"]["minimum_volume"] >= 10_000
+    assert report["adaptive"]["minimum_maker_fills"] >= 10
+    assert report["adaptive"]["maximum_overfill"] <= 1e-9
+    assert len(report["validation_trials"]) == 5
+    assert all(trial["cycles_completed"] >= 5 for trial in report["validation_trials"])
+    assert all(abs(trial["final_position"]) <= 1e-9 for trial in report["validation_trials"])
+
+
+def test_trial_accepts_custom_market_scenario() -> None:
+    result = run_trial(
+        lambda: AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        BenchmarkConfig(train_trials=5, validation_trials=5, per_leg_deadline_ms=120_000),
+        123,
+        simulation_config=SimulationConfig(base_depth=0.006, base_flow_per_sec=0.02),
+    )
+
+    assert result.maker_only is True
+    assert result.post_only_rejections == 0

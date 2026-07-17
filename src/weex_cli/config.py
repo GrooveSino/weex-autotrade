@@ -26,8 +26,19 @@ class Credentials:
 
 
 @dataclass(frozen=True)
+class WebCredentials:
+    cc_token: str
+    terminal_code: str
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.cc_token and self.terminal_code)
+
+
+@dataclass(frozen=True)
 class Settings:
     credentials: Credentials
+    web_credentials: WebCredentials = WebCredentials(cc_token="", terminal_code="")
     default_mode: Mode = "demo"
     live_trading_enabled: bool = False
     timeout_ms: int = 15_000
@@ -64,8 +75,13 @@ class Settings:
             api_secret=(values.get("WEEX_API_SECRET") or values.get("WEEX_SECRET_KEY") or "").strip(),
             passphrase=(values.get("WEEX_API_PASSPHRASE") or values.get("WEEX_PASSPHRASE") or "").strip(),
         )
+        web_credentials = WebCredentials(
+            cc_token=values.get("WEEX_WEB_CC_TOKEN", "").strip(),
+            terminal_code=values.get("WEEX_WEB_TERMINAL_CODE", "").strip(),
+        )
         return cls(
             credentials=credentials,
+            web_credentials=web_credentials,
             default_mode=mode,
             live_trading_enabled=_as_bool(values.get("WEEX_LIVE_TRADING_ENABLED", "false")),
             timeout_ms=timeout_ms,
@@ -79,6 +95,13 @@ class Settings:
                 "Missing WEEX credentials. Set WEEX_API_KEY, WEEX_API_SECRET, and WEEX_API_PASSPHRASE in .env."
             )
         return self.credentials
+
+    def require_web_credentials(self) -> WebCredentials:
+        if not self.web_credentials.configured:
+            raise ConfigurationError(
+                "Missing WEEX Demo Web credentials. Set WEEX_WEB_CC_TOKEN and WEEX_WEB_TERMINAL_CODE in .env."
+            )
+        return self.web_credentials
 
 
 def normalize_mode(value: str | None) -> Mode:

@@ -18,6 +18,7 @@ def show_config(ctx: typer.Context, json_output: bool = typer.Option(False, "--j
             "timeout_ms": settings.timeout_ms,
             "enable_rate_limit": settings.enable_rate_limit,
             "credentials_configured": settings.credentials.configured,
+            "web_credentials_configured": settings.web_credentials.configured,
             "env_file": settings.env_file,
         },
         json_output=json_output,

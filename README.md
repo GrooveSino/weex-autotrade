@@ -35,11 +35,55 @@ chmod +x ./weex
 WEEX_API_KEY=
 WEEX_API_SECRET=
 WEEX_API_PASSPHRASE=
+WEEX_WEB_CC_TOKEN=
+WEEX_WEB_TERMINAL_CODE=
 WEEX_DEFAULT_MODE=demo
 WEEX_LIVE_TRADING_ENABLED=false
 ```
 
 API Key 建议绑定固定出口 IP。新 Key 初期只开启所需的合约权限，不要开启提现权限。CLI 只会从当前目录查找到最近的 Git/`pyproject.toml` 项目根，绝不会越过项目根读取父级或其他项目的 `.env`；也可以用 `--env-file` 显式指定来源。
+
+## 日常使用
+
+主界面只保留日常需要的状态、Maker 和成交量入口：
+
+```bash
+# 一屏确认当前环境、仓位、活动订单和凭据状态
+./weex status
+
+# 最近 24 小时的交易量；不需要手写时间戳
+./weex activity
+./weex activity --hours 1 --details
+
+# 使用已实测的默认值生成 dry-run：BTC、10000 SUSDT、10 腿、最大仓位 1200、单腿 120 秒
+./weex maker run
+
+# 默认连续运行 3 轮
+./weex maker soak
+
+# 自动读取当前 BTC 多仓数量并生成纯 Maker 平仓计划
+./weex maker flatten
+```
+
+所有 Maker 命令默认只显示简洁计划和精确确认短语。执行时原样传回确认短语：
+
+```bash
+./weex maker run \
+  --execute \
+  --confirm 'EXECUTE WEEX DEMO MAKER VOLUME BTC TARGET_10000 FILLS_10 MAX_POSITION_1200 TIMEOUT_120'
+```
+
+需要调整时只覆盖对应参数，例如 `--target 20000`、`--rounds 5` 或 `--max-position 2000`。默认输出面向人阅读；自动化脚本统一加 `--json`。
+
+底层行情、账户、单笔订单、风险单和诊断命令统一放在 `advanced`：
+
+```bash
+./weex advanced --help
+./weex advanced account positions --mode demo
+./weex advanced orders open --mode demo
+```
+
+旧的 `weex account ...`、`weex orders ...`、`weex volume ...` 路径继续兼容，但不再挤占主帮助界面。
 
 ## 快速检查
 
@@ -65,6 +109,7 @@ API Key 建议绑定固定出口 IP。新 Key 初期只开启所需的合约权�
 ./weex account balance --mode demo
 ./weex account positions --mode demo
 ./weex orders history --mode demo --symbol BTC
+./weex orders open --mode demo
 
 ./weex account balance --mode live
 ./weex account positions --mode live --symbol BTC
@@ -114,7 +159,60 @@ Demo 使用 WEEX 的模拟资产和交易对，例如 `SUSDT`、`BTCSUSDT`。CLI
   --confirm 'EXECUTE WEEX DEMO ORDER BTCSUSDT BUY LONG LIMIT 0.001 60000 POST_ONLY'
 ```
 
-默认会阻止在已有仓位的交易对上继续开仓；实盘还会同时预检普通挂单。WEEX Demo API 没有普通挂单查询接口，因此 Demo 只能预检仓位，执行前仍需结合历史委托人工确认。只有明确检查过账户状态后才使用 `--allow-existing`。平仓单使用 `--reduce-only`。
+默认会阻止在已有仓位的交易对上继续开仓；实盘还会同时预检普通挂单。WEEX 官方 V3 Demo API 没有普通挂单查询接口；配置 Web Demo 凭据后，可以用 `orders open --mode demo` 通过未公开的 Web 接口补充检查。只有明确检查过账户状态后才使用 `--allow-existing`。平仓单使用 `--reduce-only`。
+
+## Demo Maker 交易量批处理
+
+在调用交易所前，可先运行完全离线、无需凭据的自适应 Maker 基准。它会在训练种子上搜索参数，随后用独立种子验证至少 5 次完整开平、至少 10 笔 Maker 成交、累计 10,000 USDT、最终空仓，并与固定 5 秒撤单策略比较平均/P50/P95 完成时间：
+
+```bash
+./weex volume benchmark \
+  --target 10000 \
+  --cycles 5 \
+  --train-trials 15 \
+  --validation-trials 15 \
+  --json
+```
+
+该命令只运行本地合成盘口和撮合，不读取 API Key、不发网络请求，也不能证明实盘或 Demo 的成交速度。只有 `acceptance` 中全部硬门槛为 `true` 时，结果状态才是 `passed`。
+
+批处理把仓位预检、盘口读取、精度处理、下单和成交轮询放在同一进程中，减少人工复制价格和重复启动 CLI 造成的报价陈旧。它只支持 Demo，并按“开多 -> 平多”交替执行，要求偶数笔成交并以空仓开始和结束。
+
+实际执行使用自适应 Maker 策略：V3 API 负责下单、历史和仓位，未公开的 Demo Web API 负责活动挂单查询与撤单确认。程序强制保持单一活动订单，遵守 10.1 秒 Demo 下单间隔；报价过期时只有在撤单已验证后才允许生成新 client order ID。清理中断批次留下的单一多仓时，先生成独立计划：
+
+```bash
+./weex volume flatten BTC \
+  --quantity 0.016 \
+  --max-position 1200 \
+  --timeout 120 \
+  --json
+```
+
+先生成计划：
+
+```bash
+./weex volume maker BTC \
+  --target 100000 \
+  --fills 10 \
+  --max-position 12000 \
+  --timeout 120 \
+  --json
+```
+
+确认计划后执行：
+
+```bash
+./weex volume maker BTC \
+  --target 100000 \
+  --fills 10 \
+  --max-position 12000 \
+  --timeout 120 \
+  --execute \
+  --confirm 'EXECUTE WEEX DEMO MAKER VOLUME BTC TARGET_100000 FILLS_10 MAX_POSITION_12000 TIMEOUT_120' \
+  --json
+```
+
+每笔订单都使用新的 client order ID 和 `POST_ONLY`，只有历史委托确认全额成交且仓位与预期一致后才会进入下一笔。提交结果不确定、部分成交、拒单、取消、仓位不一致或单笔超时都会终止批次；不会自动重提、追价或降级为 Taker。配置 Web Demo 凭据后可通过未公开接口查询并撤销普通挂单；撤单提交后必须回查验证，验证失败时状态为 `uncertain`，不能直接重提。
 
 ## 实盘开关
 
@@ -144,11 +242,17 @@ WEEX_LIVE_TRADING_ENABLED=true
 ./weex orders cancel BTC 123456789
 ./weex orders cancel-all --symbol BTC
 ./weex orders cancel-all --symbol BTC --trigger
+
+# Demo 普通挂单：先查询精确 order ID，再生成撤单计划
+./weex orders open --mode demo
+./weex orders cancel BTC 123456789 --mode demo
 ```
 
 `account close BTC` 会平掉该交易对的多空仓位；增加 `--position-side LONG` 或 `SHORT` 时，CLI 会先查询对应仓位并使用官方 `positionId` 精确平仓，找不到唯一仓位时拒绝执行。
 
-Demo API 目前只公开余额、下单、仓位和历史委托，没有 Demo 撤单、杠杆或独立条件单接口。这些管理命令仅支持 `live`。
+WEEX 官方 V3 Demo API 目前只公开余额、下单、仓位和历史委托，没有 Demo 撤单、杠杆或独立条件单接口。本项目的 Demo 普通挂单查询、单笔撤单和全撤使用 `http-gateway2.weex.com` 的未公开 Web API，只允许 Demo，且仍要求 `--execute` 和精确确认短语。该接口不受官方兼容性承诺，可能随前端更新变化；失败时不会回退到实盘接口。Demo `cancel-all` 不接受交易对过滤，以免错误映射 `contractId` 后误撤其他订单；需要按交易对处理时先查询并逐个撤销精确 order ID。
+
+Web Demo 接口使用网页登录会话，不使用 V3 API Key 签名。只在当前项目 `.env` 中手动配置自己的 `WEEX_WEB_CC_TOKEN` 和 `WEEX_WEB_TERMINAL_CODE`；`config show` 只显示 `web_credentials_configured`，不会输出值。不要从其他项目、全局配置或其他账号读取这些值。
 
 ## 止盈止损
 

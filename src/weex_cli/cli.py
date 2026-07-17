@@ -8,22 +8,43 @@ import typer
 
 from weex_cli import __version__
 from weex_cli.cli_support import AppContext, gateway_for, invoke, selected_mode, settings_for
-from weex_cli.commands import account, config_cmd, market, order, orders, risk, trades
+from weex_cli.commands import account, config_cmd, home, maker_cli, market, order, orders, risk, trades, volume
 from weex_cli.output import emit
 
 app = typer.Typer(
     name="weex",
-    help="Safety-first WEEX contract CLI. Commands are read-only or dry-run unless explicitly executed.",
+    help="Operate WEEX safely: inspect state, run Demo Maker workflows, and review activity.",
     no_args_is_help=True,
     invoke_without_command=True,
+    rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
+    pretty_exceptions_show_locals=False,
 )
-app.add_typer(market.app, name="market")
-app.add_typer(account.app, name="account")
-app.add_typer(orders.app, name="orders")
-app.add_typer(order.app, name="order")
-app.add_typer(risk.app, name="risk")
-app.add_typer(trades.app, name="trades")
-app.add_typer(config_cmd.app, name="config")
+
+advanced = typer.Typer(help="Low-level exchange and maintenance commands.", no_args_is_help=True)
+advanced.add_typer(market.app, name="market")
+advanced.add_typer(account.app, name="account")
+advanced.add_typer(orders.app, name="orders")
+advanced.add_typer(order.app, name="order")
+advanced.add_typer(risk.app, name="risk")
+advanced.add_typer(trades.app, name="trades")
+advanced.add_typer(volume.app, name="volume")
+advanced.add_typer(config_cmd.app, name="config")
+
+app.command("status", rich_help_panel="Daily workflow")(home.status)
+app.add_typer(maker_cli.app, name="maker", rich_help_panel="Daily workflow")
+app.command("activity", rich_help_panel="Daily workflow")(home.activity)
+app.add_typer(advanced, name="advanced", rich_help_panel="Maintenance")
+
+# Preserve existing automation paths without crowding the human-first help screen.
+app.add_typer(market.app, name="market", hidden=True)
+app.add_typer(account.app, name="account", hidden=True)
+app.add_typer(orders.app, name="orders", hidden=True)
+app.add_typer(order.app, name="order", hidden=True)
+app.add_typer(risk.app, name="risk", hidden=True)
+app.add_typer(trades.app, name="trades", hidden=True)
+app.add_typer(volume.app, name="volume", hidden=True)
+app.add_typer(config_cmd.app, name="config", hidden=True)
 
 
 @app.callback()
@@ -39,7 +60,7 @@ def main(
     ctx.obj = AppContext(env_file=env_file)
 
 
-@app.command("doctor")
+@app.command("doctor", rich_help_panel="Maintenance")
 def doctor(
     ctx: typer.Context,
     symbol: str = typer.Option("BTC"),

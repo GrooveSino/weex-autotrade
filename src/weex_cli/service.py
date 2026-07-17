@@ -35,7 +35,15 @@ class TradingService:
                 f"client_order_id={intent.client_order_id}; inspect orders before retrying: {redact_text(exc)}"
             ) from exc
 
-        verification = self.verify_order(intent)
+        try:
+            verification = self.verify_order(intent)
+        except (ccxt.NetworkError, ccxt.RequestTimeout) as exc:
+            verification = {
+                "order_found": None,
+                "order": None,
+                "positions": None,
+                "warning": f"submission accepted but immediate verification was unavailable: {redact_text(exc)}",
+            }
         return {
             "status": "submitted",
             "client_order_id": intent.client_order_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 
@@ -20,6 +21,10 @@ class FakeExchange:
     def fetch_order_book(self, symbol: str, limit: int):
         self.calls.append(("fetch_order_book", symbol, limit))
         return {"symbol": symbol, "bids": [[99, 1]], "asks": [[101, 1]]}
+
+    def amount_to_precision(self, symbol: str, amount: str):
+        self.calls.append(("amount_to_precision", symbol, amount))
+        return str(Decimal(amount).quantize(Decimal("0.0001")))
 
     def fetch_balance(self, params: dict[str, Any]):
         self.calls.append(("fetch_balance", params))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from tests.fakes import FakeExchange
@@ -19,9 +21,11 @@ def test_public_market_calls_use_ccxt_swap_symbol(gateway) -> None:
     target, fake = gateway
     assert target.ticker("BTC")["last"] == 100.0
     target.order_book("BTC", 5)
+    assert target.amount_to_precision("BTC", Decimal("1.23456")) == Decimal("1.2346")
     assert fake.calls == [
         ("fetch_ticker", "BTC/USDT:USDT"),
         ("fetch_order_book", "BTC/USDT:USDT", 5),
+        ("amount_to_precision", "BTC/USDT:USDT", "1.23456"),
     ]
 
 
@@ -32,19 +36,27 @@ def test_demo_routes_and_symbol_filter(gateway) -> None:
         {"symbol": "BTCSUSDT", "size": "1"},
         {"symbol": "ETHSUSDT", "size": "2"},
     ]
+    fake.responses[("GET", "capi/v3/sim/order/history")] = [
+        {"symbol": "BTCSUSDT", "orderId": "btc-demo"},
+        {"symbol": "BTCUSDT", "orderId": "btc-live-id"},
+        {"symbol": "ETHSUSDT", "orderId": "eth-demo"},
+    ]
     assert target.balance("demo") == [{"asset": "SUSDT"}]
     assert target.positions("demo", "BTC") == [{"symbol": "BTCSUSDT", "size": "1"}]
-    target.order_history("demo", "BTC", 20, 1, 2)
-    assert fake.calls[-1][-1] == {"limit": 20, "symbol": "BTCUSDT", "startTime": 1, "endTime": 2}
+    assert target.order_history("demo", "BTC", 20, 1, 2) == [
+        {"symbol": "BTCSUSDT", "orderId": "btc-demo"},
+        {"symbol": "BTCUSDT", "orderId": "btc-live-id"},
+    ]
+    assert fake.calls[-1][-1] == {"limit": 20, "startTime": 1, "endTime": 2}
 
 
 def test_live_account_and_order_management(gateway) -> None:
     target, fake = gateway
     assert target.balance("live") == {"USDT": {"free": 10}}
     assert target.positions("live", "BTC") == []
-    target.open_orders("BTC", trigger=True)
-    target.cancel_order("BTC", "1", trigger=True)
-    target.cancel_all_orders("BTC")
+    target.open_orders("BTC", trigger=True, mode="live")
+    target.cancel_order("BTC", "1", trigger=True, mode="live")
+    target.cancel_all_orders("BTC", mode="live")
     result = target.configure_position("BTC", 10, "isolated")
     assert result["leverage"] == {"leverage": 10}
     fake.position_rows = [{"id": "long-position", "side": "long", "contracts": 1}]
@@ -121,7 +133,7 @@ def test_trade_rows_use_live_symbols_and_mode_specific_endpoints(gateway) -> Non
         "capi/v3/sim/order/history",
         "contractPrivate",
         "GET",
-        {"startTime": 1, "endTime": 2, "limit": 1000, "symbol": "BTCUSDT", "page": 3},
+        {"startTime": 1, "endTime": 2, "limit": 1000, "page": 3},
     )
     target.trade_rows("live", "BTC", start_time=1, end_time=2, limit=100)
     assert fake.calls[-1] == (

@@ -38,7 +38,7 @@ def test_demo_report_counts_opening_and_closing_volume() -> None:
             },
             {
                 "orderId": "close-1",
-                "symbol": "BTCSUSDT",
+                "symbol": "BTCUSDT",
                 "side": "SELL",
                 "positionSide": "LONG",
                 "status": "FILLED",
@@ -47,6 +47,18 @@ def test_demo_report_counts_opening_and_closing_volume() -> None:
                 "cumQuote": "11",
                 "timeInForce": "POST_ONLY",
                 "updateTime": 2000,
+            },
+            {
+                "orderId": "other-symbol",
+                "symbol": "ETHSUSDT",
+                "side": "BUY",
+                "positionSide": "LONG",
+                "status": "FILLED",
+                "executedQty": "1",
+                "avgPrice": "100",
+                "cumQuote": "100",
+                "timeInForce": "POST_ONLY",
+                "updateTime": 2250,
             },
             {"orderId": "unfilled", "executedQty": "0", "updateTime": 2500},
         ]
@@ -73,7 +85,7 @@ def test_demo_report_counts_opening_and_closing_volume() -> None:
         "maker_count": 2,
         "taker_count": 0,
         "unknown_liquidity_count": 0,
-        "base_quantity_by_symbol": {"BTCSUSDT": "0.2"},
+        "base_quantity_by_symbol": {"BTCSUSDT": "0.1", "BTCUSDT": "0.1"},
         "commission_by_asset": {},
         "realized_pnl": "0",
     }

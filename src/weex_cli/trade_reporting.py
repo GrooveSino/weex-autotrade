@@ -10,6 +10,7 @@ from weex_cli.config import Mode, normalize_mode
 from weex_cli.errors import ValidationError
 from weex_cli.gateway import WeexGateway
 from weex_cli.models import decimal_text
+from weex_cli.symbols import demo_symbol_id, live_symbol_id
 
 DAY_MS = 24 * 60 * 60 * 1000
 LIVE_WINDOW_MS = 7 * DAY_MS
@@ -47,6 +48,9 @@ class TradeReportService:
             granularity = "fill"
 
         trades = _normalize_rows(raw_rows, selected, start_time, end_time)
+        if selected == "demo" and symbol:
+            accepted_symbols = {demo_symbol_id(symbol), live_symbol_id(symbol)}
+            trades = [trade for trade in trades if trade["symbol"] in accepted_symbols]
         return {
             "mode": selected,
             "symbol": symbol.upper() if symbol else None,

@@ -58,11 +58,16 @@ def test_redaction_removes_secrets_from_nested_payloads_and_text() -> None:
             "apiKey": "abc",
             "WEEX_API_KEY": "def",
             "nested": {"access_passphrase": "xyz", "databasePassword": "pw"},
+            "U-TOKEN": "web-token",
+            "terminalCode": "fingerprint",
         }
     ) == {
         "apiKey": "[REDACTED]",
         "WEEX_API_KEY": "[REDACTED]",
         "nested": {"access_passphrase": "[REDACTED]", "databasePassword": "[REDACTED]"},
+        "U-TOKEN": "[REDACTED]",
+        "terminalCode": "[REDACTED]",
     }
     assert "secret=[REDACTED]" in redact_text("request secret=hello failed")
     assert "visible-secret" not in redact_text("WEEX_API_SECRET=visible-secret")
+    assert "web-token" not in redact_text("cc_token=web-token")

@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from weex_cli.cli import app
-from weex_cli.commands import account, market, order, orders, risk, trades
+from weex_cli.commands import account, home, maker_cli, market, order, orders, risk, trades
 from weex_cli.config import Settings
 
 runner = CliRunner()
@@ -20,15 +20,89 @@ def invoke_json(args: list[str], env: dict[str, str] | None = None) -> dict:
 
 def test_version_and_help() -> None:
     assert runner.invoke(app, ["--version"]).output.strip() == "0.1.0"
-    assert "Safety-first WEEX contract CLI" in runner.invoke(app, ["--help"]).output
+    output = runner.invoke(app, ["--help"]).output
+    assert "Daily workflow" in output
+    assert all(command in output for command in ("status", "maker", "activity", "advanced"))
+
+
+def test_human_maker_help_uses_practical_defaults() -> None:
+    output = runner.invoke(app, ["maker", "run", "--help"]).output
+
+    assert "default: BTC" in output
+    assert "default: 10000" in output
+    assert "default: 10" in output
+    assert "default: 1200" in output
+    assert "default: 120" in output
+
+
+def test_human_maker_dry_runs_have_exact_confirmations_and_json_compatibility() -> None:
+    run = invoke_json(["maker", "run"])
+    soak = invoke_json(["maker", "soak"])
+
+    assert run["confirm"] == "EXECUTE WEEX DEMO MAKER VOLUME BTC TARGET_10000 FILLS_10 MAX_POSITION_1200 TIMEOUT_120"
+    assert soak["confirm"] == (
+        "EXECUTE WEEX DEMO MAKER SOAK BTC TARGET_10000 FILLS_10 ROUNDS_3 MAX_POSITION_1200 TIMEOUT_120"
+    )
+    human = runner.invoke(app, ["maker", "run"])
+    assert human.exit_code == 0
+    assert "Dry run · Maker run" in human.output
+    assert "Exact confirmation" in human.output
+
+
+def test_human_flatten_detects_position_and_handles_already_flat(monkeypatch) -> None:
+    fake = CliGateway()
+    monkeypatch.setattr(fake, "positions", lambda mode, symbol=None: [{"side": "LONG", "size": "0.0159"}])
+    monkeypatch.setattr(maker_cli, "gateway_for", lambda ctx: fake)
+
+    payload = invoke_json(["maker", "flatten"])
+
+    assert payload["quantity"] == "0.0159"
+    assert payload["confirm"] == "EXECUTE WEEX DEMO MAKER FLATTEN BTC QUANTITY_0.0159 MAX_POSITION_1200 TIMEOUT_120"
+
+    monkeypatch.setattr(fake, "positions", lambda mode, symbol=None: [])
+    flat = invoke_json(["maker", "flatten"])
+    assert flat["status"] == "ok"
+    assert "already flat" in flat["message"]
+
+
+def test_status_and_activity_are_one_step_read_only_views(monkeypatch) -> None:
+    fake = CliGateway()
+    monkeypatch.setattr(home, "gateway_for", lambda ctx: fake)
+    monkeypatch.setattr(home, "current_timestamp_ms", lambda: 1784217601000)
+
+    status = invoke_json(["status"])
+    activity = invoke_json(["activity", "--hours", "1"])
+
+    assert status["mode"] == "demo"
+    assert status["position"]["count"] == 0
+    assert status["orders"]["count"] == 1
+    assert activity["summary"]["total_quote_volume"] == "10"
+    assert activity["trades"] == []
+
+
+def test_legacy_and_advanced_paths_remain_available(monkeypatch) -> None:
+    fake = CliGateway()
+    monkeypatch.setattr(market, "gateway_for", lambda ctx, private=False: fake)
+
+    legacy = invoke_json(["market", "ticker", "BTC"])
+    advanced = invoke_json(["advanced", "market", "ticker", "BTC"])
+
+    assert legacy == advanced == {"symbol": "BTC", "last": 100}
 
 
 def test_config_show_never_prints_credentials() -> None:
     payload = invoke_json(
         ["config", "show"],
-        env={"WEEX_API_KEY": "visible-key", "WEEX_API_SECRET": "visible-secret", "WEEX_API_PASSPHRASE": "visible-pass"},
+        env={
+            "WEEX_API_KEY": "visible-key",
+            "WEEX_API_SECRET": "visible-secret",
+            "WEEX_API_PASSPHRASE": "visible-pass",
+            "WEEX_WEB_CC_TOKEN": "visible-token",
+            "WEEX_WEB_TERMINAL_CODE": "visible-terminal",
+        },
     )
     assert payload["credentials_configured"] is True
+    assert payload["web_credentials_configured"] is True
     assert "visible" not in json.dumps(payload)
 
 
@@ -40,6 +114,45 @@ def test_order_plan_and_place_default_to_demo_dry_run() -> None:
     assert plan["intent"]["time_in_force"] == "POST_ONLY"
     assert place["status"] == "dry_run"
     assert place["confirm"] == "EXECUTE WEEX DEMO ORDER BTCSUSDT BUY LONG LIMIT 0.001 60000 POST_ONLY"
+
+
+def test_maker_volume_defaults_to_demo_dry_run_with_exact_batch_confirmation() -> None:
+    payload = invoke_json(
+        [
+            "volume",
+            "maker",
+            "BTC",
+            "--target",
+            "100000",
+            "--fills",
+            "10",
+            "--max-position",
+            "12000",
+            "--timeout",
+            "120",
+        ]
+    )
+    assert payload["status"] == "dry_run"
+    assert payload["confirm"] == (
+        "EXECUTE WEEX DEMO MAKER VOLUME BTC TARGET_100000 FILLS_10 MAX_POSITION_12000 TIMEOUT_120"
+    )
+    assert payload["safety"]["post_only"] is True
+
+
+def test_maker_benchmark_is_offline_and_passes_without_credentials() -> None:
+    payload = invoke_json(
+        [
+            "volume",
+            "benchmark",
+            "--train-trials",
+            "5",
+            "--validation-trials",
+            "5",
+        ]
+    )
+    assert payload["status"] == "passed"
+    assert payload["simulation_only"] is True
+    assert all(payload["acceptance"].values())
 
 
 @pytest.mark.parametrize(
@@ -225,8 +338,8 @@ class CliGateway:
         self.calls.append(("close_all",))
         return []
 
-    def open_orders(self, symbol=None, trigger=False):
-        return [{"orderId": "1", "symbol": symbol, "trigger": trigger}]
+    def open_orders(self, symbol=None, trigger=False, mode="live"):
+        return [{"orderId": "1", "symbol": symbol, "trigger": trigger, "mode": mode}]
 
     def order_history(self, mode, symbol=None, limit=100, start_time=None, end_time=None):
         if self.last_client_id:
@@ -249,12 +362,12 @@ class CliGateway:
             }
         ]
 
-    def cancel_order(self, symbol, order_id, trigger=False):
-        self.calls.append(("cancel", symbol, order_id, trigger))
+    def cancel_order(self, symbol, order_id, trigger=False, mode="live"):
+        self.calls.append(("cancel", symbol, order_id, trigger, mode))
         return {"success": True}
 
-    def cancel_all_orders(self, symbol=None, trigger=False):
-        self.calls.append(("cancel_all", symbol, trigger))
+    def cancel_all_orders(self, symbol=None, trigger=False, mode="live"):
+        self.calls.append(("cancel_all", symbol, trigger, mode))
         return []
 
     def place_order(self, intent):
@@ -342,6 +455,19 @@ def test_live_account_and_cancel_execution_paths(monkeypatch) -> None:
         result = runner.invoke(app, _execute_from_plan(args))
         assert result.exit_code == 0, result.output
     assert {call[0] for call in fake.calls} >= {"configure", "close", "close_all", "cancel", "cancel_all"}
+
+
+def test_demo_cancel_uses_demo_confirmation_and_explicit_mode(monkeypatch) -> None:
+    fake = CliGateway()
+    settings = Settings.load(environ={})
+    monkeypatch.setattr(orders, "gateway_for", lambda ctx: fake)
+    monkeypatch.setattr(orders, "settings_for", lambda ctx: settings)
+    args = ["orders", "cancel", "BTC", "123", "--mode", "demo"]
+    plan = invoke_json(args)
+    assert plan["confirm"] == "EXECUTE WEEX DEMO CANCEL BTCSUSDT 123 REGULAR"
+    result = runner.invoke(app, _execute_from_plan(args))
+    assert result.exit_code == 0, result.output
+    assert fake.calls[-1] == ("cancel", "BTC", "123", False, "demo")
 
 
 def test_order_and_risk_execution_paths(monkeypatch) -> None:

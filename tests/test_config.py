@@ -15,12 +15,15 @@ def test_settings_loads_canonical_credentials() -> None:
             "WEEX_DEFAULT_MODE": "sim",
             "WEEX_LIVE_TRADING_ENABLED": "yes",
             "WEEX_TIMEOUT_MS": "20000",
+            "WEEX_WEB_CC_TOKEN": "web-token",
+            "WEEX_WEB_TERMINAL_CODE": "terminal-code",
         }
     )
     assert settings.credentials.configured is True
     assert settings.default_mode == "demo"
     assert settings.live_trading_enabled is True
     assert settings.timeout_ms == 20_000
+    assert settings.web_credentials.configured is True
 
 
 def test_settings_supports_legacy_variable_aliases_only_in_selected_env() -> None:
@@ -38,6 +41,11 @@ def test_settings_supports_legacy_variable_aliases_only_in_selected_env() -> Non
 def test_require_credentials_lists_expected_names() -> None:
     with pytest.raises(ConfigurationError, match="WEEX_API_SECRET"):
         Settings.load(environ={}).require_credentials()
+
+
+def test_require_web_credentials_lists_expected_names() -> None:
+    with pytest.raises(ConfigurationError, match="WEEX_WEB_CC_TOKEN"):
+        Settings.load(environ={}).require_web_credentials()
 
 
 @pytest.mark.parametrize("value, expected", [("paper", "demo"), ("prod", "live"), ("live", "live")])

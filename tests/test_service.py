@@ -77,6 +77,28 @@ def test_successful_submit_verifies_history_and_positions() -> None:
     assert result["verification"]["order_found"] is True
 
 
+def test_successful_submit_is_not_mislabeled_when_immediate_verification_times_out() -> None:
+    gateway = FakeGateway()
+    position_calls = 0
+
+    def flaky_positions(mode, symbol=None):
+        nonlocal position_calls
+        position_calls += 1
+        if position_calls == 2:
+            raise ccxt.RequestTimeout("verification timeout")
+        return []
+
+    gateway.positions = flaky_positions
+
+    result = TradingService(gateway).submit_order(intent())  # type: ignore[arg-type]
+
+    assert result["status"] == "submitted"
+    assert result["result"]["success"] is True
+    assert result["verification"]["order_found"] is None
+    assert "verification was unavailable" in result["verification"]["warning"]
+    assert len([event for event in gateway.events if event[0] == "place_order"]) == 1
+
+
 def test_network_error_recovers_by_client_order_id_without_retry() -> None:
     gateway = FakeGateway()
     gateway.place_result = ccxt.NetworkError("timeout")
