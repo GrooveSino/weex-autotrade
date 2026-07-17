@@ -156,3 +156,20 @@ def test_websocket_subscription_failure_is_reported_without_rows(
     assert stats.cycles == 0
     assert stats.errors == 1
     assert read_rows(db_path) == []
+
+
+def test_websocket_zero_price_frame_keeps_last_valid_price(tmp_path: Path) -> None:
+    socket = FakeWebSocket([])
+    with TickStore(tmp_path / "stream.db") as store:
+        collector = WebSocketMarketCollector(store, ("BTC", "ETH"))
+        collector.handle_message(
+            socket,
+            '{"e":"ticker","s":"BTCUSDT","d":[{"c":"64026.4"}]}',
+        )
+        collector.handle_message(
+            socket,
+            '{"e":"ticker","s":"BTCUSDT","d":[{"c":"0","m":"64059.2"}]}',
+        )
+
+    assert collector.latest_prices["BTCUSDT"] == 64026.4
+    assert collector.ignored_ticks == 1

@@ -95,6 +95,7 @@ def collect(
                 "rows_written": stats.rows_written,
                 "rows_deleted": stats.rows_deleted,
                 "errors": stats.errors,
+                "ignored_ticks": stats.ignored_ticks,
                 "prices": stats.last_prices,
                 "transport": selected_transport,
                 "db_path": str(db_path.expanduser().resolve()),

@@ -45,6 +45,7 @@ class CollectorStats:
     rows_deleted: int = 0
     errors: int = 0
     consecutive_errors: int = 0
+    ignored_ticks: int = 0
     last_prices: dict[str, float] = field(default_factory=dict)
 
 
@@ -170,6 +171,7 @@ class WebSocketMarketCollector:
         self.clock = clock
         self.monotonic = monotonic
         self.latest_prices: dict[str, float] = {}
+        self.ignored_ticks = 0
 
     def subscription_message(self) -> str:
         return json.dumps(
@@ -206,10 +208,12 @@ class WebSocketMarketCollector:
             return
         try:
             price = float(row.get("c"))
-        except (TypeError, ValueError) as exc:
-            raise ValidationError(f"WEEX ticker for {symbol} has no valid last price") from exc
+        except (TypeError, ValueError):
+            self.ignored_ticks += 1
+            return
         if not math.isfinite(price) or price <= 0:
-            raise ValidationError(f"WEEX ticker for {symbol} has an invalid last price")
+            self.ignored_ticks += 1
+            return
         self.latest_prices[symbol] = price
 
     def snapshot(self) -> CollectionResult | None:
@@ -340,15 +344,17 @@ def run_websocket_market_collector(
                 LOGGER.info("cleanup_complete rows_deleted=%d", deleted)
             next_cleanup = now_monotonic + cleanup_interval_seconds
         if now_monotonic >= next_log:
+            stats.ignored_ticks = collector.ignored_ticks
             prices = " ".join(f"{symbol}={price}" for symbol, price in sorted(stats.last_prices.items()))
             LOGGER.info(
                 "collector_status transport=websocket cycles=%d rows_written=%d "
-                "rows_deleted=%d errors=%d consecutive_errors=%d %s",
+                "rows_deleted=%d errors=%d consecutive_errors=%d ignored_ticks=%d %s",
                 stats.cycles,
                 stats.rows_written,
                 stats.rows_deleted,
                 stats.errors,
                 stats.consecutive_errors,
+                stats.ignored_ticks,
                 prices,
             )
             next_log = now_monotonic + log_interval_seconds
