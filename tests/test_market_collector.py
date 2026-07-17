@@ -11,7 +11,9 @@ from weex_cli.market_collector import (
     MarketCollector,
     Tick,
     TickStore,
+    WebSocketMarketCollector,
     run_market_collector,
+    run_websocket_market_collector,
 )
 
 
@@ -23,6 +25,26 @@ class FakeGateway:
     def ticker(self, symbol: str) -> dict[str, object]:
         self.calls.append(symbol)
         return {"last": self.prices[symbol]}
+
+
+class FakeWebSocket:
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = list(messages)
+        self.sent: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def send(self, message: str) -> None:
+        self.sent.append(message)
+
+    def recv(self, timeout: float) -> str:
+        if not self.messages:
+            raise TimeoutError
+        return self.messages.pop(0)
 
 
 def read_rows(db_path: Path) -> list[tuple[str, float, float, str]]:
@@ -85,3 +107,52 @@ def test_once_mode_reports_one_cycle_and_runs_cleanup(tmp_path: Path) -> None:
     assert stats.cycles == 1
     assert stats.rows_written == 2
     assert stats.errors == 0
+
+
+def test_websocket_collector_subscribes_pongs_and_writes_aligned_snapshot(
+    tmp_path: Path,
+) -> None:
+    socket = FakeWebSocket(
+        [
+            '{"result":true,"id":1}',
+            '{"event":"ping","time":"1784314083000"}',
+            '{"e":"ticker","s":"BTCUSDT","d":[{"c":"64271.1"}]}',
+            '{"e":"ticker","s":"ETHUSDT","d":[{"c":"1846.79"}]}',
+        ]
+    )
+    db_path = tmp_path / "stream.db"
+    with TickStore(db_path) as store:
+        collector = WebSocketMarketCollector(
+            store,
+            ("BTC", "ETH"),
+            connect_factory=lambda *_args, **_kwargs: socket,
+            clock=lambda: 1_784_314_083.25,
+        )
+        stats = run_websocket_market_collector(collector, once=True)
+
+    assert stats.cycles == 1
+    assert stats.rows_written == 2
+    assert socket.sent[0] == ('{"method":"SUBSCRIBE","params":["BTCUSDT@ticker","ETHUSDT@ticker"],"id":1}')
+    assert socket.sent[1] == '{"method":"PONG","id":1}'
+    assert read_rows(db_path) == [
+        ("BTCUSDT", 64271.1, 1_784_314_083.25, "2026-07-18T02:48:03.250+08:00"),
+        ("ETHUSDT", 1846.79, 1_784_314_083.25, "2026-07-18T02:48:03.250+08:00"),
+    ]
+
+
+def test_websocket_subscription_failure_is_reported_without_rows(
+    tmp_path: Path,
+) -> None:
+    socket = FakeWebSocket(['{"result":false,"id":1,"msg":"denied"}'])
+    db_path = tmp_path / "stream.db"
+    with TickStore(db_path) as store:
+        collector = WebSocketMarketCollector(
+            store,
+            ("BTC", "ETH"),
+            connect_factory=lambda *_args, **_kwargs: socket,
+        )
+        stats = run_websocket_market_collector(collector, once=True)
+
+    assert stats.cycles == 0
+    assert stats.errors == 1
+    assert read_rows(db_path) == []

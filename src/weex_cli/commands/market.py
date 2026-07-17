@@ -11,8 +11,10 @@ from weex_cli.cli_support import gateway_for, invoke
 from weex_cli.market_collector import (
     MarketCollector,
     TickStore,
+    WebSocketMarketCollector,
     install_stop_handlers,
     run_market_collector,
+    run_websocket_market_collector,
 )
 from weex_cli.output import emit
 
@@ -46,6 +48,7 @@ def collect(
     ctx: typer.Context,
     db_path: Annotated[Path, typer.Option("--db-path")] = DEFAULT_COLLECTOR_DB_PATH,
     symbols: str = typer.Option("BTC,ETH", "--symbols"),
+    transport: str = typer.Option("websocket", "--transport", help="websocket or rest"),
     poll_interval_seconds: float = typer.Option(1.0, "--poll-interval-seconds", min=0.1),
     retention_hours: float = typer.Option(12.0, "--retention-hours", min=0.1),
     cleanup_interval_seconds: float = typer.Option(300.0, "--cleanup-interval-seconds", min=1.0),
@@ -60,17 +63,30 @@ def collect(
     )
     stop_event = threading.Event()
     install_stop_handlers(stop_event)
-    gateway = gateway_for(ctx, private=False)
+    selected_transport = transport.strip().lower()
+    if selected_transport not in {"websocket", "rest"}:
+        raise typer.BadParameter("transport must be websocket or rest")
     with TickStore(db_path, retention_hours=retention_hours) as store:
-        collector = MarketCollector(gateway, store, selected_symbols)
-        stats = run_market_collector(
-            collector,
-            poll_interval_seconds=poll_interval_seconds,
-            cleanup_interval_seconds=cleanup_interval_seconds,
-            log_interval_seconds=log_interval_seconds,
-            once=once,
-            stop_event=stop_event,
-        )
+        if selected_transport == "websocket":
+            stream_collector = WebSocketMarketCollector(store, selected_symbols)
+            stats = run_websocket_market_collector(
+                stream_collector,
+                poll_interval_seconds=poll_interval_seconds,
+                cleanup_interval_seconds=cleanup_interval_seconds,
+                log_interval_seconds=log_interval_seconds,
+                once=once,
+                stop_event=stop_event,
+            )
+        else:
+            poll_collector = MarketCollector(gateway_for(ctx, private=False), store, selected_symbols)
+            stats = run_market_collector(
+                poll_collector,
+                poll_interval_seconds=poll_interval_seconds,
+                cleanup_interval_seconds=cleanup_interval_seconds,
+                log_interval_seconds=log_interval_seconds,
+                once=once,
+                stop_event=stop_event,
+            )
     if once:
         emit(
             {
@@ -80,7 +96,10 @@ def collect(
                 "rows_deleted": stats.rows_deleted,
                 "errors": stats.errors,
                 "prices": stats.last_prices,
+                "transport": selected_transport,
                 "db_path": str(db_path.expanduser().resolve()),
             },
             json_output=True,
         )
+        if stats.cycles != 1:
+            raise typer.Exit(1)

@@ -122,9 +122,9 @@ API Key 建议绑定固定出口 IP。新 Key 初期只开启所需的合约权�
 
 Demo 使用 WEEX 的模拟资产和交易对，例如 `SUSDT`、`BTCSUSDT`。CLI 接受 `BTC`、`BTCUSDT`、`BTCSUSDT` 或 `BTC/USDT:USDT`，会按模式转换。
 
-`market collect` 默认每秒原子写入一组 BTC/ETH 行情，并每 5 分钟删除 12 小时以前的 tick。可用
+`market collect` 默认订阅 WEEX 公共 WebSocket 行情，每秒原子写入一组 BTC/ETH 最新成交价，并每 5 分钟删除 12 小时以前的 tick。可用
 `--poll-interval-seconds`、`--retention-hours` 和 `--cleanup-interval-seconds` 调整；部署检查可先加
-`--once` 只采集一轮。该命令只调用公开行情接口，不读取账户余额，也不会发起任何交易。
+`--once` 只采集一轮。`--transport rest` 可用于诊断回退，但不适合高频采集。该命令只调用公开行情接口，不读取账户余额，也不会发起任何交易。
 
 ## Maker 下单
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import signal
@@ -17,6 +18,7 @@ from weex_cli.symbols import live_symbol_id
 
 LOGGER = logging.getLogger(__name__)
 CHINA_STANDARD_TIME = timezone(timedelta(hours=8))
+WEEX_PUBLIC_WS_URL = "wss://ws-contract.weex.com/v3/ws/public"
 
 
 class MarketGateway(Protocol):
@@ -146,6 +148,83 @@ class MarketCollector:
         return Tick(symbol=live_symbol_id(symbol), price=price)
 
 
+class WebSocketMarketCollector:
+    """Consume the public WEEX ticker stream and persist aligned snapshots."""
+
+    def __init__(
+        self,
+        store: TickStore,
+        symbols: tuple[str, ...],
+        *,
+        url: str = WEEX_PUBLIC_WS_URL,
+        connect_factory: Any | None = None,
+        clock: Any = time.time,
+        monotonic: Any = time.monotonic,
+    ) -> None:
+        if not symbols:
+            raise ValidationError("at least one symbol is required")
+        self.store = store
+        self.symbols = tuple(live_symbol_id(symbol) for symbol in symbols)
+        self.url = url
+        self.connect_factory = connect_factory or _websocket_connect
+        self.clock = clock
+        self.monotonic = monotonic
+        self.latest_prices: dict[str, float] = {}
+
+    def subscription_message(self) -> str:
+        return json.dumps(
+            {
+                "method": "SUBSCRIBE",
+                "params": [f"{symbol}@ticker" for symbol in self.symbols],
+                "id": 1,
+            },
+            separators=(",", ":"),
+        )
+
+    def handle_message(self, websocket: Any, raw_message: str | bytes) -> None:
+        if isinstance(raw_message, bytes):
+            raw_message = raw_message.decode("utf-8")
+        payload = json.loads(raw_message)
+        if not isinstance(payload, dict):
+            return
+        if payload.get("event") == "ping":
+            websocket.send('{"method":"PONG","id":1}')
+            return
+        if "result" in payload:
+            if payload.get("result") is not True:
+                raise ValidationError(f"WEEX ticker subscription failed: {payload.get('msg') or 'unknown error'}")
+            return
+        if payload.get("e") != "ticker":
+            return
+
+        symbol = str(payload.get("s") or "").upper()
+        rows = payload.get("d")
+        if symbol not in self.symbols or not isinstance(rows, list) or not rows:
+            return
+        row = rows[0]
+        if not isinstance(row, dict):
+            return
+        try:
+            price = float(row.get("c"))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"WEEX ticker for {symbol} has no valid last price") from exc
+        if not math.isfinite(price) or price <= 0:
+            raise ValidationError(f"WEEX ticker for {symbol} has an invalid last price")
+        self.latest_prices[symbol] = price
+
+    def snapshot(self) -> CollectionResult | None:
+        if any(symbol not in self.latest_prices for symbol in self.symbols):
+            return None
+        captured_at = float(self.clock())
+        ticks = tuple(Tick(symbol=symbol, price=self.latest_prices[symbol]) for symbol in self.symbols)
+        rows_written = self.store.write(ticks, captured_at=captured_at)
+        return CollectionResult(
+            captured_at=captured_at,
+            ticks=ticks,
+            rows_written=rows_written,
+        )
+
+
 def run_market_collector(
     collector: MarketCollector,
     *,
@@ -226,6 +305,107 @@ def run_market_collector(
     return stats
 
 
+def run_websocket_market_collector(
+    collector: WebSocketMarketCollector,
+    *,
+    poll_interval_seconds: float = 1.0,
+    cleanup_interval_seconds: float = 300.0,
+    log_interval_seconds: float = 60.0,
+    once: bool = False,
+    stop_event: threading.Event | None = None,
+) -> CollectorStats:
+    if poll_interval_seconds <= 0:
+        raise ValidationError("poll_interval_seconds must be greater than zero")
+    if cleanup_interval_seconds <= 0:
+        raise ValidationError("cleanup_interval_seconds must be greater than zero")
+    if log_interval_seconds <= 0:
+        raise ValidationError("log_interval_seconds must be greater than zero")
+
+    stopper = stop_event or threading.Event()
+    stats = CollectorStats()
+    next_cleanup = 0.0
+    next_log = 0.0
+
+    def maintenance() -> None:
+        nonlocal next_cleanup, next_log
+        now_monotonic = collector.monotonic()
+        if now_monotonic >= next_cleanup:
+            try:
+                deleted = collector.store.cleanup()
+            except sqlite3.Error as exc:
+                stats.errors += 1
+                LOGGER.error("cleanup_failed error=%s", exc)
+            else:
+                stats.rows_deleted += deleted
+                LOGGER.info("cleanup_complete rows_deleted=%d", deleted)
+            next_cleanup = now_monotonic + cleanup_interval_seconds
+        if now_monotonic >= next_log:
+            prices = " ".join(f"{symbol}={price}" for symbol, price in sorted(stats.last_prices.items()))
+            LOGGER.info(
+                "collector_status transport=websocket cycles=%d rows_written=%d "
+                "rows_deleted=%d errors=%d consecutive_errors=%d %s",
+                stats.cycles,
+                stats.rows_written,
+                stats.rows_deleted,
+                stats.errors,
+                stats.consecutive_errors,
+                prices,
+            )
+            next_log = now_monotonic + log_interval_seconds
+
+    while not stopper.is_set():
+        try:
+            with collector.connect_factory(
+                collector.url,
+                open_timeout=15,
+                close_timeout=5,
+                ping_interval=None,
+                proxy=None,
+            ) as websocket:
+                websocket.send(collector.subscription_message())
+                LOGGER.info("websocket_connected symbols=%s", ",".join(collector.symbols))
+                collector.latest_prices.clear()
+                next_sample: float | None = None
+                while not stopper.is_set():
+                    now_monotonic = collector.monotonic()
+                    timeout = 1.0 if next_sample is None else max(0.01, min(1.0, next_sample - now_monotonic))
+                    try:
+                        message = websocket.recv(timeout=timeout)
+                    except TimeoutError:
+                        message = None
+                    if message is not None:
+                        collector.handle_message(websocket, message)
+
+                    now_monotonic = collector.monotonic()
+                    ready = all(symbol in collector.latest_prices for symbol in collector.symbols)
+                    if ready and (next_sample is None or now_monotonic >= next_sample):
+                        result = collector.snapshot()
+                        if result is not None:
+                            stats.cycles += 1
+                            stats.rows_written += result.rows_written
+                            stats.consecutive_errors = 0
+                            stats.last_prices = {tick.symbol: tick.price for tick in result.ticks}
+                        if once:
+                            maintenance()
+                            return stats
+                        next_sample = now_monotonic + poll_interval_seconds
+                    maintenance()
+        except Exception as exc:  # noqa: BLE001 - reconnect after transport/protocol failures
+            stats.errors += 1
+            stats.consecutive_errors += 1
+            LOGGER.error(
+                "websocket_failed consecutive_errors=%d error=%s",
+                stats.consecutive_errors,
+                exc,
+            )
+            maintenance()
+            if once:
+                return stats
+            stopper.wait(_retry_delay(stats.consecutive_errors))
+
+    return stats
+
+
 def install_stop_handlers(stop_event: threading.Event) -> None:
     def request_stop(signum: int, _frame: FrameType | None) -> None:
         LOGGER.info("stop_requested signal=%d", signum)
@@ -239,3 +419,9 @@ def _retry_delay(consecutive_errors: int) -> float:
     if consecutive_errors <= 0:
         return 0.0
     return min(60.0, float(2 ** min(consecutive_errors - 1, 6)))
+
+
+def _websocket_connect(url: str, **kwargs: Any) -> Any:
+    from websockets.sync.client import connect
+
+    return connect(url, **kwargs)
