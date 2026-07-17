@@ -19,6 +19,8 @@ The documented Demo surface contains:
 
 Demo uses simulated collateral `SUSDT` and symbols such as `BTCSUSDT`. The documented Demo order accepts `POST_ONLY`, attached `tpTriggerPrice`/`slTriggerPrice`, and contract/mark trigger types. It does not document Demo cancellation, leverage, margin-mode mutation, or standalone TP/SL maintenance.
 
+As verified against the authenticated API on 2026-07-17, Demo order submission still uses `BTCSUSDT`, but `GET /capi/v3/sim/order/history` rejects that value in its optional `symbol` filter and accepts `BTCUSDT`. Keep this read-side exception isolated to Demo history queries.
+
 ## Live Orders
 
 `POST /capi/v3/order` accepts explicit `side`, `positionSide`, `type`, quantity, price for limits, client order ID, and `timeInForce`. `POST_ONLY` is the maker-only value. Keep position side explicit and verify close-only behavior against the current official page and CCXT version.

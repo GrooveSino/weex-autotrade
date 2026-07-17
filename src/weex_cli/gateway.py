@@ -57,7 +57,8 @@ class WeexGateway:
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"limit": limit}
         if symbol:
-            params["symbol"] = demo_symbol_id(symbol) if mode == "demo" else live_symbol_id(symbol)
+            # The current Demo history endpoint rejects SUSDT symbols even though Demo orders require them.
+            params["symbol"] = live_symbol_id(symbol)
         if start_time is not None:
             params["startTime"] = start_time
         if end_time is not None:

@@ -35,7 +35,7 @@ def test_demo_routes_and_symbol_filter(gateway) -> None:
     assert target.balance("demo") == [{"asset": "SUSDT"}]
     assert target.positions("demo", "BTC") == [{"symbol": "BTCSUSDT", "size": "1"}]
     target.order_history("demo", "BTC", 20, 1, 2)
-    assert fake.calls[-1][-1] == {"limit": 20, "symbol": "BTCSUSDT", "startTime": 1, "endTime": 2}
+    assert fake.calls[-1][-1] == {"limit": 20, "symbol": "BTCUSDT", "startTime": 1, "endTime": 2}
 
 
 def test_live_account_and_order_management(gateway) -> None:
