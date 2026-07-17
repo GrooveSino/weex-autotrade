@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import logging
+import math
+import signal
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import FrameType
+from typing import Any, Protocol
+
+from weex_cli.errors import ValidationError
+from weex_cli.symbols import live_symbol_id
+
+LOGGER = logging.getLogger(__name__)
+CHINA_STANDARD_TIME = timezone(timedelta(hours=8))
+
+
+class MarketGateway(Protocol):
+    def ticker(self, symbol: str) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class Tick:
+    symbol: str
+    price: float
+
+
+@dataclass(frozen=True)
+class CollectionResult:
+    captured_at: float
+    ticks: tuple[Tick, ...]
+    rows_written: int
+
+
+@dataclass
+class CollectorStats:
+    cycles: int = 0
+    rows_written: int = 0
+    rows_deleted: int = 0
+    errors: int = 0
+    consecutive_errors: int = 0
+    last_prices: dict[str, float] = field(default_factory=dict)
+
+
+class TickStore:
+    """SQLite writer compatible with the weex-calc ticks table."""
+
+    def __init__(self, db_path: Path, *, retention_hours: float = 12.0) -> None:
+        if retention_hours <= 0:
+            raise ValidationError("retention_hours must be greater than zero")
+        self.db_path = db_path.expanduser().resolve()
+        self.retention_seconds = retention_hours * 3600
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(self.db_path, timeout=5.0)
+        self.connection.execute("PRAGMA busy_timeout=5000")
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ticks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    timestamp REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(symbol, timestamp)
+                )
+                """
+            )
+            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_ticks_symbol_ts ON ticks(symbol, timestamp)")
+            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_ticks_timestamp ON ticks(timestamp)")
+
+    def write(self, ticks: tuple[Tick, ...], *, captured_at: float) -> int:
+        if not ticks:
+            return 0
+        created_at = datetime.fromtimestamp(captured_at, tz=CHINA_STANDARD_TIME).isoformat(timespec="milliseconds")
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO ticks (symbol, price, timestamp, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ((tick.symbol, tick.price, captured_at, created_at) for tick in ticks),
+            )
+        return self.connection.total_changes - before
+
+    def cleanup(self, *, now: float | None = None) -> int:
+        cutoff = (time.time() if now is None else now) - self.retention_seconds
+        with self.connection:
+            cursor = self.connection.execute("DELETE FROM ticks WHERE timestamp < ?", (cutoff,))
+        return max(0, cursor.rowcount)
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self) -> TickStore:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class MarketCollector:
+    def __init__(
+        self,
+        gateway: MarketGateway,
+        store: TickStore,
+        symbols: tuple[str, ...],
+        *,
+        clock: Any = time.time,
+    ) -> None:
+        if not symbols:
+            raise ValidationError("at least one symbol is required")
+        self.gateway = gateway
+        self.store = store
+        self.symbols = symbols
+        self.clock = clock
+
+    def collect_once(self) -> CollectionResult:
+        ticks = tuple(self._fetch_tick(symbol) for symbol in self.symbols)
+        captured_at = float(self.clock())
+        rows_written = self.store.write(ticks, captured_at=captured_at)
+        return CollectionResult(
+            captured_at=captured_at,
+            ticks=ticks,
+            rows_written=rows_written,
+        )
+
+    def _fetch_tick(self, symbol: str) -> Tick:
+        payload = self.gateway.ticker(symbol)
+        try:
+            price = float(payload.get("last"))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"WEEX ticker for {symbol} has no valid last price") from exc
+        if not math.isfinite(price) or price <= 0:
+            raise ValidationError(f"WEEX ticker for {symbol} has an invalid last price")
+        return Tick(symbol=live_symbol_id(symbol), price=price)
+
+
+def run_market_collector(
+    collector: MarketCollector,
+    *,
+    poll_interval_seconds: float = 1.0,
+    cleanup_interval_seconds: float = 300.0,
+    log_interval_seconds: float = 60.0,
+    once: bool = False,
+    stop_event: threading.Event | None = None,
+) -> CollectorStats:
+    if poll_interval_seconds <= 0:
+        raise ValidationError("poll_interval_seconds must be greater than zero")
+    if cleanup_interval_seconds <= 0:
+        raise ValidationError("cleanup_interval_seconds must be greater than zero")
+    if log_interval_seconds <= 0:
+        raise ValidationError("log_interval_seconds must be greater than zero")
+
+    stopper = stop_event or threading.Event()
+    stats = CollectorStats()
+    next_cleanup = 0.0
+    next_log = 0.0
+    next_poll = time.monotonic()
+
+    while not stopper.is_set():
+        try:
+            result = collector.collect_once()
+        except Exception as exc:  # noqa: BLE001 - network failures must not kill the daemon
+            stats.errors += 1
+            stats.consecutive_errors += 1
+            LOGGER.error(
+                "collection_failed consecutive_errors=%d error=%s",
+                stats.consecutive_errors,
+                exc,
+            )
+        else:
+            stats.cycles += 1
+            stats.rows_written += result.rows_written
+            stats.consecutive_errors = 0
+            stats.last_prices = {tick.symbol: tick.price for tick in result.ticks}
+
+        now_monotonic = time.monotonic()
+        if now_monotonic >= next_cleanup:
+            try:
+                deleted = collector.store.cleanup()
+            except sqlite3.Error as exc:
+                stats.errors += 1
+                LOGGER.error("cleanup_failed error=%s", exc)
+            else:
+                stats.rows_deleted += deleted
+                LOGGER.info("cleanup_complete rows_deleted=%d", deleted)
+            next_cleanup = now_monotonic + cleanup_interval_seconds
+
+        if now_monotonic >= next_log:
+            prices = " ".join(f"{symbol}={price}" for symbol, price in sorted(stats.last_prices.items()))
+            LOGGER.info(
+                "collector_status cycles=%d rows_written=%d rows_deleted=%d errors=%d consecutive_errors=%d %s",
+                stats.cycles,
+                stats.rows_written,
+                stats.rows_deleted,
+                stats.errors,
+                stats.consecutive_errors,
+                prices,
+            )
+            next_log = now_monotonic + log_interval_seconds
+
+        if once:
+            break
+
+        next_poll += poll_interval_seconds
+        delay = next_poll - time.monotonic()
+        if delay <= 0:
+            next_poll = time.monotonic()
+            delay = min(poll_interval_seconds, _retry_delay(stats.consecutive_errors))
+        elif stats.consecutive_errors:
+            delay = max(delay, _retry_delay(stats.consecutive_errors))
+            next_poll = time.monotonic() + delay
+        stopper.wait(delay)
+
+    return stats
+
+
+def install_stop_handlers(stop_event: threading.Event) -> None:
+    def request_stop(signum: int, _frame: FrameType | None) -> None:
+        LOGGER.info("stop_requested signal=%d", signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+
+def _retry_delay(consecutive_errors: int) -> float:
+    if consecutive_errors <= 0:
+        return 0.0
+    return min(60.0, float(2 ** min(consecutive_errors - 1, 6)))
