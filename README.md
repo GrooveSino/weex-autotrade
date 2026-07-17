@@ -176,6 +176,31 @@ Demo API 目前只公开余额、下单、仓位和历史委托，没有 Demo �
 ./weex risk cancel 123456789
 ```
 
+## 成交列表与交易量
+
+按指定时间段查询归一化成交列表和成交额汇总：
+
+```bash
+./weex trades report \
+  --mode demo \
+  --symbol BTC \
+  --start '2026-07-17T00:00:00+08:00' \
+  --end '2026-07-17T23:59:59+08:00' \
+  --json
+
+# 只看汇总，不输出逐条成交
+./weex trades report \
+  --mode live \
+  --start '2026-07-01T00:00:00+08:00' \
+  --end '2026-07-07T23:59:59+08:00' \
+  --summary-only \
+  --json
+```
+
+时间可使用 Unix 秒、Unix 毫秒或带时区的 ISO-8601。汇总中的 `total_quote_volume` 是每笔已成交计价金额之和；成功开仓和平仓分别计入，因此完整开平会累计两侧成交额。`opening_quote_volume` 和 `closing_quote_volume` 会分别列出。
+
+Live 使用逐笔成交接口，能够区分 Maker/Taker、手续费和已实现盈亏。WEEX 没有公开 Demo 逐笔成交接口，因此 Demo 使用订单历史的 `cumQuote`，或以 `executedQty × avgPrice` 计算订单级成交额。该本地统计不承诺等同于 WEEX 活动、返佣或等级系统的有效交易量；应以对应活动规则和交易所结算为准。若响应中的 `complete` 为 `false`，不得把结果视为完整总量。
+
 ## JSON 输出
 
 所有命令支持 `--json`，便于脚本和 Agent 消费：
@@ -195,6 +220,7 @@ src/weex_cli/
   models.py       # 订单意图与 payload 编译
   gateway.py      # CCXT 与 WEEX V3/demo 接口
   service.py      # precheck、回读验证和风险更新顺序
+  trade_reporting.py # 成交归一化、分页和交易量汇总
   safety.py       # 确认短语与实盘开关
 tests/            # 完全离线的单元和 CLI 测试
 ```

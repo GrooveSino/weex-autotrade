@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from weex_cli.cli import app
-from weex_cli.commands import account, market, order, orders, risk
+from weex_cli.commands import account, market, order, orders, risk, trades
 from weex_cli.config import Settings
 
 runner = CliRunner()
@@ -233,6 +233,22 @@ class CliGateway:
             return [{"clientOrderId": self.last_client_id, "status": "NEW"}]
         return [{"orderId": "2", "symbol": symbol, "status": "FILLED"}]
 
+    def trade_rows(self, mode, symbol, **kwargs):
+        return [
+            {
+                "orderId": "trade-1",
+                "symbol": "BTCSUSDT",
+                "side": "BUY",
+                "positionSide": "LONG",
+                "status": "FILLED",
+                "executedQty": "0.1",
+                "avgPrice": "100",
+                "cumQuote": "10",
+                "timeInForce": "POST_ONLY",
+                "updateTime": 1784217600000,
+            }
+        ]
+
     def cancel_order(self, symbol, order_id, trigger=False):
         self.calls.append(("cancel", symbol, order_id, trigger))
         return {"success": True}
@@ -278,6 +294,7 @@ def test_read_commands_with_fake_gateway(monkeypatch) -> None:
     monkeypatch.setattr(account, "gateway_for", lambda ctx: fake)
     monkeypatch.setattr(orders, "gateway_for", lambda ctx: fake)
     monkeypatch.setattr(risk, "gateway_for", lambda ctx: fake)
+    monkeypatch.setattr(trades, "gateway_for", lambda ctx: fake)
     for args in (
         ["market", "ticker", "BTC"],
         ["market", "book", "BTC"],
@@ -286,6 +303,18 @@ def test_read_commands_with_fake_gateway(monkeypatch) -> None:
         ["orders", "open", "--symbol", "BTC"],
         ["orders", "history", "--symbol", "BTC"],
         ["risk", "orders", "--symbol", "BTC"],
+        [
+            "trades",
+            "report",
+            "--mode",
+            "demo",
+            "--symbol",
+            "BTC",
+            "--start",
+            "2026-07-17T00:00:00+08:00",
+            "--end",
+            "2026-07-17T23:59:59+08:00",
+        ],
     ):
         assert runner.invoke(app, [*args, "--json"]).exit_code == 0
 

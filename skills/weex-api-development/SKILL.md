@@ -1,6 +1,6 @@
 ---
 name: weex-api-development
-description: Build, extend, debug, or review WEEX V3 USDT-contract API integrations and CLIs, including authentication, demo trading, maker/post-only orders, positions, leverage, margin, take-profit/stop-loss, order recovery, CCXT mapping, and local WEEX API documentation sync. Use for work in weex-autotrade or whenever a task mentions WEEX contract endpoints, WEEX API payloads, WEEX Demo/SUSDT, or WEEX trading safety.
+description: Build, extend, debug, or review WEEX V3 USDT-contract API integrations and CLIs, including authentication, demo trading, maker/post-only orders, positions, leverage, margin, take-profit/stop-loss, order recovery, trade-fill and turnover reporting, CCXT mapping, and local WEEX API documentation sync. Use for work in weex-autotrade or whenever a task mentions WEEX contract endpoints, WEEX API payloads, WEEX Demo/SUSDT, trade volume, or WEEX trading safety.
 ---
 
 # WEEX API Development
@@ -25,6 +25,7 @@ description: Build, extend, debug, or review WEEX V3 USDT-contract API integrati
 ## Route By Task
 
 - Authentication, endpoint coverage, and current fields: search `docs/api/ENDPOINTS.md`, then read the linked generated page.
+- Fill lists, fees, Maker/Taker, and turnover: read `docs/api/contract/Transaction_API/GetTradeDetails.md` and `references/weex-v3-contract.md`.
 - Demo/live differences and symbol rules: read `references/weex-v3-contract.md`.
 - CCXT method and raw-request mapping: read `references/ccxt-mapping.md`.
 - Order mutation, retry, stop replacement, and credential rules: read `references/safety-contract.md`.

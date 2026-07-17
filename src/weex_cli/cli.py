@@ -8,7 +8,7 @@ import typer
 
 from weex_cli import __version__
 from weex_cli.cli_support import AppContext, gateway_for, invoke, selected_mode, settings_for
-from weex_cli.commands import account, config_cmd, market, order, orders, risk
+from weex_cli.commands import account, config_cmd, market, order, orders, risk, trades
 from weex_cli.output import emit
 
 app = typer.Typer(
@@ -22,6 +22,7 @@ app.add_typer(account.app, name="account")
 app.add_typer(orders.app, name="orders")
 app.add_typer(order.app, name="order")
 app.add_typer(risk.app, name="risk")
+app.add_typer(trades.app, name="trades")
 app.add_typer(config_cmd.app, name="config")
 
 

@@ -66,6 +66,29 @@ class WeexGateway:
         path = "capi/v3/sim/order/history" if mode == "demo" else "capi/v3/order/history"
         return self._raw(path, "GET", params)
 
+    def trade_rows(
+        self,
+        mode: str,
+        symbol: str | None,
+        *,
+        start_time: int,
+        end_time: int,
+        limit: int,
+        page: int | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "startTime": start_time,
+            "endTime": end_time,
+            "limit": limit,
+        }
+        if symbol:
+            params["symbol"] = live_symbol_id(symbol)
+        if mode == "demo":
+            if page is not None:
+                params["page"] = page
+            return self._raw("capi/v3/sim/order/history", "GET", params)
+        return self._raw("capi/v3/userTrades", "GET", params)
+
     def open_orders(self, symbol: str | None = None, *, trigger: bool = False) -> list[dict[str, Any]]:
         unified = ccxt_swap_symbol(symbol) if symbol else None
         return self.client.fetch_open_orders(unified, None, None, {"type": "swap", "trigger": trigger})

@@ -113,6 +113,26 @@ def test_risk_endpoints_use_documented_payloads(gateway) -> None:
     assert fake.calls[-1][-1] == {"orderId": "9"}
 
 
+def test_trade_rows_use_live_symbols_and_mode_specific_endpoints(gateway) -> None:
+    target, fake = gateway
+    target.trade_rows("demo", "BTC", start_time=1, end_time=2, limit=1000, page=3)
+    assert fake.calls[-1] == (
+        "request",
+        "capi/v3/sim/order/history",
+        "contractPrivate",
+        "GET",
+        {"startTime": 1, "endTime": 2, "limit": 1000, "symbol": "BTCUSDT", "page": 3},
+    )
+    target.trade_rows("live", "BTC", start_time=1, end_time=2, limit=100)
+    assert fake.calls[-1] == (
+        "request",
+        "capi/v3/userTrades",
+        "contractPrivate",
+        "GET",
+        {"startTime": 1, "endTime": 2, "limit": 100, "symbol": "BTCUSDT"},
+    )
+
+
 def test_demo_only_operation_guard() -> None:
     with pytest.raises(UnsupportedModeError):
         ensure_live("demo", "cancel")

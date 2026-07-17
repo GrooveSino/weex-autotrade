@@ -27,6 +27,12 @@ As verified against the authenticated API on 2026-07-17, Demo order submission s
 
 Standalone TP/SL uses `POST /capi/v3/placeTpSlOrder`. A zero or omitted execute price means market execution; zero or omitted quantity means the full position according to the official page.
 
+## Trade Volume Reporting
+
+Live fills come from `GET /capi/v3/userTrades`; use `quoteQty` as the authoritative executed quote amount and preserve `maker`, commission, realized PnL, and fill time. The endpoint accepts at most a seven-day window and returns at most 100 rows, so split saturated windows and report incomplete data explicitly when it cannot be disambiguated.
+
+Demo exposes no fill endpoint. Derive order-level volume from executed order history using `cumQuote`, falling back to `executedQty * avgPrice`. Count opening and closing executions separately. Do not claim that this computed turnover is eligible volume for an exchange campaign, rebate, or account tier.
+
 ## Symbol Mapping
 
 | Input intent | Live | Demo | CCXT swap |
