@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Mock-first multi-account control plane for WEEX Fleet."
 requires-python = ">=3.11"
 dependencies = [
-    "cryptography>=45,<47",
+    "cryptography>=45,<50",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
     "pydantic>=2.10,<3",
