@@ -58,6 +58,10 @@ class FakeExchange:
         self.calls.append(("set_leverage", leverage, symbol, params))
         return {"leverage": leverage}
 
+    def fetch_leverage(self, symbol):
+        self.calls.append(("fetch_leverage", symbol))
+        return {"marginMode": "isolated", "longLeverage": 10, "shortLeverage": 10}
+
     def close_position(self, symbol, side, params):
         self.calls.append(("close_position", symbol, side, params))
         return {"symbol": symbol, "closed": True}

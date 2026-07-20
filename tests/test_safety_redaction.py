@@ -71,3 +71,5 @@ def test_redaction_removes_secrets_from_nested_payloads_and_text() -> None:
     assert "secret=[REDACTED]" in redact_text("request secret=hello failed")
     assert "visible-secret" not in redact_text("WEEX_API_SECRET=visible-secret")
     assert "web-token" not in redact_text("cc_token=web-token")
+    proxy_error = redact_text("connect http://proxy-user:proxy-password@127.0.0.1:8080 failed")
+    assert proxy_error == "connect http://[REDACTED]@127.0.0.1:8080 failed"

@@ -1,0 +1,184 @@
+import { generateKeyPairSync, privateDecrypt, constants } from 'node:crypto'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { Account } from '@aptos-labs/ts-sdk'
+import { openDatabase, type SqliteDatabase } from '../server/database.js'
+import { BackupService, type VaultBackup } from '../server/backup.js'
+import { EncryptedVault } from '../server/vault.js'
+import { APTOS_HD_PATH, MAX_ACCOUNT_INDEX, WalletService } from '../server/wallets.js'
+import { FakeGateway } from './fakes.js'
+
+// Public BIP39 test vector. Never use it for a funded wallet.
+const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art' // gitleaks:allow
+const EXPECTED = {
+  0: '0x226b5b5c15d19946b1fd26c3e4ad36833fd8c9c11c612b1327e608f824a5f2d4',
+  1: '0xf0f12cc090bb526434ecc758b5fd8547f806fe973f4e923f89e481a20b332828',
+  37: '0xaf6a398fad01b047672b6e568dbdd751beeec89e158fafcf090de7be5c5b82e5',
+  [MAX_ACCOUNT_INDEX]: '0x27466c3776422e75ce93f71995f0c8e97cd28ad4c6221ff1cb88971cc39cd796',
+} as const
+
+let db: SqliteDatabase
+let vault: EncryptedVault
+let gateway: FakeGateway
+let wallets: WalletService
+let databasePath: string
+
+beforeEach(async () => {
+  databasePath = join(mkdtempSync(join(tmpdir(), 'aptos-hd-')), 'wallet.sqlite')
+  db = openDatabase(databasePath)
+  vault = new EncryptedVault(db)
+  await vault.initialize('correct horse battery staple')
+  gateway = new FakeGateway()
+  wallets = new WalletService(db, vault, gateway)
+})
+
+afterEach(() => db.close())
+
+describe('Aptos HD wallet groups', () => {
+  it('matches fixed derivation vectors including the maximum index', () => {
+    const preview = wallets.previewRestore(MNEMONIC, 0, [0, 1, 37, MAX_ACCOUNT_INDEX])
+    for (const account of preview) expect(account.address).toBe(EXPECTED[account.accountIndex as keyof typeof EXPECTED])
+    expect(() => wallets.previewRestore(MNEMONIC, 0, [MAX_ACCOUNT_INDEX + 1])).toThrow('账户索引必须在')
+    expect(() => wallets.previewRestore(MNEMONIC, 0, [1, 1])).toThrow('不能重复')
+    expect(() => wallets.previewRestore(MNEMONIC, 200, [MAX_ACCOUNT_INDEX])).toThrow('单次最多处理 200')
+  })
+
+  it('requires a correct four-word backup confirmation and creates account zero atomically', () => {
+    const words = MNEMONIC.split(' ')
+    expect(() => wallets.createGroup('主钱包', MNEMONIC, [0, 5, 10, 23], ['wrong', words[5], words[10], words[23]])).toThrow('确认失败')
+    expect(wallets.listGroups()).toHaveLength(0)
+
+    const group = wallets.createGroup('主钱包', MNEMONIC, [0, 5, 10, 23], [words[0], words[5], words[10], words[23]])
+    expect(group.derivationProfile).toBe('aptos_hd')
+    expect(group.nextAccountIndex).toBe(1)
+    expect(group.accounts.map((account) => account.accountIndex)).toEqual([0])
+    expect(group.accounts[0].address).toBe(EXPECTED[0])
+    expect(group.accounts[0].accountStatus).toBe('unused')
+    expect(readFileSync(databasePath).toString('utf8')).not.toContain(MNEMONIC)
+    expect(() => wallets.restoreGroup('重复', MNEMONIC, 1)).toThrow(/已存在.*钱包组 ID/)
+  })
+
+  it('adds sequential accounts, restores explicit indexes, and never reuses archived indexes', () => {
+    const group = wallets.restoreGroup('账户钱包', MNEMONIC, 1)
+    wallets.addAccounts(group.id, 2)
+    wallets.restoreAccounts(group.id, [37])
+    expect(wallets.getGroup(group.id).accounts.map((account) => account.accountIndex)).toEqual([0, 1, 2, 37])
+    expect(wallets.getGroup(group.id).nextAccountIndex).toBe(38)
+
+    const account1 = wallets.getGroup(group.id).accounts.find((account) => account.accountIndex === 1)!
+    wallets.archive(account1.id)
+    wallets.addAccounts(group.id, 1)
+    const withArchived = wallets.getGroup(group.id, true)
+    expect(withArchived.accounts.map((account) => account.accountIndex)).toEqual([0, 1, 2, 37, 38])
+    expect(withArchived.accounts.find((account) => account.accountIndex === 1)?.archivedAt).not.toBeNull()
+    expect(withArchived.nextAccountIndex).toBe(39)
+  })
+
+  it('refreshes managed accounts as unused, used, or funded', async () => {
+    const group = wallets.restoreGroup('状态钱包', MNEMONIC, 3)
+    const [unused, used, funded] = group.accounts
+    gateway.existingAccounts.add(used.address)
+    gateway.setBalance(funded.address, 'APT', 42n)
+    expect((await wallets.refresh(unused.id)).accountStatus).toBe('unused')
+    expect((await wallets.refresh(used.id)).accountStatus).toBe('used')
+    expect((await wallets.refresh(funded.id)).accountStatus).toBe('funded')
+  })
+
+  it('encrypts revealed secrets to an ephemeral RSA key and audits the operation', () => {
+    const group = wallets.restoreGroup('秘密钱包', MNEMONIC, 1)
+    const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const response = wallets.revealMnemonicEncrypted(group.id, publicKey.export({ type: 'spki', format: 'pem' }).toString())
+    expect(JSON.stringify(response)).not.toContain(MNEMONIC)
+    const plaintext = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(response.ciphertext, 'base64')).toString()
+    expect(plaintext).toBe(MNEMONIC)
+    expect(db.prepare(`SELECT COUNT(*) AS count FROM audit_events WHERE kind = 'wallet_group.mnemonic_revealed'`).get()).toEqual({ count: 1 })
+  })
+
+  it('migrates legacy mnemonic rows without changing wallet ids', () => {
+    const path = APTOS_HD_PATH(1)
+    const account = Account.fromDerivationPath({ mnemonic: MNEMONIC, path })
+    const id = '11111111-1111-4111-8111-111111111111'
+    const now = new Date().toISOString()
+    const envelope = vault.encryptSecret({ privateKey: account.privateKey.toString(), mnemonic: MNEMONIC, derivationPath: path })
+    db.prepare(`INSERT INTO wallets(id,label,address,source,derivation_path,secret_envelope,created_at,updated_at) VALUES (?, ?, ?, 'mnemonic', ?, ?, ?, ?)`)
+      .run(id, '旧派生地址', account.accountAddress.toStringLong(), path, envelope, now, now)
+    account.privateKey.clear()
+
+    wallets.migrateLegacyMnemonicWallets()
+    const migrated = wallets.get(id)
+    expect(migrated.id).toBe(id)
+    expect(migrated.accountIndex).toBe(1)
+    expect(wallets.listGroups()[0].derivationProfile).toBe('aptos_hd')
+    expect(wallets.listGroups()[0].nextAccountIndex).toBe(2)
+    expect((db.prepare('SELECT secret_envelope FROM wallets WHERE id = ?').get(id) as { secret_envelope: string }).secret_envelope).toBe('')
+  })
+
+  it('recognizes standard high-index paths previously classified as custom', () => {
+    const group = wallets.restoreGroup('高位账户', MNEMONIC, 0, [1000])
+    const account = group.accounts[0]
+    db.prepare(`UPDATE wallet_groups SET derivation_profile = 'legacy_custom', next_account_index = 0 WHERE id = ?`).run(group.id)
+    db.prepare('UPDATE wallets SET account_index = NULL WHERE id = ?').run(account.id)
+
+    wallets.migrateLegacyMnemonicWallets()
+    const migrated = wallets.getGroup(group.id)
+    expect(migrated.derivationProfile).toBe('aptos_hd')
+    expect(migrated.accounts[0].id).toBe(account.id)
+    expect(migrated.accounts[0].accountIndex).toBe(1000)
+    expect(migrated.nextAccountIndex).toBe(1001)
+  })
+
+  it('keeps nonstandard derivation paths in read-only legacy groups', () => {
+    // Public deterministic test vector. Never use it for a funded wallet.
+    const mnemonic = 'bean mountain minute enemy state always weekend accuse flag wait island tortoise' // gitleaks:allow
+    const path = "m/44'/637'/0'/1'/0'"
+    const account = Account.fromDerivationPath({ mnemonic, path })
+    const groupId = '22222222-2222-4222-8222-222222222222'
+    const walletId = '33333333-3333-4333-8333-333333333333'
+    const now = new Date().toISOString()
+    db.prepare(`INSERT INTO wallet_groups(id,label,source,derivation_profile,secret_envelope,mnemonic_fingerprint,created_at,updated_at) VALUES (?,?,'mnemonic','legacy_custom',?,?,?,?)`)
+      .run(groupId, '旧自定义钱包', vault.encryptMnemonic(mnemonic), vault.mnemonicFingerprint(mnemonic), now, now)
+    db.prepare(`INSERT INTO wallets(id,label,address,source,group_id,account_index,account_status,derivation_path,secret_envelope,created_at,updated_at) VALUES (?,? ,?,'mnemonic',?,NULL,'used',?,'',?,?)`)
+      .run(walletId, '自定义账户', account.accountAddress.toStringLong(), groupId, path, now, now)
+    account.privateKey.clear()
+
+    wallets.migrateLegacyMnemonicWallets()
+    expect(wallets.getGroup(groupId).derivationProfile).toBe('legacy_custom')
+    expect(wallets.get(walletId).accountIndex).toBeNull()
+    expect(() => wallets.addAccounts(groupId, 1)).toThrow('不能添加 HD 账户')
+  })
+
+  it('exports v2 backups and restores legacy v1 group fields', () => {
+    const original = wallets.restoreGroup('备份钱包', MNEMONIC, 2)
+    const backup = new BackupService(db).export()
+    expect(backup.version).toBe(2)
+    expect(JSON.stringify(backup)).not.toContain(MNEMONIC)
+    expect(JSON.stringify(backup)).not.toContain('scan_ranges_json')
+
+    const legacy = structuredClone(backup) as VaultBackup
+    legacy.version = 1
+    const groupRow = legacy.tables.wallet_groups[0]
+    groupRow.derivation_profile = 'okx_aptos'
+    groupRow.scan_ranges_json = '[[0,199]]'
+    delete groupRow.next_account_index
+
+    const restoredPath = join(mkdtempSync(join(tmpdir(), 'aptos-hd-restore-')), 'wallet.sqlite')
+    const restoredDb = openDatabase(restoredPath)
+    try {
+      new BackupService(restoredDb).restore(legacy)
+      const restoredVault = new EncryptedVault(restoredDb)
+      return restoredVault.unlock('correct horse battery staple').then(() => {
+        const restoredWallets = new WalletService(restoredDb, restoredVault, new FakeGateway())
+        const restored = restoredWallets.listGroups()[0]
+        expect(restored.id).toBe(original.id)
+        expect(restored.derivationProfile).toBe('aptos_hd')
+        expect(restored.nextAccountIndex).toBe(2)
+        restoredVault.lock()
+      }).finally(() => restoredDb.close())
+    } catch (error) {
+      restoredDb.close()
+      throw error
+    }
+  })
+})

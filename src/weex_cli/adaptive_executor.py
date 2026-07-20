@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeVar
 
 from weex_cli.adaptive_maker import MakerPolicy, MarketSnapshot, Side, WorkingQuote
 from weex_cli.errors import ValidationError
 
 OrderStatus = Literal["not_submitted", "new", "partially_filled", "filled", "canceled", "rejected", "unknown"]
+ProgressSink = Callable[[Mapping[str, object]], None]
+WAIT_HEARTBEAT_MS = 2_000
+READ_OBSERVATION_ATTEMPTS = 3
+_ObservationT = TypeVar("_ObservationT")
+
+
+class ObservationUnavailableError(RuntimeError):
+    """Raised when a bounded read-only observation cannot be completed."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -59,12 +72,7 @@ class TargetRequest:
     client_prefix: str = "adaptive-maker"
 
     def __post_init__(self) -> None:
-        if (
-            not math.isfinite(self.target_position)
-            or self.target_position < 0
-            or self.deadline_ms <= 0
-            or self.poll_interval_ms <= 0
-        ):
+        if not math.isfinite(self.target_position) or self.deadline_ms <= 0 or self.poll_interval_ms <= 0:
             raise ValidationError("target request values are invalid")
         if (
             self.max_requotes < 0
@@ -109,9 +117,10 @@ def execute_adaptive_maker_target(
     venue: MakerVenue,
     policy: MakerPolicy,
     request: TargetRequest,
+    *,
+    progress_sink: ProgressSink | None = None,
 ) -> TargetExecutionResult:
     started = venue.now_ms
-    start_position = venue.position_quantity()
     active: VenueOrder | None = None
     active_submitted_ms: int | None = None
     last_filled = 0.0
@@ -130,6 +139,114 @@ def execute_adaptive_maker_target(
     post_only_rejections = 0
     maker_only = True
     events: list[dict[str, object]] = []
+    last_wait_key: tuple[str, str] | None = None
+    last_wait_emitted_ms: int | None = None
+    last_position: float | None = None
+
+    def record(event: dict[str, object]) -> None:
+        events.append(event)
+        if progress_sink is None:
+            return
+        try:
+            progress_sink(event)
+        except Exception:  # noqa: BLE001 - progress reporting must never alter execution
+            return
+
+    def record_wait(
+        waiting_for: str,
+        delay_ms: int | None,
+        *,
+        force: bool = False,
+        order_id: str | None = None,
+        **fields: object,
+    ) -> None:
+        nonlocal last_wait_emitted_ms, last_wait_key
+        now = venue.now_ms
+        key = (waiting_for, order_id or "")
+        if (
+            not force
+            and key == last_wait_key
+            and last_wait_emitted_ms is not None
+            and now - last_wait_emitted_ms < WAIT_HEARTBEAT_MS
+        ):
+            return
+        last_wait_key = key
+        last_wait_emitted_ms = now
+        record(
+            {
+                "event": "wait",
+                "waiting_for": waiting_for,
+                "elapsed_ms": max(0, now - started),
+                "remaining_ms": max(0, request.deadline_ms - (now - started)),
+                "next_check_ms": delay_ms,
+                "order_id": order_id,
+                **fields,
+            }
+        )
+
+    def read_observation(
+        kind: str,
+        reader: Callable[[], _ObservationT],
+        *,
+        order_id: str | None = None,
+    ) -> _ObservationT:
+        nonlocal observation_errors
+        attempts = min(READ_OBSERVATION_ATTEMPTS, request.max_observation_errors)
+        for attempt in range(1, attempts + 1):
+            try:
+                value = reader()
+            except Exception as exc:  # noqa: BLE001 - bounded retry is read-only
+                observation_errors += 1
+                record(
+                    {
+                        "event": f"{kind}_observation_error",
+                        "error": type(exc).__name__,
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "order_id": order_id,
+                    }
+                )
+                if attempt >= attempts:
+                    raise ObservationUnavailableError(f"{kind}_observation_unavailable") from exc
+                delay = min(2_000, max(250, request.poll_interval_ms) * (2 ** (attempt - 1)))
+                record_wait(
+                    f"{kind}_observation_retry",
+                    delay,
+                    force=True,
+                    order_id=order_id,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                )
+                venue.advance(delay)
+                continue
+            if attempt > 1:
+                record({"event": f"{kind}_observation_recovered", "attempts": attempt, "order_id": order_id})
+            return value
+        raise AssertionError("unreachable")
+
+    def read_position(*, order_id: str | None = None) -> float:
+        nonlocal last_position
+        last_position = read_observation("position", venue.position_quantity, order_id=order_id)
+        return last_position
+
+    def read_snapshot(*, order_id: str | None = None) -> MarketSnapshot:
+        return read_observation("market", venue.snapshot, order_id=order_id)
+
+    set_progress_sink = getattr(venue, "set_progress_sink", None)
+    if callable(set_progress_sink):
+
+        def venue_progress(event: Mapping[str, object]) -> None:
+            detail = dict(event)
+            if detail.pop("event", None) == "wait":
+                delay_ms = int(detail.pop("next_check_ms", 0) or 0)
+                waiting_for = str(detail.pop("waiting_for", "exchange_read"))
+                record_wait(waiting_for, delay_ms, force=True, **detail)
+                return
+            record(detail)
+
+        set_progress_sink(venue_progress)
+
+    start_position = read_position()
 
     def observe(order: VenueOrder) -> str | None:
         nonlocal fill_count, last_filled, last_quote, maker_only, quote_volume
@@ -138,7 +255,7 @@ def execute_adaptive_maker_target(
         if delta_filled > request.tolerance_quantity:
             fill_count += 1
             quote_volume += delta_quote
-            events.append(
+            record(
                 {
                     "event": "fill",
                     "order_id": order.order_id,
@@ -154,13 +271,14 @@ def execute_adaptive_maker_target(
         last_quote = order.cumulative_quote
         return None
 
-    def finish(status: str, reason: str) -> TargetExecutionResult:
+    def finish(status: str, reason: str, *, final_position: float | None = None) -> TargetExecutionResult:
+        resolved_position = last_position if final_position is None else final_position
         return TargetExecutionResult(
             status=status,
             reason=reason,
             elapsed_ms=venue.now_ms - started,
             start_position=start_position,
-            final_position=venue.position_quantity(),
+            final_position=start_position if resolved_position is None else resolved_position,
             target_position=request.target_position,
             quote_volume=quote_volume,
             fill_count=fill_count,
@@ -177,11 +295,17 @@ def execute_adaptive_maker_target(
             events=tuple(events),
         )
 
-    def cancel_and_verify(order: VenueOrder) -> VenueOrder | None:
+    def cancel_and_verify(order: VenueOrder, *, capture_position: bool = True) -> VenueOrder | None:
         nonlocal cancel_verification_attempts, cancel_verification_errors
-        position_before_cancel = venue.position_quantity()
+        position_before_cancel: float | None = None
+        if capture_position:
+            try:
+                position_before_cancel = venue.position_quantity()
+            except Exception:  # noqa: BLE001 - position proof is optional; do not delay the single cancel request
+                position_before_cancel = None
         response: VenueOrder | None = None
         last_verified: VenueOrder | None = None
+        record({"event": "cancel_started", "order_id": order.order_id})
 
         def reconcile_absent(verified: VenueOrder, attempt: int) -> VenueOrder | None:
             nonlocal cancel_verification_errors
@@ -194,10 +318,12 @@ def execute_adaptive_maker_target(
             ):
                 return None
             try:
-                position_after_cancel = venue.position_quantity()
+                if position_before_cancel is None:
+                    return None
+                position_after_cancel = read_position(order_id=order.order_id)
             except Exception as exc:  # noqa: BLE001 - leave the cancellation uncertain when position cannot be checked
                 cancel_verification_errors += 1
-                events.append(
+                record(
                     {
                         "event": "cancel_position_verification_error",
                         "error": type(exc).__name__,
@@ -207,7 +333,7 @@ def execute_adaptive_maker_target(
                 return None
             if abs(position_after_cancel - position_before_cancel) > request.tolerance_quantity:
                 return None
-            events.append(
+            record(
                 {
                     "event": "cancel_reconciled_absent",
                     "attempts": attempt,
@@ -231,10 +357,10 @@ def execute_adaptive_maker_target(
 
         try:
             response = venue.cancel_order(order.order_id, order.client_order_id)
-            events.append({"event": "cancel_response", "status": response.status, "order_id": order.order_id})
+            record({"event": "cancel_response", "status": response.status, "order_id": order.order_id})
         except Exception as exc:  # noqa: BLE001 - the cancel may have reached WEEX; verify without resubmitting it
             cancel_verification_errors += 1
-            events.append(
+            record(
                 {
                     "event": "cancel_request_error",
                     "error": type(exc).__name__,
@@ -248,7 +374,7 @@ def execute_adaptive_maker_target(
                 verified = venue.fetch_order(order.order_id, order.client_order_id)
             except Exception as exc:  # noqa: BLE001 - bounded read-only verification after one cancel request
                 cancel_verification_errors += 1
-                events.append(
+                record(
                     {
                         "event": "cancel_verification_error",
                         "attempt": attempt,
@@ -258,7 +384,7 @@ def execute_adaptive_maker_target(
                 )
             else:
                 last_verified = verified
-                events.append(
+                record(
                     {
                         "event": "cancel_verification",
                         "attempt": attempt,
@@ -273,13 +399,127 @@ def execute_adaptive_maker_target(
                     return reconciled
             if attempt < request.max_cancel_verification_attempts:
                 base_delay = max(250, request.poll_interval_ms)
-                venue.advance(min(2_000, base_delay * (2 ** (attempt - 1))))
+                delay = min(2_000, base_delay * (2 ** (attempt - 1)))
+                record_wait(
+                    "cancel_confirmation",
+                    delay,
+                    force=True,
+                    order_id=order.order_id,
+                    attempt=attempt + 1,
+                    max_attempts=request.max_cancel_verification_attempts,
+                )
+                venue.advance(delay)
         if last_verified is not None:
             return reconcile_absent(last_verified, request.max_cancel_verification_attempts)
         return None
 
+    def stop_after_observation_failure(reason: str) -> TargetExecutionResult:
+        """Contain a known live order before returning an observation failure."""
+        nonlocal active, cancels, venue_cancels, post_only_rejections
+        if active is None:
+            return finish("uncertain", reason)
+        record({"event": "observation_cleanup_started", "reason": reason, "order_id": active.order_id})
+        verified = cancel_and_verify(active, capture_position=reason != "position_observation_unavailable")
+        if verified is None:
+            record({"event": "observation_cleanup_not_confirmed", "reason": reason, "order_id": active.order_id})
+            return finish("uncertain", "cancel_not_confirmed")
+        observation_error = observe(verified)
+        if observation_error is not None:
+            return finish("failed", observation_error)
+        if verified.status == "canceled" and verified.cancellation_reason == "COULD_NOT_FILL":
+            post_only_rejections += 1
+            venue_cancels += 1
+            return finish("failed", "post_only_rejected")
+        if verified.status not in {"filled", "canceled"}:
+            return finish("uncertain", "cancel_not_confirmed")
+        if verified.status == "canceled":
+            cancels += 1
+        active = None
+        record({"event": "observation_cleanup_confirmed", "reason": reason, "order_id": verified.order_id})
+        try:
+            final_position = read_position(order_id=verified.order_id)
+        except ObservationUnavailableError:
+            final_position = None
+        return finish("uncertain", reason, final_position=final_position)
+
+    def finish_deadline() -> TargetExecutionResult:
+        """Close the timeout boundary before allowing a caller to recover exposure."""
+        nonlocal active, cancels, venue_cancels, post_only_rejections
+        cleanup = getattr(venue, "cancel_all_and_verify", None)
+        if callable(cleanup):
+            record({"event": "timeout_cleanup_started"})
+            try:
+                verified_empty = bool(cleanup())
+            except Exception as exc:  # noqa: BLE001 - cleanup uncertainty is terminal
+                record(
+                    {
+                        "event": "timeout_cleanup_error",
+                        "error": type(exc).__name__,
+                    }
+                )
+                return finish("uncertain", "deadline_cleanup_not_confirmed")
+            if not verified_empty:
+                record({"event": "timeout_cleanup_not_confirmed"})
+                return finish("uncertain", "deadline_cleanup_not_confirmed")
+            record({"event": "timeout_cleanup_confirmed"})
+
+            # The batch cleanup proves absence of live orders.  Re-read the
+            # known active order for fill accounting, but never issue a second
+            # per-order cancellation after the batch request.
+            if active is not None:
+                try:
+                    verified = venue.fetch_order(active.order_id, active.client_order_id)
+                except Exception as exc:  # noqa: BLE001 - read-only reconciliation
+                    record(
+                        {
+                            "event": "timeout_order_verification_error",
+                            "error": type(exc).__name__,
+                            "order_id": active.order_id,
+                        }
+                    )
+                    return finish("uncertain", "deadline_order_not_confirmed")
+                observation_error = observe(verified)
+                if observation_error is not None:
+                    return finish("failed", observation_error)
+                if verified.status not in {"filled", "canceled"}:
+                    record(
+                        {
+                            "event": "timeout_order_not_confirmed",
+                            "order_id": active.order_id,
+                            "status": verified.status,
+                        }
+                    )
+                    return finish("uncertain", "deadline_order_not_confirmed")
+                active = None
+        elif active is not None:
+            # Keep simulator and custom venues on the original bounded
+            # per-order path when they do not expose symbol-wide cleanup.
+            verified = cancel_and_verify(active)
+            if verified is None:
+                return finish("uncertain", "deadline_cancel_not_confirmed")
+            observation_error = observe(verified)
+            if observation_error is not None:
+                return finish("failed", observation_error)
+            if verified.status == "canceled" and verified.cancellation_reason == "COULD_NOT_FILL":
+                post_only_rejections += 1
+                venue_cancels += 1
+                return finish("failed", "post_only_rejected")
+            cancels += 1
+            active = None
+
+        try:
+            final_position = read_position()
+        except ObservationUnavailableError:
+            return finish("uncertain", "position_observation_unavailable")
+        if abs(request.target_position - final_position) <= request.tolerance_quantity:
+            return finish("completed", "target_reached", final_position=final_position)
+        return finish("failed", "deadline_exceeded")
+
     while venue.now_ms - started <= request.deadline_ms:
-        current = venue.position_quantity()
+        try:
+            current = read_position(order_id=active.order_id if active is not None else None)
+        except ObservationUnavailableError as exc:
+            return stop_after_observation_failure(exc.reason)
         if request.side == "buy" and current > request.target_position + request.tolerance_quantity:
             return finish("failed", "target_overfilled")
         if request.side == "sell" and current < request.target_position - request.tolerance_quantity:
@@ -292,7 +532,7 @@ def execute_adaptive_maker_target(
             except Exception as exc:  # noqa: BLE001 - retry only this read-only observation
                 observation_errors += 1
                 consecutive_observation_errors += 1
-                events.append(
+                record(
                     {
                         "event": "observation_error",
                         "error": type(exc).__name__,
@@ -301,16 +541,25 @@ def execute_adaptive_maker_target(
                     }
                 )
                 if consecutive_observation_errors >= request.max_observation_errors:
-                    return finish("uncertain", "order_observation_unavailable")
+                    return stop_after_observation_failure("order_observation_unavailable")
                 delay = min(10_000, request.poll_interval_ms * (2 ** (consecutive_observation_errors - 1)))
-                venue.advance(min(delay, max(0, request.deadline_ms - (venue.now_ms - started))))
+                bounded_delay = min(delay, max(0, request.deadline_ms - (venue.now_ms - started)))
+                record_wait(
+                    "order_observation_retry",
+                    bounded_delay,
+                    force=True,
+                    order_id=active.order_id,
+                    attempt=consecutive_observation_errors,
+                    max_attempts=request.max_observation_errors,
+                )
+                venue.advance(bounded_delay)
                 continue
             active = order
 
             if order.status == "unknown":
                 observation_errors += 1
                 consecutive_observation_errors += 1
-                events.append(
+                record(
                     {
                         "event": "observation_unknown",
                         "attempt": consecutive_observation_errors,
@@ -319,9 +568,18 @@ def execute_adaptive_maker_target(
                     }
                 )
                 if consecutive_observation_errors >= request.max_observation_errors:
-                    return finish("uncertain", "order_observation_unavailable")
+                    return stop_after_observation_failure("order_observation_unavailable")
                 delay = min(10_000, request.poll_interval_ms * (2 ** (consecutive_observation_errors - 1)))
-                venue.advance(min(delay, max(0, request.deadline_ms - (venue.now_ms - started))))
+                bounded_delay = min(delay, max(0, request.deadline_ms - (venue.now_ms - started)))
+                record_wait(
+                    "order_observation_retry",
+                    bounded_delay,
+                    force=True,
+                    order_id=active.order_id,
+                    attempt=consecutive_observation_errors,
+                    max_attempts=request.max_observation_errors,
+                )
+                venue.advance(bounded_delay)
                 continue
             consecutive_observation_errors = 0
             observation_error = observe(order)
@@ -334,7 +592,7 @@ def execute_adaptive_maker_target(
             if order.status == "canceled" and order.cancellation_reason == "COULD_NOT_FILL":
                 post_only_rejections += 1
                 venue_cancels += 1
-                events.append(
+                record(
                     {
                         "event": "post_only_rejection",
                         "order_id": order.order_id,
@@ -345,13 +603,16 @@ def execute_adaptive_maker_target(
             if order.status in {"filled", "canceled"}:
                 if order.status == "canceled":
                     venue_cancels += 1
-                events.append({"event": "order_terminal", "status": order.status, "order_id": order.order_id})
+                record({"event": "order_terminal", "status": order.status, "order_id": order.order_id})
                 active = None
                 last_filled = 0.0
                 last_quote = 0.0
                 continue
 
-            snapshot = venue.snapshot()
+            try:
+                snapshot = read_snapshot(order_id=order.order_id)
+            except ObservationUnavailableError as exc:
+                return stop_after_observation_failure(exc.reason)
             elapsed = venue.now_ms - started
             urgency = min(1.0, elapsed / request.deadline_ms)
             working = WorkingQuote(
@@ -381,7 +642,7 @@ def execute_adaptive_maker_target(
                     return finish("failed", "post_only_rejected")
                 cancels += 1
                 requotes += 1
-                events.append({"event": "cancel", "reason": decision.reason, "order_id": order.order_id})
+                record({"event": "cancel", "reason": decision.reason, "order_id": order.order_id})
                 active = None
                 active_submitted_ms = None
                 last_filled = 0.0
@@ -390,6 +651,15 @@ def execute_adaptive_maker_target(
                     return finish("failed", "max_requotes_exhausted")
                 continue
 
+            record_wait(
+                "maker_fill",
+                request.poll_interval_ms,
+                order_id=order.order_id,
+                status=order.status,
+                filled_quantity=order.filled_quantity,
+                order_quantity=order.quantity,
+                remaining_quantity=remaining,
+            )
             venue.advance(request.poll_interval_ms)
             continue
 
@@ -398,10 +668,16 @@ def execute_adaptive_maker_target(
 
         # The Demo venue may need to wait 10.1 seconds between submissions.
         # Wait first so the quote is derived from the freshest available book.
+        submission_wait_ms = getattr(venue, "submission_wait_ms", lambda: 0)()
+        if submission_wait_ms > 0:
+            record_wait("submission_slot", submission_wait_ms, force=True)
         venue.wait_for_submission_slot()
         if venue.now_ms - started > request.deadline_ms:
-            return finish("failed", "deadline_exceeded")
-        snapshot = venue.snapshot()
+            return finish_deadline()
+        try:
+            snapshot = read_snapshot()
+        except ObservationUnavailableError as exc:
+            return stop_after_observation_failure(exc.reason)
         elapsed = venue.now_ms - started
         urgency = min(1.0, elapsed / request.deadline_ms)
         decision = policy.decide(snapshot, request.side, remaining, urgency)
@@ -415,7 +691,7 @@ def execute_adaptive_maker_target(
         order = venue.submit_post_only(request.side, quantity, decision.price, client_order_id)
         if order.status == "not_submitted":
             preflight_skips += 1
-            events.append(
+            record(
                 {
                     "event": "preflight_skip",
                     "reason": order.cancellation_reason or "local_price_would_take",
@@ -428,6 +704,12 @@ def execute_adaptive_maker_target(
                 delay = min(2_000, 250 * (2 ** (preflight_skips - 1)))
             else:
                 delay = min(request.poll_interval_ms, 250)
+            record_wait(
+                "submission_preflight_retry",
+                delay,
+                force=True,
+                reason=order.cancellation_reason or "local_price_would_take",
+            )
             venue.advance(delay)
             continue
         submissions += 1
@@ -440,7 +722,7 @@ def execute_adaptive_maker_target(
         active_submitted_ms = venue.now_ms
         last_filled = 0.0
         last_quote = 0.0
-        events.append(
+        record(
             {
                 "event": "submit",
                 "submitted_ms": venue.now_ms,
@@ -450,25 +732,20 @@ def execute_adaptive_maker_target(
                 "decision": decision.reason,
             }
         )
+        if order.status in {"new", "partially_filled", "unknown"}:
+            record_wait(
+                "maker_fill",
+                request.poll_interval_ms,
+                force=True,
+                order_id=order.order_id,
+                status=order.status,
+                filled_quantity=order.filled_quantity,
+                order_quantity=order.quantity,
+                remaining_quantity=remaining,
+            )
         venue.advance(request.poll_interval_ms)
 
-    if active is None and abs(request.target_position - venue.position_quantity()) <= request.tolerance_quantity:
-        return finish("completed", "target_reached")
-    if active is not None:
-        verified = cancel_and_verify(active)
-        if verified is None:
-            return finish("uncertain", "deadline_cancel_not_confirmed")
-        observation_error = observe(verified)
-        if observation_error is not None:
-            return finish("failed", observation_error)
-        if verified.status == "canceled" and verified.cancellation_reason == "COULD_NOT_FILL":
-            post_only_rejections += 1
-            venue_cancels += 1
-            return finish("failed", "post_only_rejected")
-        cancels += 1
-        if abs(request.target_position - venue.position_quantity()) <= request.tolerance_quantity:
-            return finish("completed", "target_reached")
-    return finish("failed", "deadline_exceeded")
+    return finish_deadline()
 
 
 def _is_post_only_price(snapshot: MarketSnapshot, side: Side, price: float) -> bool:

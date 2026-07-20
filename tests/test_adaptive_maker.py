@@ -43,6 +43,17 @@ def test_policy_quotes_never_cross_the_book() -> None:
     assert sell.action == "quote" and sell.price is not None and sell.price > market.bid
 
 
+def test_same_side_policy_quotes_exact_bid1_and_ask1_even_with_a_wide_spread() -> None:
+    policy = AdaptiveMakerPolicy(MakerPolicyConfig(allow_inside_spread=False))
+    market = snapshot(bid=100, ask=101)
+
+    buy = policy.decide(market, "buy", 0.01, 0)
+    sell = policy.decide(market, "sell", 0.01, 0)
+
+    assert buy.price == pytest.approx(market.bid)
+    assert sell.price == pytest.approx(market.ask)
+
+
 def test_passive_guard_quotes_one_tick_behind_bbo() -> None:
     policy = AdaptiveMakerPolicy(MakerPolicyConfig(passive_guard_ticks=1))
     market = snapshot()
@@ -174,6 +185,24 @@ class ImmediateCancelPolicy:
         return QuoteDecision("cancel", None, 0, 0, 0, "test_cancel")
 
 
+@dataclass
+class AlwaysHoldPolicy:
+    config: MakerPolicyConfig = MakerPolicyConfig(min_rest_ms=100, max_rest_ms=10_000)
+
+    def decide(
+        self,
+        market: MarketSnapshot,
+        side: Side,
+        remaining_quantity: float,
+        urgency: float,
+        working: WorkingQuote | None = None,
+    ) -> QuoteDecision:
+        if working is None:
+            price = market.bid if side == "buy" else market.ask
+            return QuoteDecision("quote", price, 1, 0, 0, "test_quote")
+        return QuoteDecision("hold", working.price, 1, 0, 0, "test_hold")
+
+
 def fast_venue(seed: int = 7, *, fault: str | None = None) -> SimulatedMakerVenue:
     return SimulatedMakerVenue(
         seed,
@@ -196,6 +225,65 @@ def test_partial_fill_is_reconciled_before_cancel_and_target_finishes_exactly() 
     assert result.quote_volume > 0
     assert abs(result.final_position - 0.02) <= 1e-9
     assert result.maker_only is True
+
+
+def test_deadline_uses_symbol_wide_cleanup_and_stops_when_cleanup_is_uncertain() -> None:
+    venue = fast_venue()
+    cleanup_calls = 0
+
+    def cleanup() -> bool:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return False
+
+    venue.cancel_all_and_verify = cleanup  # type: ignore[attr-defined]
+    result = execute_adaptive_maker_target(
+        venue,
+        AlwaysHoldPolicy(),
+        TargetRequest("buy", 0.02, deadline_ms=1, poll_interval_ms=1),
+    )
+
+    assert cleanup_calls == 1
+    assert result.status == "uncertain"
+    assert result.reason == "deadline_cleanup_not_confirmed"
+    assert any(row["event"] == "timeout_cleanup_started" for row in result.events)
+
+
+def test_progress_sink_receives_order_and_wait_events_during_execution() -> None:
+    progress: list[dict[str, object]] = []
+
+    result = execute_adaptive_maker_target(
+        fast_venue(),
+        AdaptiveMakerPolicy(MakerPolicyConfig()),
+        TargetRequest("buy", 0.01, deadline_ms=10_000, poll_interval_ms=100),
+        progress_sink=lambda event: progress.append(dict(event)),
+    )
+
+    assert result.status == "completed"
+    assert progress == list(result.events)
+    assert any(row["event"] == "submit" for row in progress)
+    assert any(row["event"] == "fill" for row in progress)
+    assert any(row["event"] == "wait" and row["waiting_for"] == "maker_fill" for row in progress)
+
+
+def test_wait_heartbeats_are_rate_limited_during_slow_maker_fill() -> None:
+    venue = SimulatedMakerVenue(
+        7,
+        SimulationConfig(queue_factor=1_000, base_depth=1, base_flow_per_sec=0.0001),
+    )
+    progress: list[dict[str, object]] = []
+
+    execute_adaptive_maker_target(
+        venue,
+        AlwaysHoldPolicy(),
+        TargetRequest("buy", 0.01, deadline_ms=4_500, poll_interval_ms=100, max_requotes=0),
+        progress_sink=lambda event: progress.append(dict(event)),
+    )
+
+    waits = [row for row in progress if row["event"] == "wait" and row.get("waiting_for") == "maker_fill"]
+    assert 2 <= len(waits) <= 3
+    elapsed = [int(row["elapsed_ms"]) for row in waits]
+    assert all(later - earlier >= 2_000 for earlier, later in zip(elapsed, elapsed[1:], strict=False))
 
 
 def test_transient_unknown_order_state_recovers_without_resubmission() -> None:
@@ -225,9 +313,10 @@ def test_persistent_unknown_order_state_halts_without_resubmission() -> None:
     )
 
     assert result.status == "uncertain"
-    assert result.reason == "order_observation_unavailable"
+    assert result.reason == "cancel_not_confirmed"
     assert result.submissions == 1
     assert result.observation_errors == 12
+    assert any(event["event"] == "observation_cleanup_not_confirmed" for event in result.events)
 
 
 def test_transient_observation_error_retries_query_without_resubmission() -> None:
@@ -252,6 +341,135 @@ def test_transient_observation_error_retries_query_without_resubmission() -> Non
     assert result.status == "completed"
     assert result.observation_errors == 1
     assert result.submissions == 1
+
+
+def test_transient_position_timeout_with_live_order_retries_without_resubmission() -> None:
+    class Venue:
+        def __init__(self) -> None:
+            self._now = 0
+            self.position = 0.0
+            self.order = None
+            self.position_timeout_pending = False
+            self.submissions = 0
+            self.cancels = 0
+
+        @property
+        def now_ms(self):
+            return self._now
+
+        def position_quantity(self):
+            if self.position_timeout_pending:
+                self.position_timeout_pending = False
+                raise TimeoutError("temporary position timeout")
+            return self.position
+
+        def wait_for_submission_slot(self):
+            return None
+
+        def snapshot(self):
+            return snapshot(timestamp_ms=self._now)
+
+        def submit_post_only(self, side, quantity, price, client_order_id):
+            self.submissions += 1
+            self.position_timeout_pending = True
+            self.order = VenueOrder(
+                "position-timeout-1", client_order_id, side, price, quantity, 0, 0, "new", True, None
+            )
+            return self.order
+
+        def fetch_order(self, order_id, client_order_id):
+            if self.order.status == "new":
+                self.position = self.order.quantity
+                self.order = replace(
+                    self.order,
+                    filled_quantity=self.order.quantity,
+                    cumulative_quote=self.order.quantity * self.order.price,
+                    status="filled",
+                    maker=True,
+                )
+            return self.order
+
+        def cancel_order(self, order_id, client_order_id):
+            self.cancels += 1
+            raise AssertionError("a transient position timeout must not cancel the order")
+
+        def advance(self, milliseconds):
+            self._now += milliseconds
+
+    venue = Venue()
+    result = execute_adaptive_maker_target(
+        venue,
+        AdaptiveMakerPolicy(MakerPolicyConfig(adverse_threshold=1)),
+        TargetRequest("buy", 0.01, deadline_ms=30_000),
+    )
+
+    assert result.status == "completed"
+    assert result.submissions == 1
+    assert venue.submissions == 1
+    assert venue.cancels == 0
+    assert any(event["event"] == "position_observation_error" for event in result.events)
+    assert any(
+        event["event"] == "wait" and event.get("waiting_for") == "position_observation_retry" for event in result.events
+    )
+
+
+def test_persistent_position_timeout_cancels_known_order_once_before_stopping() -> None:
+    class Venue:
+        def __init__(self) -> None:
+            self._now = 0
+            self.position = 0.0
+            self.order = None
+            self.position_calls = 0
+            self.submissions = 0
+            self.cancels = 0
+
+        @property
+        def now_ms(self):
+            return self._now
+
+        def position_quantity(self):
+            self.position_calls += 1
+            if self.order is not None:
+                raise TimeoutError("persistent position timeout")
+            return self.position
+
+        def wait_for_submission_slot(self):
+            return None
+
+        def snapshot(self):
+            return snapshot(timestamp_ms=self._now)
+
+        def submit_post_only(self, side, quantity, price, client_order_id):
+            self.submissions += 1
+            self.order = VenueOrder(
+                "persistent-timeout-1", client_order_id, side, price, quantity, 0, 0, "new", True, None
+            )
+            return self.order
+
+        def fetch_order(self, order_id, client_order_id):
+            return self.order
+
+        def cancel_order(self, order_id, client_order_id):
+            self.cancels += 1
+            self.order = replace(self.order, status="canceled")
+            return self.order
+
+        def advance(self, milliseconds):
+            self._now += milliseconds
+
+    venue = Venue()
+    result = execute_adaptive_maker_target(
+        venue,
+        AlwaysHoldPolicy(),
+        TargetRequest("buy", 0.01, deadline_ms=30_000),
+    )
+
+    assert result.status == "uncertain"
+    assert result.reason == "position_observation_unavailable"
+    assert result.submissions == 1
+    assert venue.submissions == 1
+    assert venue.cancels == 1
+    assert any(event["event"] == "observation_cleanup_confirmed" for event in result.events)
 
 
 def test_successful_reads_reset_consecutive_observation_error_budget() -> None:

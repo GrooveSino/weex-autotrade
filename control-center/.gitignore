@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.venv/
+.env
+.env.*
+!.env.example
+/server/data/
+!/src/data/
+!/src/data/**
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.local
+*.log

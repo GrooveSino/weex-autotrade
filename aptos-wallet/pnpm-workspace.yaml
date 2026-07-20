@@ -1,0 +1,10 @@
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+
+# Reject packages published less than 24 hours ago unless explicitly reviewed.
+minimumReleaseAge: 1440
+
+# Keep the Baseline database on the last release that passed the age policy.
+overrides:
+  baseline-browser-mapping: 2.10.43

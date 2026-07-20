@@ -8,6 +8,7 @@ _ASSIGNMENT_RE = re.compile(
     r"(?i)(api[_-]?key|secret|passphrase|password|u[_-]?token|cc[_-]?token|r[_-]?token|terminal[_-]?code)"
     r"\s*[:=]\s*([^\s,;}]+)"
 )
+_URL_CREDENTIALS_RE = re.compile(r"(?i)\b(https?|socks5)://[^/@\s]+:[^/@\s]+@")
 
 
 def _is_sensitive_key(value: object) -> bool:
@@ -20,7 +21,8 @@ def _is_sensitive_key(value: object) -> bool:
 
 
 def redact_text(value: object) -> str:
-    return _ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", str(value))
+    redacted = _URL_CREDENTIALS_RE.sub(lambda match: f"{match.group(1)}://[REDACTED]@", str(value))
+    return _ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", redacted)
 
 
 def redact(value: Any) -> Any:

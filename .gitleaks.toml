@@ -1,0 +1,37 @@
+title = "weex-autotrade secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "weex-environment-secret"
+description = "WEEX credential assigned to an environment variable"
+regex = '''(?i)WEEX_(?:API_KEY|API_SECRET|API_PASSPHRASE|WEB_CC_TOKEN|WEB_TERMINAL_CODE)[ \t]*=[ \t]*["']?([A-Za-z0-9._+/=-]{12,})'''
+secretGroup = 1
+keywords = ["WEEX_"]
+
+[[rules.allowlists]]
+description = "Clearly synthetic credential values used by offline tests"
+regexTarget = "secret"
+regexes = ['''(?i)(?:example|test|fake|demo|project|parent|visible|never|redacted|placeholder)''']
+
+[[rules]]
+id = "aptos-aip80-private-key"
+description = "Aptos AIP-80 Ed25519 private key"
+regex = '''ed25519-priv-0x([0-9a-fA-F]{64})'''
+secretGroup = 1
+keywords = ["ed25519-priv-0x"]
+
+[[rules]]
+id = "named-hex-private-key"
+description = "Hex private key assigned to a private-key field"
+regex = '''(?i)(?:private[_-]?key)\s*[:=]\s*["']((?:0x)?[0-9a-f]{64})["']'''
+secretGroup = 1
+keywords = ["private", "key"]
+
+[[rules]]
+id = "mnemonic-or-seed-phrase"
+description = "Mnemonic or seed phrase assigned in source or configuration"
+regex = '''(?i)(?:mnemonic|seed[_ -]?phrase)\s*[:=]\s*["']([a-z]+(?:\s+[a-z]+){11,23})["']'''
+secretGroup = 1
+keywords = ["mnemonic", "seed"]

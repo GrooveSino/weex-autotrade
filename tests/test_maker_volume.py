@@ -104,12 +104,14 @@ def plan(**overrides) -> MakerVolumePlan:
 
 def service(gateway: MakerGateway) -> MakerVolumeService:
     clock = FakeClock()
-    return MakerVolumeService(
+    maker = MakerVolumeService(
         gateway,  # type: ignore[arg-type]
         clock=clock,
         sleep=clock.sleep,
         prefix_factory=lambda symbol: "mv-btc-test",
     )
+    maker.trading.sleep = lambda _: None
+    return maker
 
 
 def test_plan_and_confirmation_match_batch_contract() -> None:
@@ -173,7 +175,7 @@ def test_transient_history_read_errors_recover_without_resubmission() -> None:
 
 def test_repeated_history_read_errors_stop_as_uncertain_without_resubmission() -> None:
     gateway = MakerGateway()
-    gateway.history_failures = 4
+    gateway.history_failures = 9
     result = service(gateway).run(plan())
 
     assert result["status"] == "uncertain"

@@ -66,6 +66,48 @@ class TradeReportService:
             "trades": trades,
         }
 
+    def report_order_ids(
+        self,
+        *,
+        symbol: str,
+        order_ids: tuple[str, ...],
+        start_time: int,
+        end_time: int,
+    ) -> dict[str, Any]:
+        _validate_range("live", start_time, end_time)
+        raw_rows: list[dict[str, Any]] = []
+        complete = True
+        warnings: list[str] = []
+        for order_id in order_ids:
+            batch = self.gateway.trade_rows_by_order_id(
+                symbol,
+                order_id,
+                start_time=start_time,
+                end_time=end_time,
+                limit=LIVE_LIMIT,
+            )
+            raw_rows.extend(row for row in batch if isinstance(row, dict))
+            if len(batch) >= LIVE_LIMIT:
+                complete = False
+                warnings.append(f"Order {order_id} returned at least {LIVE_LIMIT} fills; totals may be incomplete.")
+        trades = _normalize_rows(raw_rows, "live", start_time, end_time)
+        accepted_ids = set(order_ids)
+        trades = [trade for trade in trades if str(trade.get("order_id") or "") in accepted_ids]
+        return {
+            "mode": "live",
+            "symbol": symbol.upper(),
+            "source": "user_trades",
+            "granularity": "fill",
+            "start_time": start_time,
+            "start_datetime": _datetime_text(start_time),
+            "end_time": end_time,
+            "end_datetime": _datetime_text(end_time),
+            "complete": complete,
+            "warnings": warnings,
+            "summary": _summary(trades, "live"),
+            "trades": trades,
+        }
+
     def _demo_rows(
         self, symbol: str | None, start_time: int, end_time: int
     ) -> tuple[list[dict[str, Any]], bool, list[str]]:

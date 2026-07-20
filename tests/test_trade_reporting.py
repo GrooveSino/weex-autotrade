@@ -20,6 +20,10 @@ class FakeGateway:
             return []
         return self.rows
 
+    def trade_rows_by_order_id(self, symbol, order_id, **kwargs):
+        self.calls.append({"symbol": symbol, "order_id": order_id, **kwargs})
+        return [row for row in self.rows if str(row.get("orderId") or "") == order_id]
+
 
 def test_demo_report_counts_opening_and_closing_volume() -> None:
     gateway = FakeGateway(
@@ -139,6 +143,48 @@ def test_live_report_uses_fill_fields_and_fee_assets() -> None:
     assert summary["taker_quote_volume"] == "210"
     assert summary["commission_by_asset"] == {"USDT": "0.05"}
     assert summary["realized_pnl"] == "10"
+
+
+def test_live_order_id_report_uses_exact_endpoint_and_filters_rows() -> None:
+    now = current_timestamp_ms()
+    gateway = FakeGateway(
+        [
+            {
+                "id": "fill-1",
+                "orderId": "wanted",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "positionSide": "LONG",
+                "price": "100",
+                "qty": "1",
+                "quoteQty": "100",
+                "maker": True,
+                "time": now,
+            },
+            {
+                "id": "fill-2",
+                "orderId": "other",
+                "symbol": "BTCUSDT",
+                "qty": "1",
+                "quoteQty": "200",
+                "maker": True,
+                "time": now,
+            },
+        ]
+    )
+
+    report = TradeReportService(gateway).report_order_ids(
+        symbol="BTC",
+        order_ids=("wanted",),
+        start_time=now - 1,
+        end_time=now,
+    )
+
+    assert report["complete"] is True
+    assert report["summary"]["total_quote_volume"] == "100"
+    assert gateway.calls == [
+        {"symbol": "BTC", "order_id": "wanted", "start_time": now - 1, "end_time": now, "limit": 100}
+    ]
 
 
 def test_demo_report_paginates_until_short_page(monkeypatch) -> None:

@@ -79,6 +79,7 @@ class MakerPolicyConfig:
     urgent_guard_ticks: int = 0
     max_passive_guard_ticks: int = 0
     volatility_guard_multiplier: float = 0.0
+    allow_inside_spread: bool = True
 
     def __post_init__(self) -> None:
         if self.min_rest_ms < 0 or self.max_rest_ms <= self.min_rest_ms:
@@ -192,7 +193,11 @@ class AdaptiveMakerPolicy:
         )
         guard = guard_ticks * snapshot.tick_size
         candidates = [snapshot.bid - guard if side == "buy" else snapshot.ask + guard]
-        if self.config.passive_guard_ticks == 0 and snapshot.spread_ticks >= self.config.improve_spread_ticks:
+        if (
+            self.config.allow_inside_spread
+            and self.config.passive_guard_ticks == 0
+            and snapshot.spread_ticks >= self.config.improve_spread_ticks
+        ):
             improved = candidates[0] + snapshot.tick_size if side == "buy" else candidates[0] - snapshot.tick_size
             if snapshot.bid < improved < snapshot.ask:
                 candidates.append(improved)

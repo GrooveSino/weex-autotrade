@@ -20,7 +20,12 @@ Use a unique client order ID for every intended submission. On timeout, disconne
 
 ## Existing Exposure
 
-Before opening, check existing positions for the symbol. In live mode, also check regular open orders and block by default when either exists. The documented Demo surface has no regular-open-order endpoint, so Demo can only precheck positions; review Demo order history separately before execution. Require an explicit override after account review. Allow reduce-only/close paths to bypass the opening guard.
+Before opening, check existing positions for the symbol. In live mode, also check regular open orders and block by default when either exists. The documented Demo V3 surface has no regular-open-order endpoint; when current-project Web Demo credentials are configured, use the unofficial Web adapter to precheck regular open orders. Without that visibility, review V3 history and fail closed or require an explicit override after account review. Allow reduce-only/close paths to bypass the opening guard.
+
+For Demo Web cancellation, submit the cancel request once and then query active
+orders. Only verified absence permits a replacement order. A remaining ID is
+`cancel_pending`; a failed verification is `uncertain`. Never repeat the cancel
+mutation automatically and never fall back to a live endpoint.
 
 Validate intent direction before submission: opening a long uses buy, opening a short uses sell, reducing a long uses sell, and reducing a short uses buy. For attached protection on limit entries, require long TP above and SL below entry, with the inverse geometry for shorts.
 

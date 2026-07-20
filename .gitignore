@@ -7,7 +7,16 @@
 *.p12
 *.pfx
 *.jks
+*.keystore
+*.seed
+*.mnemonic
+*.secrets
+credentials.*
+secrets.*
 keysecret
+aptos-wallet-backup*.json
+wallet-backup*.json
+*vault-backup*.json
 
 # Python
 __pycache__/
@@ -34,9 +43,20 @@ env/
 coverage.xml
 htmlcov/
 pytestdebug.log
+.nyc_output/
+coverage/
+*.lcov
 dist/
 build/
 *.egg-info/
+
+# Node.js and frontend tooling
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+playwright-report/
+test-results/
 
 # Runtime data
 artifacts/
@@ -45,9 +65,13 @@ logs/
 *.log
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 *.db
 *.db-shm
 *.db-wal
+*.pid
+*.sock
 
 # Editors and personal tooling
 .idea/
@@ -59,6 +83,11 @@ logs/
 .codebase-memory/
 .direnv/
 .envrc
+.vscode/
+
+# Local planning notes are intentionally excluded from the public repository
+docs/prompts/
+control-center/当前缺少的需求与资料.txt
 
 # macOS
 .DS_Store

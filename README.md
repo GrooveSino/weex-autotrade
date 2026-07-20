@@ -1,8 +1,20 @@
-# WEEX AutoTrade
+# Local Trading & Wallet Tools
 
 [![CI](https://github.com/GrooveSino/weex-autotrade/actions/workflows/ci.yml/badge.svg)](https://github.com/GrooveSino/weex-autotrade/actions/workflows/ci.yml)
+[![Secret scan](https://github.com/GrooveSino/weex-autotrade/actions/workflows/security.yml/badge.svg)](https://github.com/GrooveSino/weex-autotrade/actions/workflows/security.yml)
 
-面向 WEEX USDT 合约的本地命令行交易工具。默认使用 WEEX Demo，所有写操作默认只生成计划；只有同时提供 `--execute`、完全一致的确认短语，并在实盘模式下显式开启环境开关，命令才会提交到交易所。
+本仓库包含面向 WEEX USDT 合约的本地交易工具、网页控制中心，以及独立的 Aptos 本地多账户钱包。所有服务默认只监听本机；交易写操作默认关闭或只生成计划，必须经过环境开关、预检和精确人工确认才能提交。
+
+## 仓库组成
+
+| 目录 | 用途 | 默认安全状态 |
+| --- | --- | --- |
+| `src/weex_cli/` | WEEX 命令行交易、对账和恢复工具 | Demo、dry-run |
+| [`control-center/`](control-center/README.md) | WEEX 多账号网页控制中心和本地 API | Mock、实盘关闭 |
+| [`aptos-wallet/`](aptos-wallet/README.md) | Aptos 多账户钱包和批量转账工具 | 主网只读、提交关闭 |
+| [`docs/`](docs/README.md) | API、接口契约、可靠性设计和已脱敏缺陷报告 | 不包含账户数据 |
+
+公开仓库不包含 `.env`、API 凭据、助记词、私钥、钱包数据库、账户快照、订单日志或运行产物。克隆后必须使用自己的本地配置；不要把真实秘密粘贴到 Issue、PR、截图或测试夹具中。
 
 ## 安全边界
 
@@ -14,6 +26,10 @@
 - 网络错误后不会自动重试下单；CLI 会先按 `clientOrderId` 回读，无法确认时报告“结果未知”。
 - 更新止损使用“提交新止损 -> 验证新止损 -> 撤销旧止损”的顺序。
 - `.env`、日志、数据库和本地运行产物均被 Git 忽略。
+
+## 多账号控制中心
+
+多账号 API Key、独立 HTTPS/SOCKS5 代理、余额/成交量遥测和按需日志控制台位于 [`control-center/`](control-center/README.md)。Beta 比例服务地址必须通过本地配置显式提供；仓库不包含私人部署地址或账户资料。
 
 ## 环境要求
 
@@ -85,7 +101,99 @@ API Key 建议绑定固定出口 IP。新 Key 初期只开启所需的合约权�
 
 旧的 `weex account ...`、`weex orders ...`、`weex volume ...` 路径继续兼容，但不再挤占主帮助界面。
 
+## 实盘纯 Maker 目标交易量
+
+`live maker-volume` 把一轮定义为一次开仓和对应平仓的实际成交额之和。默认目标为 5000 USDT、
+每轮约 500 USDT，因此单轮瞬时仓位约为 250 USDT；轮次按多、空交替执行，并且每轮结束后必须回到空仓。
+交易量只采用 WEEX `userTrades.quoteQty` 中已确认的 Maker fill，计划金额和订单提交金额不会入账。
+
+可以直接读取项目内显式 TOML profile。profile 只是凭据和额外的拒绝开关，不能替代独立的实盘环境门：
+
+```bash
+# 1. 生成并保存 dry-run，不会下单
+./weex --profile data/live-test/weex-live-test.toml live maker-volume \
+  --symbol BTC --target 5000 --round 500 --timeout 120 --leverage 2
+
+# 2. 使用上一步输出的 plan ID 和完整确认短语执行
+WEEX_LIVE_TRADING_ENABLED=true ./weex \
+  --profile data/live-test/weex-live-test.toml \
+  live maker-volume --plan-id lmv-example --execute \
+  --confirm 'EXECUTE WEEX LIVE MAKER VOLUME ...'
+```
+
+`--leverage` 必须与账户中已经配置的逐仓杠杆一致；程序不会静默修改杠杆。部分成交会在撤单已确认后按实际仓位
+继续纯 Maker 平仓，必要时使用有限次数的恢复尝试。订单状态不确定、Taker fill、`POST_ONLY` 拒绝、无法验证撤单
+或无法证明最终空仓时，整个 session 立即停止，不会追价、降级或自动重试不确定的提交。数量步进可能造成少量目标超额，
+结果中的 `excess_quote` 会明确列出该数值。
+
+## 实盘 Beta 配对交易量
+
+需要无人值守地跨多个安全 session 自动续跑时，使用 `live beta-campaign`。它只要求一次 campaign 级确认，
+默认授权 6 小时内最多 20 个 child session；每个 child 仍然只能使用 `POST_ONLY`，并且只有在 BTC/ETH
+均空仓、普通单和条件单都为零时才会进入下一个 child：
+
+```bash
+# 1. 生成 3000 USDT、单轮约 300 USDT 的 campaign，不下单
+./weex --profile data/live-test/weex-live-test.toml \
+  live beta-campaign \
+  --target 3000 \
+  --cycle-volume 300 \
+  --hold-min 5 --hold-max 7 \
+  --round-gap-min 5 --round-gap-max 7
+
+# 2. 原样执行输出中的 execute_command；确认短语整个 campaign 只输入一次
+WEEX_LIVE_TRADING_ENABLED=true ./weex \
+  --profile data/live-test/weex-live-test.toml \
+  live beta-campaign --execute \
+  --confirm 'EXECUTE WEEX LIVE BETA-CAMPAIGN WC-EXAMPLE RUNS_20 POST_ONLY'
+```
+
+Campaign 只会为“空轮耗尽”或“轮次数耗尽”这类已确认空仓的软停止自动创建新 child。提交状态不确定、
+非 Maker/未知流动性成交、成交对账失败、仓位或挂单不可观测都会终止整个 campaign。累计量只采用每个
+child 经 `userTrades.quoteQty` 验证的 Maker 成交，不使用计划量估算。
+
+`--hold-min/--hold-max` 以分钟为单位，控制两条腿都确认开仓后，到开始并发平仓前的随机等待范围；
+`--round-gap-min/--round-gap-max` 也以分钟为单位，控制本轮确认空仓后，到下一轮开仓前的随机等待范围。
+每轮独立均匀取值。默认不持仓等待，轮次间固定等待 1 分钟。超时、恢复次数、最大仓位、杠杆和 campaign 上限由程序采用保守默认值，
+不再作为普通命令行参数暴露。
+
+`live beta-volume` 默认只生成计划。默认目标为 5000 USDT、每个完整配对周期约 500 USDT。单轮目标量先
+除以 2 得到开仓预算，再按 `BTC = budget / (1 + beta)`、`ETH = beta * BTC` 分配为 BTC 多仓和 ETH
+空仓。BTC/ETH 使用独立客户端并发开仓；两边开仓阶段结束后，再按实际仓位并发平仓：
+
+```bash
+# 生成计划，不下单
+./weex --profile data/live-test/weex-live-test.toml \
+  live beta-volume --target 5000 --round 500
+
+# 计划输出会给出 plan ID 和唯一确认短语
+WEEX_LIVE_TRADING_ENABLED=true ./weex \
+  --profile data/live-test/weex-live-test.toml \
+  live beta-volume \
+  --plan wv-example \
+  --execute \
+  --confirm 'EXECUTE WEEX LIVE BETA-VOLUME WV-EXAMPLE LEVERAGE_AUTO POST_ONLY'
+```
+
+杠杆默认是 `auto`，不需要手工估算。程序在每个空仓周期开始前重新读取可用 USDT，并按
+`ceil(本轮实际开仓名义金额 × 1.20 / 可用余额)` 选择最小整数杠杆；BTC 和 ETH 的逐仓杠杆必须设置并
+回读验证一致后才会开仓。自动杠杆上限为 99x，超过上限、余额不可用或杠杆回读不一致都会在下单前停止。
+确有需要时仍可用 `--leverage 5` 固定覆盖，但余额不足时不会自动提高该固定值。
+
+每个周期只有在 BTC、ETH 均确认空仓后才检查目标量。最终交易量、Maker/Taker、手续费和盈亏来自 WEEX
+`userTrades` 成交明细，不会用计划金额或稀疏订单状态代替成交对账。自动化调用加 `--json --no-progress`，
+可获得带 `schema_version=3`、`accounting`、`cycles`、`legs` 和脱敏 `timeline` 的稳定结果。旧版 Beta
+计划不会按新逻辑执行，必须重新生成计划并确认。
+
+Beta 会在计划中锁定，执行前只检查新鲜度和相对漂移。`low_confidence`、`usable=false` 和置信阈值仅作为
+可见元数据，不阻止执行；过期、不可用、非法或非正 Beta 仍然拒绝。完整接口契约见
+[`docs/interfaces/beta-volume-workflow.md`](docs/interfaces/beta-volume-workflow.md)。
+
 ## 快速检查
+
+CLI 默认使用中文界面，包括帮助、进度、结果表格和错误提示。需要英文时可在命令最前面加
+`--lang en`，或设置 `WEEX_CLI_LANG=en`；未显式设置时始终回落到中文，不跟随服务器系统语言。
+`--json` 的字段名、状态码和确认短语不参与翻译，便于网页和自动化程序稳定接入。
 
 ```bash
 # 配置和 DNS/公共接口检查，不读取私有账户
@@ -334,6 +442,9 @@ src/weex_cli/
   trade_reporting.py # 成交归一化、分页和交易量汇总
   safety.py       # 确认短语与实盘开关
 tests/            # 完全离线的单元和 CLI 测试
+control-center/   # React 控制台与 FastAPI 本地控制平面
+aptos-wallet/     # React/Fastify/SQLite Aptos 本地钱包
+docs/             # 接口、可靠性、API 与脱敏缺陷文档
 ```
 
 ## 开发与验证

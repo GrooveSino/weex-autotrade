@@ -1,6 +1,6 @@
 [project]
 name = "weex-autotrade"
-version = "0.1.0"
+version = "0.1.1"
 description = "Safety-first WEEX contract trading CLI with demo and live modes."
 readme = "README.md"
 requires-python = ">=3.11"

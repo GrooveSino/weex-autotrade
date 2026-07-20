@@ -1,0 +1,49 @@
+{
+  "name": "aptos-local-wallet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <25",
+    "pnpm": "11.15.1"
+  },
+  "scripts": {
+    "preinstall": "node scripts/require-pnpm.mjs",
+    "dev": "concurrently -k -n api,web -c yellow,cyan \"pnpm run dev:api\" \"pnpm run dev:web\"",
+    "dev:api": "tsx watch server/index.ts",
+    "dev:web": "vite --host 127.0.0.1 --port 4310",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "start": "node dist-server/server/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@aptos-labs/ts-sdk": "7.2.0",
+    "@fastify/cookie": "11.1.2",
+    "@fastify/static": "10.1.0",
+    "@scure/bip39": "2.2.0",
+    "better-sqlite3": "12.4.1",
+    "fastify": "5.10.0",
+    "lucide-react": "0.468.0",
+    "qrcode.react": "4.2.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.57.0",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.1",
+    "concurrently": "9.2.4",
+    "jsdom": "27.2.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
+  },
+  "packageManager": "pnpm@11.15.1+sha512.81350b07e53c9538a02f1f2303b4290fa2d7be04e56e2a970c4cc4b417dc761de196edabd49d55c7dc9580db81007c44143e4e3d7e462b3000d23c255122d065"
+}

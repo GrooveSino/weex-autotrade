@@ -69,6 +69,28 @@ def test_precheck_blocks_existing_position() -> None:
     assert not any(event[0] == "place_order" for event in gateway.events)
 
 
+def test_precheck_retries_transient_position_read_without_duplicate_submission() -> None:
+    gateway = FakeGateway()
+    calls = 0
+    delays: list[float] = []
+
+    def flaky_positions(mode, symbol=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ccxt.RequestTimeout("precheck timeout")
+        return []
+
+    gateway.positions = flaky_positions
+
+    result = TradingService(gateway, sleep=delays.append).submit_order(intent())  # type: ignore[arg-type]
+
+    assert result["status"] == "submitted"
+    assert calls >= 2
+    assert delays == [0.25]
+    assert len([event for event in gateway.events if event[0] == "place_order"]) == 1
+
+
 def test_successful_submit_verifies_history_and_positions() -> None:
     gateway = FakeGateway()
     gateway.history_rows = [None, "malformed", {"clientOrderId": "client-1", "status": "FILLED"}]
@@ -80,6 +102,7 @@ def test_successful_submit_verifies_history_and_positions() -> None:
 def test_successful_submit_is_not_mislabeled_when_immediate_verification_times_out() -> None:
     gateway = FakeGateway()
     position_calls = 0
+    delays: list[float] = []
 
     def flaky_positions(mode, symbol=None):
         nonlocal position_calls
@@ -90,12 +113,13 @@ def test_successful_submit_is_not_mislabeled_when_immediate_verification_times_o
 
     gateway.positions = flaky_positions
 
-    result = TradingService(gateway).submit_order(intent())  # type: ignore[arg-type]
+    result = TradingService(gateway, sleep=delays.append).submit_order(intent())  # type: ignore[arg-type]
 
     assert result["status"] == "submitted"
     assert result["result"]["success"] is True
-    assert result["verification"]["order_found"] is None
-    assert "verification was unavailable" in result["verification"]["warning"]
+    assert result["verification"]["order_found"] is False
+    assert position_calls == 3
+    assert delays == [0.25]
     assert len([event for event in gateway.events if event[0] == "place_order"]) == 1
 
 
@@ -108,11 +132,34 @@ def test_network_error_recovers_by_client_order_id_without_retry() -> None:
     assert len([event for event in gateway.events if event[0] == "place_order"]) == 1
 
 
+def test_submit_timeout_recovers_when_order_visibility_is_delayed_without_resubmitting() -> None:
+    gateway = FakeGateway()
+    gateway.place_result = ccxt.RequestTimeout("timeout")
+    history_calls = 0
+    delays: list[float] = []
+
+    def delayed_history(mode, symbol=None, limit=100):
+        nonlocal history_calls
+        history_calls += 1
+        if history_calls < 3:
+            return []
+        return [{"clientOrderId": "client-1", "status": "NEW"}]
+
+    gateway.order_history = delayed_history
+
+    result = TradingService(gateway, sleep=delays.append).submit_order(intent())  # type: ignore[arg-type]
+
+    assert result["status"] == "recovered_after_submit_error"
+    assert history_calls == 3
+    assert delays == [0.25, 0.5]
+    assert len([event for event in gateway.events if event[0] == "place_order"]) == 1
+
+
 def test_unknown_network_outcome_never_retries() -> None:
     gateway = FakeGateway()
     gateway.place_result = ccxt.RequestTimeout("timeout")
     with pytest.raises(SubmissionUncertainError, match="inspect orders before retrying"):
-        TradingService(gateway).submit_order(intent())  # type: ignore[arg-type]
+        TradingService(gateway, sleep=lambda _: None).submit_order(intent())  # type: ignore[arg-type]
     assert len([event for event in gateway.events if event[0] == "place_order"]) == 1
 
 

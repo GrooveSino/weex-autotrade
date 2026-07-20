@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
+
+import ccxt
 
 from weex_cli.config import Settings
 from weex_cli.demo_web_gateway import DemoWebGateway
@@ -18,21 +23,48 @@ class WeexGateway:
         settings: Settings,
         client: Any | None = None,
         demo_web_gateway: DemoWebGateway | None = None,
+        proxy_url: str | None = None,
     ) -> None:
         self.settings = settings
         self._client = client
         self._demo_web_gateway = demo_web_gateway
+        self._proxy_url = proxy_url
 
     @property
     def client(self) -> Any:
         if self._client is None:
-            self._client = build_client(self.settings, require_private=True)
+            self._client = build_client(self.settings, require_private=True, proxy_url=self._proxy_url)
         return self._client
 
     def public_client(self) -> Any:
         if self._client is None:
-            self._client = build_client(self.settings, require_private=False)
+            self._client = build_client(self.settings, require_private=False, proxy_url=self._proxy_url)
         return self._client
+
+    def account_balance_rows(self, mode: str) -> list[dict[str, Any]]:
+        path = "capi/v3/sim/balance" if mode == "demo" else "capi/v3/account/balance"
+        rows = self._raw(path, "GET")
+        if not isinstance(rows, list):
+            raise ValidationError("WEEX account balance returned a non-list response")
+        return [row for row in rows if isinstance(row, dict)]
+
+    def all_position_rows(self, mode: str) -> list[dict[str, Any]]:
+        path = "capi/v3/sim/position/allPosition" if mode == "demo" else "capi/v3/account/position/allPosition"
+        rows = self._raw(path, "GET")
+        if not isinstance(rows, list):
+            raise ValidationError("WEEX positions returned a non-list response")
+        return [row for row in rows if isinstance(row, dict)]
+
+    def close(self) -> None:
+        if self._client is None:
+            return
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()
+
+    def fork(self) -> WeexGateway:
+        """Create an uninitialized gateway with the same credentials and proxy."""
+        return WeexGateway(self.settings, proxy_url=self._proxy_url)
 
     def ticker(self, symbol: str) -> dict[str, Any]:
         return self.public_client().fetch_ticker(ccxt_swap_symbol(symbol))
@@ -101,6 +133,27 @@ class WeexGateway:
                 params["page"] = page
             return self._raw("capi/v3/sim/order/history", "GET", params)
         return self._raw("capi/v3/userTrades", "GET", params)
+
+    def trade_rows_by_order_id(
+        self,
+        symbol: str,
+        order_id: str,
+        *,
+        start_time: int,
+        end_time: int,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self._raw(
+            "capi/v3/userTrades",
+            "GET",
+            {
+                "symbol": live_symbol_id(symbol),
+                "orderId": order_id,
+                "startTime": start_time,
+                "endTime": end_time,
+                "limit": limit,
+            },
+        )
 
     def open_orders(
         self,
@@ -174,10 +227,23 @@ class WeexGateway:
         return self._demo_web_gateway
 
     def configure_position(self, symbol: str, leverage: int, margin_mode: str) -> dict[str, Any]:
-        unified = ccxt_swap_symbol(symbol)
-        margin_result = self.client.set_margin_mode(margin_mode, unified)
-        leverage_result = self.client.set_leverage(leverage, unified, {"marginMode": margin_mode})
+        margin_result = self.configure_margin_mode(symbol, margin_mode)
+        leverage_result = self.configure_leverage(symbol, leverage, margin_mode)
         return {"margin_mode": margin_result, "leverage": leverage_result}
+
+    def configure_margin_mode(self, symbol: str, margin_mode: str) -> Any:
+        unified = ccxt_swap_symbol(symbol)
+        return _weex_mutation(lambda: self.client.set_margin_mode(margin_mode, unified))
+
+    def configure_leverage(self, symbol: str, leverage: int, margin_mode: str) -> Any:
+        unified = ccxt_swap_symbol(symbol)
+        return _weex_mutation(lambda: self.client.set_leverage(leverage, unified, {"marginMode": margin_mode}))
+
+    def leverage(self, symbol: str) -> dict[str, Any]:
+        row = self.client.fetch_leverage(ccxt_swap_symbol(symbol))
+        if not isinstance(row, dict):
+            raise ValidationError("WEEX leverage configuration returned a non-object response")
+        return row
 
     def close_position(self, symbol: str, position_side: str | None = None) -> Any:
         payload: dict[str, Any] = {"symbol": live_symbol_id(symbol)}
@@ -240,7 +306,7 @@ class WeexGateway:
         return self.client.request(path, "contractPrivate", method, params or {})
 
 
-def build_client(settings: Settings, *, require_private: bool) -> Any:
+def build_client(settings: Settings, *, require_private: bool, proxy_url: str | None = None) -> Any:
     try:
         import ccxt
     except ModuleNotFoundError as exc:  # pragma: no cover - packaging guarantees this dependency
@@ -252,6 +318,15 @@ def build_client(settings: Settings, *, require_private: bool) -> Any:
         "requests_trust_env": True,
         "options": {"defaultType": "swap"},
     }
+    if proxy_url:
+        scheme = urlsplit(proxy_url).scheme.lower()
+        if scheme in {"http", "https"}:
+            config["httpsProxy"] = proxy_url
+        elif scheme in {"socks5", "socks5h"}:
+            config["socksProxy"] = proxy_url
+        else:
+            raise ValidationError("proxy URL must use HTTP(S) or SOCKS5")
+        config["requests_trust_env"] = False
     credentials = settings.require_credentials() if require_private else settings.credentials
     if credentials.configured:
         config.update(
@@ -301,3 +376,28 @@ def _position_id_for_side(rows: Any, position_side: str) -> str:
 def ensure_live(mode: str, operation: str) -> None:
     if mode != "live":
         raise UnsupportedModeError(f"{operation} is not exposed by the WEEX demo API")
+
+
+def _weex_mutation(action: Callable[[], Any]) -> Any:
+    try:
+        return action()
+    except ccxt.ExchangeError as exc:
+        payload = _success_envelope(str(exc))
+        if payload is None:
+            raise
+        return payload
+
+
+def _success_envelope(message: str) -> dict[str, Any] | None:
+    start = message.find("{")
+    if start < 0:
+        return None
+    try:
+        payload = json.loads(message[start:])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("code")) != "200" or str(payload.get("msg") or "").lower() != "success":
+        return None
+    return {"status": "accepted", "exchange_code": "200"}

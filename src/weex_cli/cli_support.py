@@ -11,6 +11,7 @@ import typer
 from weex_cli.config import Settings, normalize_mode
 from weex_cli.errors import WeexCliError
 from weex_cli.gateway import WeexGateway
+from weex_cli.live_profile import LiveProfile, load_live_profile
 from weex_cli.output import emit_error
 from weex_cli.redaction import redact_text
 
@@ -20,6 +21,9 @@ T = TypeVar("T")
 @dataclass
 class AppContext:
     env_file: Path | None = None
+    profile_file: Path | None = None
+    profile: LiveProfile | None = None
+    language: str = "zh"
 
 
 def app_context(ctx: typer.Context) -> AppContext:
@@ -28,11 +32,27 @@ def app_context(ctx: typer.Context) -> AppContext:
 
 
 def settings_for(ctx: typer.Context) -> Settings:
-    return Settings.load(app_context(ctx).env_file)
+    context = app_context(ctx)
+    if context.profile_file is None:
+        return Settings.load(context.env_file)
+    return profile_for(ctx).settings
+
+
+def profile_for(ctx: typer.Context) -> LiveProfile:
+    context = app_context(ctx)
+    if context.profile_file is None:
+        raise ValueError("--profile is required for this operation")
+    if context.env_file is not None:
+        raise ValueError("--profile and --env-file cannot be used together")
+    if context.profile is None:
+        context.profile = load_live_profile(context.profile_file)
+    return context.profile
 
 
 def gateway_for(ctx: typer.Context, *, private: bool = True) -> WeexGateway:
-    gateway = WeexGateway(settings_for(ctx))
+    context = app_context(ctx)
+    proxy_url = profile_for(ctx).proxy_url if context.profile_file is not None else None
+    gateway = WeexGateway(settings_for(ctx), proxy_url=proxy_url)
     if not private:
         gateway.public_client()
     return gateway

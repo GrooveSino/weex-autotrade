@@ -19,6 +19,12 @@ The documented Demo surface contains:
 
 Demo uses simulated collateral `SUSDT` and symbols such as `BTCSUSDT`. The documented Demo order accepts `POST_ONLY`, attached `tpTriggerPrice`/`slTriggerPrice`, and contract/mark trigger types. It does not document Demo cancellation, leverage, margin-mode mutation, or standalone TP/SL maintenance.
 
+The project also has an explicitly unofficial Web Demo adapter for regular
+open-order queries, supplemental history, exact-ID cancellation, and account-wide
+regular-order cancellation. It uses `https://http-gateway2.weex.com` and a web
+session rather than V3 API-key authentication. Read `demo-web-api.md`; do not
+describe these routes as official V3 endpoints or infer support for trigger orders.
+
 As verified against the authenticated API on 2026-07-17, Demo order submission still uses `BTCSUSDT`, but `GET /capi/v3/sim/order/history` rejects that value in its optional `symbol` filter and accepts `BTCUSDT`. Keep this read-side exception isolated to Demo history queries.
 
 ## Live Orders
@@ -32,6 +38,9 @@ Standalone TP/SL uses `POST /capi/v3/placeTpSlOrder`. A zero or omitted execute 
 Live fills come from `GET /capi/v3/userTrades`; use `quoteQty` as the authoritative executed quote amount and preserve `maker`, commission, realized PnL, and fill time. The endpoint accepts at most a seven-day window and returns at most 100 rows, so split saturated windows and report incomplete data explicitly when it cannot be disambiguated.
 
 Demo exposes no fill endpoint. Derive order-level volume from executed order history using `cumQuote`, falling back to `executedQty * avgPrice`. Count opening and closing executions separately. Do not claim that this computed turnover is eligible volume for an exchange campaign, rebate, or account tier.
+
+The Web history route is supplemental evidence for order state and cancel
+reasons, not a fill endpoint. It does not change the turnover accounting rule.
 
 ## Symbol Mapping
 

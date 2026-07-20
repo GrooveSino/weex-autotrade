@@ -15,8 +15,16 @@ The project requires CCXT `weex` V3 support. Inspect the installed version at ru
 | Close position | raw gateway method | `POST capi/v3/closePositions` |
 | TP/SL | raw gateway method | `POST capi/v3/placeTpSlOrder` |
 | Demo | raw gateway method | `/capi/v3/sim/*` |
+| Demo regular open orders | `DemoWebGateway` (not CCXT) | `POST /api/v1/private/order/getActiveOrderPage2` |
+| Demo supplemental history | `DemoWebGateway` (not CCXT) | `POST /api/v1/private/order/v2/getHistoryOrderPage` |
+| Demo cancel exact IDs | `DemoWebGateway` (not CCXT) | `POST /api/v1/private/order/cancelOrderById` |
+| Demo cancel all regular orders | `DemoWebGateway` (not CCXT) | `POST /api/v1/private/order/cancelAllOrder` |
 
 CCXT reports no standard WEEX sandbox URL. Do not call `set_sandbox_mode`; use the documented Demo endpoints through the authenticated `contractPrivate` signer.
+
+The Demo Web rows are a separate, unofficial surface authenticated with a web
+session. Do not pass them through CCXT, do not substitute their symbols into
+live requests, and do not use them to claim trigger-order support.
 
 For maker orders pass `timeInForce=POST_ONLY`. Do not use OKX fields such as `tdMode`, `ordType`, or `mgnMode`.
 

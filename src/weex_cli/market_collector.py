@@ -14,6 +14,7 @@ from types import FrameType
 from typing import Any, Protocol
 
 from weex_cli.errors import ValidationError
+from weex_cli.i18n import text
 from weex_cli.symbols import live_symbol_id
 
 LOGGER = logging.getLogger(__name__)
@@ -258,7 +259,10 @@ def run_market_collector(
             stats.errors += 1
             stats.consecutive_errors += 1
             LOGGER.error(
-                "collection_failed consecutive_errors=%d error=%s",
+                text(
+                    "采集失败 连续错误数=%d 错误=%s",
+                    "collection_failed consecutive_errors=%d error=%s",
+                ),
                 stats.consecutive_errors,
                 exc,
             )
@@ -274,16 +278,19 @@ def run_market_collector(
                 deleted = collector.store.cleanup()
             except sqlite3.Error as exc:
                 stats.errors += 1
-                LOGGER.error("cleanup_failed error=%s", exc)
+                LOGGER.error(text("清理失败 错误=%s", "cleanup_failed error=%s"), exc)
             else:
                 stats.rows_deleted += deleted
-                LOGGER.info("cleanup_complete rows_deleted=%d", deleted)
+                LOGGER.info(text("清理完成 删除行数=%d", "cleanup_complete rows_deleted=%d"), deleted)
             next_cleanup = now_monotonic + cleanup_interval_seconds
 
         if now_monotonic >= next_log:
             prices = " ".join(f"{symbol}={price}" for symbol, price in sorted(stats.last_prices.items()))
             LOGGER.info(
-                "collector_status cycles=%d rows_written=%d rows_deleted=%d errors=%d consecutive_errors=%d %s",
+                text(
+                    "采集器状态 周期数=%d 写入行数=%d 删除行数=%d 错误数=%d 连续错误数=%d %s",
+                    "collector_status cycles=%d rows_written=%d rows_deleted=%d errors=%d consecutive_errors=%d %s",
+                ),
                 stats.cycles,
                 stats.rows_written,
                 stats.rows_deleted,
@@ -338,17 +345,21 @@ def run_websocket_market_collector(
                 deleted = collector.store.cleanup()
             except sqlite3.Error as exc:
                 stats.errors += 1
-                LOGGER.error("cleanup_failed error=%s", exc)
+                LOGGER.error(text("清理失败 错误=%s", "cleanup_failed error=%s"), exc)
             else:
                 stats.rows_deleted += deleted
-                LOGGER.info("cleanup_complete rows_deleted=%d", deleted)
+                LOGGER.info(text("清理完成 删除行数=%d", "cleanup_complete rows_deleted=%d"), deleted)
             next_cleanup = now_monotonic + cleanup_interval_seconds
         if now_monotonic >= next_log:
             stats.ignored_ticks = collector.ignored_ticks
             prices = " ".join(f"{symbol}={price}" for symbol, price in sorted(stats.last_prices.items()))
             LOGGER.info(
-                "collector_status transport=websocket cycles=%d rows_written=%d "
-                "rows_deleted=%d errors=%d consecutive_errors=%d ignored_ticks=%d %s",
+                text(
+                    "采集器状态 传输方式=websocket 周期数=%d 写入行数=%d 删除行数=%d "
+                    "错误数=%d 连续错误数=%d 忽略行情数=%d %s",
+                    "collector_status transport=websocket cycles=%d rows_written=%d "
+                    "rows_deleted=%d errors=%d consecutive_errors=%d ignored_ticks=%d %s",
+                ),
                 stats.cycles,
                 stats.rows_written,
                 stats.rows_deleted,
@@ -369,7 +380,10 @@ def run_websocket_market_collector(
                 proxy=None,
             ) as websocket:
                 websocket.send(collector.subscription_message())
-                LOGGER.info("websocket_connected symbols=%s", ",".join(collector.symbols))
+                LOGGER.info(
+                    text("WebSocket 已连接 交易对=%s", "websocket_connected symbols=%s"),
+                    ",".join(collector.symbols),
+                )
                 collector.latest_prices.clear()
                 next_sample: float | None = None
                 while not stopper.is_set():
@@ -400,7 +414,10 @@ def run_websocket_market_collector(
             stats.errors += 1
             stats.consecutive_errors += 1
             LOGGER.error(
-                "websocket_failed consecutive_errors=%d error=%s",
+                text(
+                    "WebSocket 失败 连续错误数=%d 错误=%s",
+                    "websocket_failed consecutive_errors=%d error=%s",
+                ),
                 stats.consecutive_errors,
                 exc,
             )
@@ -414,7 +431,7 @@ def run_websocket_market_collector(
 
 def install_stop_handlers(stop_event: threading.Event) -> None:
     def request_stop(signum: int, _frame: FrameType | None) -> None:
-        LOGGER.info("stop_requested signal=%d", signum)
+        LOGGER.info(text("收到停止请求 信号=%d", "stop_requested signal=%d"), signum)
         stop_event.set()
 
     signal.signal(signal.SIGTERM, request_stop)

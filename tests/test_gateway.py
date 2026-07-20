@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import ccxt
 import pytest
 
 from tests.fakes import FakeExchange
-from weex_cli.config import Settings
+from weex_cli.config import Credentials, Settings
 from weex_cli.errors import UnsupportedModeError, ValidationError
-from weex_cli.gateway import WeexGateway, ensure_live
+from weex_cli.gateway import WeexGateway, build_client, ensure_live
 from weex_cli.models import OrderIntent
 
 
@@ -27,6 +28,21 @@ def test_public_market_calls_use_ccxt_swap_symbol(gateway) -> None:
         ("fetch_order_book", "BTC/USDT:USDT", 5),
         ("amount_to_precision", "BTC/USDT:USDT", "1.23456"),
     ]
+
+
+def test_fork_creates_an_uninitialized_independent_client_boundary() -> None:
+    settings = Settings(credentials=Credentials("key", "secret", "passphrase"))
+    original = WeexGateway(settings, FakeExchange(), proxy_url="http://user:pass@proxy.example:8080")
+
+    first = original.fork()
+    second = original.fork()
+
+    assert first is not second
+    assert first is not original
+    assert first.settings is settings
+    assert first._client is None
+    assert second._client is None
+    assert first._proxy_url == "http://user:pass@proxy.example:8080"
 
 
 def test_demo_routes_and_symbol_filter(gateway) -> None:
@@ -50,6 +66,49 @@ def test_demo_routes_and_symbol_filter(gateway) -> None:
     assert fake.calls[-1][-1] == {"limit": 20, "startTime": 1, "endTime": 2}
 
 
+def test_raw_readonly_account_routes_use_documented_paths(gateway) -> None:
+    target, fake = gateway
+    fake.responses[("GET", "capi/v3/account/balance")] = [{"asset": "USDT"}]
+    fake.responses[("GET", "capi/v3/account/position/allPosition")] = [{"symbol": "BTCUSDT"}]
+
+    assert target.account_balance_rows("live") == [{"asset": "USDT"}]
+    assert target.all_position_rows("live") == [{"symbol": "BTCUSDT"}]
+    assert fake.calls[-2][1:4] == ("capi/v3/account/balance", "contractPrivate", "GET")
+    assert fake.calls[-1][1:4] == ("capi/v3/account/position/allPosition", "contractPrivate", "GET")
+
+
+@pytest.mark.parametrize(
+    ("proxy_url", "proxy_key"),
+    [
+        ("http://user:pass@proxy.example:8080", "httpsProxy"),
+        ("socks5://user:pass@proxy.example:1080", "socksProxy"),
+    ],
+)
+def test_explicit_account_proxy_disables_environment_proxy_inheritance(monkeypatch, proxy_url, proxy_key) -> None:
+    import ccxt
+
+    captured: dict[str, object] = {}
+
+    def fake_weex(config):
+        captured.update(config)
+        return object()
+
+    monkeypatch.setattr(ccxt, "weex", fake_weex)
+    settings = Settings(credentials=Credentials("key", "secret", "passphrase"))
+
+    build_client(settings, require_private=True, proxy_url=proxy_url)
+
+    assert captured[proxy_key] == proxy_url
+    assert captured["requests_trust_env"] is False
+    assert {"apiKey", "secret", "password"} <= captured.keys()
+
+
+def test_unsupported_explicit_proxy_scheme_is_rejected_before_client_creation() -> None:
+    settings = Settings(credentials=Credentials("key", "secret", "passphrase"))
+    with pytest.raises(ValidationError, match="proxy URL"):
+        build_client(settings, require_private=True, proxy_url="ftp://proxy.example:21")
+
+
 def test_live_account_and_order_management(gateway) -> None:
     target, fake = gateway
     assert target.balance("live") == {"USDT": {"free": 10}}
@@ -59,6 +118,11 @@ def test_live_account_and_order_management(gateway) -> None:
     target.cancel_all_orders("BTC", mode="live")
     result = target.configure_position("BTC", 10, "isolated")
     assert result["leverage"] == {"leverage": 10}
+    assert target.leverage("BTC") == {
+        "marginMode": "isolated",
+        "longLeverage": 10,
+        "shortLeverage": 10,
+    }
     fake.position_rows = [{"id": "long-position", "side": "long", "contracts": 1}]
     target.close_position("BTC", "long")
     target.close_all_positions()
@@ -66,6 +130,39 @@ def test_live_account_and_order_management(gateway) -> None:
     close_calls = [call for call in fake.calls if call[:2] == ("request", "capi/v3/closePositions")]
     assert close_calls[0][-1] == {"symbol": "BTCUSDT", "positionId": "long-position"}
     assert close_calls[1][-1] == {}
+
+
+def test_weex_code_200_mutation_envelope_is_treated_as_success() -> None:
+    class SuccessEnvelopeExchange(FakeExchange):
+        def set_margin_mode(self, mode, symbol):
+            self.calls.append(("set_margin_mode", mode, symbol))
+            raise ccxt.ExchangeError('weex {"msg":"success","requestTime":1,"code":"200"}')
+
+        def set_leverage(self, leverage, symbol, params):
+            self.calls.append(("set_leverage", leverage, symbol, params))
+            raise ccxt.ExchangeError('weex {"msg":"success","requestTime":2,"code":"200"}')
+
+    fake = SuccessEnvelopeExchange()
+    target = WeexGateway(Settings.load(environ={}), fake)
+
+    result = target.configure_position("BTC", 5, "isolated")
+
+    assert result == {
+        "margin_mode": {"status": "accepted", "exchange_code": "200"},
+        "leverage": {"status": "accepted", "exchange_code": "200"},
+    }
+    assert [call[0] for call in fake.calls] == ["set_margin_mode", "set_leverage"]
+
+
+def test_non_success_mutation_envelope_remains_an_error() -> None:
+    class FailedExchange(FakeExchange):
+        def set_leverage(self, leverage, symbol, params):
+            raise ccxt.ExchangeError('weex {"msg":"invalid leverage","code":"400"}')
+
+    target = WeexGateway(Settings.load(environ={}), FailedExchange())
+
+    with pytest.raises(ccxt.ExchangeError, match="invalid leverage"):
+        target.configure_leverage("BTC", 5, "isolated")
 
 
 def test_close_position_rejects_missing_or_ambiguous_side(gateway) -> None:
@@ -142,6 +239,14 @@ def test_trade_rows_use_live_symbols_and_mode_specific_endpoints(gateway) -> Non
         "contractPrivate",
         "GET",
         {"startTime": 1, "endTime": 2, "limit": 100, "symbol": "BTCUSDT"},
+    )
+    target.trade_rows_by_order_id("BTC", "123", start_time=1, end_time=2)
+    assert fake.calls[-1] == (
+        "request",
+        "capi/v3/userTrades",
+        "contractPrivate",
+        "GET",
+        {"symbol": "BTCUSDT", "orderId": "123", "startTime": 1, "endTime": 2, "limit": 100},
     )
 
 

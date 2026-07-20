@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -8,6 +10,7 @@ from typer.testing import CliRunner
 from weex_cli.cli import app
 from weex_cli.commands import account, home, maker_cli, market, order, orders, risk, trades
 from weex_cli.config import Settings
+from weex_cli.i18n import set_language
 
 runner = CliRunner()
 
@@ -21,18 +24,63 @@ def invoke_json(args: list[str], env: dict[str, str] | None = None) -> dict:
 def test_version_and_help() -> None:
     assert runner.invoke(app, ["--version"]).output.strip() == "0.1.0"
     output = runner.invoke(app, ["--help"]).output
-    assert "Daily workflow" in output
+    assert "日常操作" in output
     assert all(command in output for command in ("status", "maker", "activity", "advanced"))
+
+
+def test_cli_can_switch_the_complete_help_surface_to_english() -> None:
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [str(root / "weex"), "--lang", "en", "--help"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Usage:" in result.stdout
+    assert "Daily workflow" in result.stdout
+    assert "Show this message and exit" in result.stdout
+    assert "日常操作" not in result.stdout
+
+
+def test_language_switch_does_not_change_json_protocol() -> None:
+    try:
+        chinese = runner.invoke(app, ["maker", "run", "--json"])
+        english = runner.invoke(app, ["--lang", "en", "maker", "run", "--json"])
+        human_english = runner.invoke(app, ["--lang", "en", "maker", "run"])
+    finally:
+        set_language("zh")
+
+    assert chinese.exit_code == english.exit_code == human_english.exit_code == 0
+    assert json.loads(chinese.output) == json.loads(english.output)
+    assert "Dry run · Maker run" in human_english.output
+    assert "Exact confirmation" in human_english.output
 
 
 def test_human_maker_help_uses_practical_defaults() -> None:
     output = runner.invoke(app, ["maker", "run", "--help"]).output
 
-    assert "default: BTC" in output
-    assert "default: 10000" in output
-    assert "default: 10" in output
-    assert "default: 1200" in output
-    assert "default: 120" in output
+    assert "默认值：BTC" in output
+    assert "默认值：10000" in output
+    assert "默认值：10" in output
+    assert "默认值：1200" in output
+    assert "默认值：120" in output
+
+
+def test_live_beta_volume_help_exposes_parallel_cycle_defaults() -> None:
+    output = runner.invoke(app, ["live", "beta-volume", "--help"]).output
+
+    assert "BTC 多头/ETH 空头并发" in output
+    assert "默认值：5000" in output
+    assert "默认值：500" in output
+    assert "--leverage" in output
+    assert "默认值：auto" in output
+    assert "--recovery-attempts" not in output
+    assert "--max-empty-rounds" not in output
+    assert "--cooldown" not in output
+    assert "--allow-low-confidence-beta" not in output
 
 
 def test_human_maker_dry_runs_have_exact_confirmations_and_json_compatibility() -> None:
@@ -45,8 +93,8 @@ def test_human_maker_dry_runs_have_exact_confirmations_and_json_compatibility() 
     )
     human = runner.invoke(app, ["maker", "run"])
     assert human.exit_code == 0
-    assert "Dry run · Maker run" in human.output
-    assert "Exact confirmation" in human.output
+    assert "演练计划 · Maker 交易量任务" in human.output
+    assert "精确确认短语" in human.output
 
 
 def test_human_flatten_detects_position_and_handles_already_flat(monkeypatch) -> None:
@@ -217,7 +265,7 @@ def test_live_execute_is_blocked_without_live_env_gate() -> None:
     ]
     result = runner.invoke(app, args, env={"WEEX_LIVE_TRADING_ENABLED": "false"})
     assert result.exit_code == 1
-    assert "live trading is disabled" in result.output
+    assert "实盘交易未启用" in result.output
 
 
 def test_bad_order_argument_is_reported_without_traceback() -> None:
@@ -238,14 +286,14 @@ def test_bad_order_argument_is_reported_without_traceback() -> None:
         ],
     )
     assert result.exit_code == 1
-    assert "side must be buy or sell" in result.output
+    assert "side 必须是 buy 或 sell" in result.output
     assert "Traceback" not in result.output
 
 
 def test_close_rejects_invalid_position_side() -> None:
     result = runner.invoke(app, ["account", "close", "BTC", "--position-side", "flat"])
     assert result.exit_code == 2
-    assert "position-side must be LONG or SHORT" in result.output
+    assert "position-side 必须是 LONG 或 SHORT" in result.output
 
 
 @pytest.mark.parametrize(
@@ -265,7 +313,7 @@ def test_close_rejects_invalid_position_side() -> None:
                 "--quantity",
                 "-1",
             ],
-            "quantity must be zero or greater",
+            "quantity 必须大于等于 0",
         ),
         (
             [
@@ -279,7 +327,7 @@ def test_close_rejects_invalid_position_side() -> None:
                 "--stop-loss",
                 "59000",
             ],
-            "long take-profit must be greater than stop-loss",
+            "long take-profit 必须大于止损价",
         ),
         (
             [
@@ -293,11 +341,11 @@ def test_close_rejects_invalid_position_side() -> None:
                 "--stop-loss",
                 "60000",
             ],
-            "short take-profit must be less than stop-loss",
+            "short take-profit 必须小于止损价",
         ),
         (
             ["risk", "modify", "123", "--trigger-price", "59000", "--execute-price", "NaN"],
-            "execute_price must be zero or greater",
+            "execute_price 必须大于等于 0",
         ),
     ],
 )

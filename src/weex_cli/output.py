@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.pretty import Pretty
 
 from weex_cli.human_output import render_human
+from weex_cli.i18n import localize_payload, text, translate_message
 from weex_cli.redaction import redact
 
 console = Console()
@@ -20,8 +21,8 @@ def emit(payload: Any, *, json_output: bool = False) -> None:
         return
     if render_human(safe, console):
         return
-    console.print(Pretty(safe, expand_all=False))
+    console.print(Pretty(localize_payload(safe), expand_all=False))
 
 
 def emit_error(message: object) -> None:
-    error_console.print(f"[red]Error:[/red] {message}")
+    error_console.print(f"[red]{text('错误', 'Error')}：[/red] {translate_message(message)}")

@@ -19,19 +19,20 @@ VenueFactory = Callable[[WeexGateway, str], MakerVenue]
 VolumeServiceFactory = Callable[[WeexGateway], "AdaptiveMakerVolumeService"]
 
 REAL_POLICY = MakerPolicyConfig(
-    min_rest_ms=3000,
-    max_rest_ms=20000,
-    stale_ticks=13,
+    min_rest_ms=1000,
+    max_rest_ms=5000,
+    stale_ticks=1,
     improve_spread_ticks=2,
     min_fill_probability=0.05,
     adverse_threshold=1.0,
     queue_ahead_factor=0.35,
     urgency_weight=0.8,
     child_fraction=1.0,
-    passive_guard_ticks=5,
-    urgent_guard_ticks=1,
-    max_passive_guard_ticks=20,
-    volatility_guard_multiplier=2.0,
+    passive_guard_ticks=0,
+    urgent_guard_ticks=0,
+    max_passive_guard_ticks=0,
+    volatility_guard_multiplier=0.0,
+    allow_inside_spread=False,
 )
 
 

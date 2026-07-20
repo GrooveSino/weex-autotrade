@@ -8,14 +8,24 @@ import typer
 
 from weex_cli import __version__
 from weex_cli.cli_support import AppContext, gateway_for, invoke, selected_mode, settings_for
-from weex_cli.commands import account, config_cmd, home, maker_cli, market, order, orders, risk, trades, volume
+from weex_cli.commands import account, config_cmd, home, live, maker_cli, market, order, orders, risk, trades, volume
+from weex_cli.i18n import (
+    current_language,
+    install_typer_i18n,
+    localize_typer_app,
+    set_language,
+    text,
+)
 from weex_cli.output import emit
+
+install_typer_i18n()
 
 app = typer.Typer(
     name="weex",
     help="Operate WEEX safely: inspect state, run Demo Maker workflows, and review activity.",
     no_args_is_help=True,
     invoke_without_command=True,
+    add_completion=False,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
     pretty_exceptions_show_locals=False,
@@ -33,6 +43,7 @@ advanced.add_typer(config_cmd.app, name="config")
 
 app.command("status", rich_help_panel="Daily workflow")(home.status)
 app.add_typer(maker_cli.app, name="maker", rich_help_panel="Daily workflow")
+app.add_typer(live.app, name="live", rich_help_panel="Daily workflow")
 app.command("activity", rich_help_panel="Daily workflow")(home.activity)
 app.add_typer(advanced, name="advanced", rich_help_panel="Maintenance")
 
@@ -51,13 +62,27 @@ app.add_typer(config_cmd.app, name="config", hidden=True)
 def main(
     ctx: typer.Context,
     env_file: Annotated[Path | None, typer.Option("--env-file", help="Load credentials from this env file")] = None,
+    profile: Annotated[
+        Path | None,
+        typer.Option("--profile", help="Load an explicit project-local TOML live profile"),
+    ] = None,
+    language: Annotated[
+        str,
+        typer.Option("--lang", help=text("界面语言：zh 或 en", "Interface language: zh or en")),
+    ] = current_language(),
     version: Annotated[bool, typer.Option("--version", is_eager=True)] = False,
 ) -> None:
     """Configure the CLI context."""
+    try:
+        selected_language = set_language(language)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--lang") from exc
     if version:
         typer.echo(__version__)
         raise typer.Exit()
-    ctx.obj = AppContext(env_file=env_file)
+    if env_file is not None and profile is not None:
+        raise typer.BadParameter("--env-file and --profile cannot be used together")
+    ctx.obj = AppContext(env_file=env_file, profile_file=profile, language=selected_language)
 
 
 @app.command("doctor", rich_help_panel="Maintenance")
@@ -96,6 +121,9 @@ def doctor(
             lambda: {"ok": True, "mode": selected, "balance": gateway_for(ctx).balance(selected)}
         )
     emit(checks, json_output=json_output)
+
+
+localize_typer_app(app)
 
 
 if __name__ == "__main__":  # pragma: no cover

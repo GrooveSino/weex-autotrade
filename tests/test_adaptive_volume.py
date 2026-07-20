@@ -82,12 +82,15 @@ class ImmediateVenue:
         self._now += milliseconds
 
 
-def test_real_policy_uses_five_tick_passive_guard() -> None:
-    assert REAL_POLICY.passive_guard_ticks == 5
-    assert REAL_POLICY.urgent_guard_ticks == 1
-    assert REAL_POLICY.stale_ticks == 13
-    assert REAL_POLICY.max_passive_guard_ticks == 20
-    assert REAL_POLICY.volatility_guard_multiplier == 2
+def test_real_policy_uses_strict_same_side_bbo() -> None:
+    assert REAL_POLICY.min_rest_ms == 1_000
+    assert REAL_POLICY.max_rest_ms == 5_000
+    assert REAL_POLICY.passive_guard_ticks == 0
+    assert REAL_POLICY.urgent_guard_ticks == 0
+    assert REAL_POLICY.stale_ticks == 1
+    assert REAL_POLICY.max_passive_guard_ticks == 0
+    assert REAL_POLICY.volatility_guard_multiplier == 0
+    assert REAL_POLICY.allow_inside_spread is False
 
 
 def test_flatten_service_reaches_zero_with_pure_maker_fill() -> None:
