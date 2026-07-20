@@ -8,6 +8,7 @@ from pathlib import Path
 import ccxt
 import pytest
 from rich.console import Console
+from typer._click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from weex_cli.beta_allocation import BetaAllocation
@@ -589,7 +590,7 @@ def test_cli_uses_one_short_confirmation_and_keeps_live_environment_gate(
         ],
     )
     assert mistaken.exit_code == 2
-    assert "--confirm 只能与 --execute 一起使用" in mistaken.output
+    assert "--confirm 只能与 --execute 一起使用" in strip_ansi(mistaken.output)
     assert len(list(campaign_directory.glob("wc-*.json"))) == 1
 
 
@@ -604,6 +605,7 @@ def test_campaign_confirmation_contains_and_recovers_campaign_id(allocation: Bet
 
 def test_campaign_help_exposes_only_user_facing_strategy_controls() -> None:
     result = runner.invoke(app, ["live", "beta-campaign", "--help"])
+    output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
     for option in (
@@ -614,10 +616,10 @@ def test_campaign_help_exposes_only_user_facing_strategy_controls() -> None:
         "--round-gap-min",
         "--round-gap-max",
     ):
-        assert option in result.output
-    assert "--campaign" not in result.output
-    assert "分钟" in result.output
-    assert "秒数" not in result.output
+        assert option in output
+    assert "--campaign" not in output
+    assert "分钟" in output
+    assert "秒数" not in output
     for removed in (
         "--max-position",
         "--timeout",
@@ -628,14 +630,14 @@ def test_campaign_help_exposes_only_user_facing_strategy_controls() -> None:
         "--authorization-minutes",
         "--leverage",
     ):
-        assert removed not in result.output
+        assert removed not in output
 
 
 def test_campaign_rejects_ambiguous_round_option() -> None:
     result = runner.invoke(app, ["live", "beta-campaign", "--round", "300"])
 
     assert result.exit_code == 2
-    assert "不存在该选项：--round" in result.output
+    assert "不存在该选项：--round" in strip_ansi(result.output)
 
 
 def test_campaign_progress_events_are_visible() -> None:

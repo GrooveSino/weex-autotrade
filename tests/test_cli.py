@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from typer._click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from weex_cli.cli import app
@@ -70,7 +71,7 @@ def test_human_maker_help_uses_practical_defaults() -> None:
 
 
 def test_live_beta_volume_help_exposes_parallel_cycle_defaults() -> None:
-    output = runner.invoke(app, ["live", "beta-volume", "--help"]).output
+    output = strip_ansi(runner.invoke(app, ["live", "beta-volume", "--help"]).output)
 
     assert "BTC 多头/ETH 空头并发" in output
     assert "默认值：5000" in output
