@@ -798,6 +798,7 @@ function ConfirmDialog({ job, wallets, initialPreflight, executionEnabled, close
 }) {
   const [preview, setPreview] = useState<JobPreflight>(() => initialPreflight ?? { valid: true, job, checks: [], summary: job.summary })
   const [confirmation, setConfirmation] = useState('')
+  const [liveExecutionEnabled, setLiveExecutionEnabled] = useState(executionEnabled)
   const currentJob = preview.job
   const summary = preview.summary ?? { sourceWalletCount: new Set(currentJob.steps.map((step) => step.sourceWalletId)).size, stepCount: currentJob.steps.length, aptBaseUnits: '0', usdtBaseUnits: '0', maxStepCount: currentJob.steps.filter((step) => step.amountMode === 'max').length, estimatedGasBaseUnits: '0', warnings: [] }
   const checks = new Map(preview.checks.map((check) => [check.stepId, check]))
@@ -816,8 +817,15 @@ function ConfirmDialog({ job, wallets, initialPreflight, executionEnabled, close
     <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2} onClick={shuffle}><Shuffle size={16} />随机打乱条目</button></div>
     <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><strong>{walletLabel(step.sourceWalletId, wallets)}</strong></div><div className="preview-step-target"><small>收款</small><code>{short(step.targetAddress)}</code></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${step.waitAfterSeconds} 秒` : '最后一笔，无需等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
     {preview.valid && <label>输入完整确认短语<code className="phrase">{currentJob.confirmationPhrase}</code><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>}
-    {!executionEnabled && <div className="error-banner"><Lock size={17} />当前为仅预览模式。启动服务前设置 `APTOS_MAINNET_EXECUTION_ENABLED=true` 才能提交。</div>}
-    <div className="dialog-actions transfer-preview-actions"><button className="secondary" onClick={close}>返回编辑</button><button className="danger-primary" disabled={!executionEnabled || !preview.valid || confirmation !== currentJob.confirmationPhrase} onClick={() => void run(async () => { await post(`/api/v1/jobs/${currentJob.id}/confirm`, { confirmation }); onStarted() }, '任务已开始')}>{preview.valid ? '发送并执行' : '修正后再发送'}</button></div>
+    {!liveExecutionEnabled && <div className="error-banner"><Lock size={17} />当前页面记录的是仅预览状态。发送前会重新检查本机服务；若仍未开启真实转账，会保留在预览页面。</div>}
+    <div className="dialog-actions transfer-preview-actions"><button className="secondary" onClick={close}>返回编辑</button><button className="danger-primary" disabled={!preview.valid || confirmation !== currentJob.confirmationPhrase} onClick={() => void run(async () => {
+      const latestStatus = await getStatus()
+      setLiveExecutionEnabled(latestStatus.executionEnabled)
+      if (!latestStatus.unlocked) throw new Error('保险库已锁定，请重新解锁')
+      if (!latestStatus.executionEnabled) throw new Error('本机服务仍是仅预览模式，请使用 --enable-mainnet 启动')
+      await post(`/api/v1/jobs/${currentJob.id}/confirm`, { confirmation })
+      onStarted()
+    }, '任务已开始')}>{preview.valid ? '发送并执行' : '修正后再发送'}</button></div>
   </div></Dialog>
 }
 

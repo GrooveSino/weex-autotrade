@@ -69,7 +69,7 @@ test('wallet accounts and transfer builder remain usable', async ({ page }, test
   await expect(page.getByRole('radio', { name: '随机范围' })).toBeChecked()
   await page.getByRole('button', { name: '进入转账预览' }).click()
   await expect(page.getByRole('dialog', { name: '转账预览' })).toBeVisible()
-  await expect(page.getByText('当前为仅预览模式')).toBeVisible()
+  await expect(page.getByText('当前页面记录的是仅预览状态')).toBeVisible()
   await page.screenshot({ path: `artifacts/preview-${testInfo.project.name}.png`, fullPage: true })
 })
 
