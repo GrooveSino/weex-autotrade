@@ -84,6 +84,16 @@ describe('transfer jobs', () => {
     expect(jobs.attempts(draft.id)).toEqual([])
   })
 
+  it('keeps drafts and preview-only plans out of execution history', async () => {
+    const { jobs, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'not a history item', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+
+    expect(jobs.list()).toEqual([])
+    await jobs.preview(draft.id)
+    expect(jobs.list()).toEqual([])
+  })
+
   it('discards a cancelled plan when no transaction was attempted', async () => {
     const { jobs, source, target } = await setup()
     const draft = jobs.createDraft({ name: 'discard me', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
@@ -117,6 +127,8 @@ describe('transfer jobs', () => {
     expect(jobs.get(draft.id).steps.map((step) => step.id)).toEqual([attempted.id])
     expect(jobs.attempts(draft.id)).toHaveLength(1)
     expect(jobs.accountTransfers(source.id).items).toHaveLength(1)
+    expect(jobs.list()).toEqual([])
+    expect(db!.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE entity_id = ? AND kind LIKE 'job.%'").get(draft.id)).toEqual({ count: 0 })
   })
 
   it('returns a row-level error and blocks preview when the sender cannot pay APT gas', async () => {

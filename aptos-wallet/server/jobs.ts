@@ -135,7 +135,8 @@ export class JobService extends EventEmitter {
   }
 
   list(): TransferJob[] {
-    return (this.db.prepare('SELECT * FROM jobs ORDER BY created_at DESC').all() as JobRow[]).map((row) => this.mapJob(row))
+    // Execution history contains only plans that entered execution; drafts and cancellations stay out of the list.
+    return (this.db.prepare("SELECT * FROM jobs WHERE status NOT IN ('draft', 'previewed', 'cancelled') ORDER BY created_at DESC").all() as JobRow[]).map((row) => this.mapJob(row))
   }
 
   get(id: string): TransferJob {
@@ -297,11 +298,11 @@ export class JobService extends EventEmitter {
     const job = this.get(id)
     if (!['draft', 'previewed', 'running', 'paused'].includes(job.status)) throw new Error('当前任务不能取消')
     this.cancelRequested = true
+    this.audit('job.cancel_requested', id, {})
     if (job.status !== 'running') {
       const removed = this.finishCancel(id)
       if (removed) return null
     }
-    this.audit('job.cancel_requested', id, {})
     return this.get(id)
   }
 
@@ -671,6 +672,7 @@ export class JobService extends EventEmitter {
         WHERE job_id = ?
           AND NOT EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = job_steps.id)
       `).run(id)
+      this.db.prepare("DELETE FROM audit_events WHERE entity_id = ? AND kind LIKE 'job.%'").run(id)
       this.db.prepare(`UPDATE jobs SET status = 'cancelled', error = NULL, updated_at = ? WHERE id = ?`).run(now, id)
     })()
     this.emitChange()
