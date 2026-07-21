@@ -536,8 +536,33 @@ tbody tr:hover {
     justify-items: start;
     gap: 6px;
 }
-.account-identity strong {
-    font-size: 13px;
+.account-name-line {
+    min-width: 0;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.account-name-badge {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 6px 10px;
+    border: 1px solid #c9ded3;
+    border-radius: 6px;
+    background: #edf6f0;
+    color: #1b3b2f;
+    font-size: 16px;
+    line-height: 1.15;
+    font-weight: 750;
+}
+.account-name-line .icon-button {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    color: #536b60;
 }
 .account-state {
     justify-self: start;

@@ -138,7 +138,7 @@ export function App() {
         </div>
       </aside>
       <main>
-        {view === 'wallets' && <WalletView wallets={wallets} groups={groups} setModal={setModal} run={run} reload={reload} onWalletUpdated={applyWalletUpdate} onGroupUpdated={applyGroupUpdate} onToast={setToast}
+        <div hidden={view !== 'wallets'}><WalletView wallets={wallets} groups={groups} setModal={setModal} run={run} reload={reload} onWalletUpdated={applyWalletUpdate} onGroupUpdated={applyGroupUpdate} onToast={setToast}
           onAccounts={(group) => { setSelectedGroup(group); setModal('accounts') }}
           onArchive={(group) => { setSelectedGroup(group); setModal('archiveGroup') }}
           onRevealMnemonic={(group) => { setSecretTarget({ kind: 'mnemonic', group }); setModal('secretAuth') }}
@@ -146,7 +146,7 @@ export function App() {
           onHistory={(wallet) => { setSelectedWallet(wallet); setModal('accountHistory') }}
           onAlias={(wallet) => { setSelectedWallet(wallet); setModal('accountAlias') }}
           onDetails={(wallet) => { setSelectedWallet(wallet); setModal('accountDetails') }}
-          onTransfer={(wallet) => { setTransferSourceWalletId(wallet.id); setView('transfer') }} />}
+          onTransfer={(wallet) => { setTransferSourceWalletId(wallet.id); setView('transfer') }} /></div>
         {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
         {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} run={run} setPreviewJob={(job) => { setPreviewPreflight(null); setPreviewJob(job) }} setModal={setModal} />}
       </main>
@@ -225,19 +225,34 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
   const [changedWalletIds, setChangedWalletIds] = useState<Set<string>>(new Set())
   const [refreshingAll, setRefreshingAll] = useState(false)
   const [refreshingGroupIds, setRefreshingGroupIds] = useState<Set<string>>(new Set())
+  const latestWalletsRef = useRef(wallets)
+  const refreshingWalletIdsRef = useRef(new Set<string>())
+  const refreshingAllRef = useRef(false)
+  const backgroundRefreshInFlightRef = useRef(false)
+  latestWalletsRef.current = wallets
   const standalone = wallets.filter((wallet) => !wallet.groupId)
   const totalApt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'APT')?.baseUnits ?? '0'), 0n)
   const totalUsdt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'USDT')?.baseUnits ?? '0'), 0n)
-  const refreshAll = async () => {
-    if (refreshingAll || !wallets.length) return
-    setRefreshingAll(true)
+  const markChangedWallets = (before: WalletRecord[], after: WalletRecord[]) => {
+    const previous = new Map(before.map((wallet) => [wallet.id, wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')]))
+    const changed = after.filter((wallet) => previous.get(wallet.id) !== wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')).map((wallet) => wallet.id)
+    if (!changed.length) return
+    setChangedWalletIds((current) => new Set([...current, ...changed]))
+    window.setTimeout(() => setChangedWalletIds((current) => {
+      const next = new Set(current); changed.forEach((id) => next.delete(id)); return next
+    }), 1_800)
+  }
+  const refreshWalletBatch = async (candidates: WalletRecord[]) => {
+    const available = candidates.filter((wallet) => !refreshingWalletIdsRef.current.has(wallet.id))
+    if (!available.length) return { refreshed: 0, failed: 0 }
+    available.forEach((wallet) => refreshingWalletIdsRef.current.add(wallet.id))
+    setRefreshingWalletIds((current) => new Set([...current, ...available.map((wallet) => wallet.id)]))
     let nextIndex = 0
     let failed = 0
     const worker = async () => {
-      while (nextIndex < wallets.length) {
-        const wallet = wallets[nextIndex++]
+      while (nextIndex < available.length) {
+        const wallet = available[nextIndex++]
         const before = wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
-        setRefreshingWalletIds((current) => new Set(current).add(wallet.id))
         try {
           const updated = await post<WalletRecord>(`/api/v1/wallets/${wallet.id}/refresh`)
           onWalletUpdated(updated)
@@ -253,48 +268,64 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
           failed += 1
           onWalletUpdated({ ...wallet, balanceError: error instanceof Error ? error.message : '余额刷新失败' })
         } finally {
+          refreshingWalletIdsRef.current.delete(wallet.id)
           setRefreshingWalletIds((current) => { const next = new Set(current); next.delete(wallet.id); return next })
         }
       }
     }
+    await Promise.all(Array.from({ length: Math.min(10, available.length) }, worker))
+    return { refreshed: available.length, failed }
+  }
+  const refreshAll = async (source: 'manual' | 'background' = 'manual') => {
+    if (source === 'background' && backgroundRefreshInFlightRef.current) return
+    if (source === 'manual' && refreshingAllRef.current) return
+    const currentWallets = latestWalletsRef.current
+    if (!currentWallets.length) return
+    if (source === 'background') backgroundRefreshInFlightRef.current = true
+    refreshingAllRef.current = true
+    setRefreshingAll(true)
     try {
-      await Promise.all(Array.from({ length: Math.min(10, wallets.length) }, worker))
-      onToast(failed ? `余额刷新完成，${failed} 个账户失败` : `已刷新 ${wallets.length} 个账户`)
+      const result = await refreshWalletBatch(currentWallets)
+      if (source === 'manual') onToast(result.failed ? `余额刷新完成，${result.failed} 个账户失败` : `已刷新 ${result.refreshed} 个账户`)
     } finally {
+      refreshingAllRef.current = false
+      if (source === 'background') backgroundRefreshInFlightRef.current = false
       setRefreshingAll(false)
     }
   }
-  const showBalanceChanges = (before: WalletRecord[], after: WalletRecord[]) => {
-    const previous = new Map(before.map((wallet) => [wallet.id, wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')]))
-    const changed = after.filter((wallet) => previous.get(wallet.id) !== wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')).map((wallet) => wallet.id)
-    if (!changed.length) return
-    setChangedWalletIds((current) => new Set([...current, ...changed]))
-    window.setTimeout(() => setChangedWalletIds((current) => {
-      const next = new Set(current); changed.forEach((id) => next.delete(id)); return next
-    }), 1_800)
-  }
+  useEffect(() => {
+    if (!wallets.length) return
+    const timer = window.setInterval(() => { void refreshAll('background') }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [wallets.length])
   const refreshGroup = async (group: WalletGroup) => {
     if (refreshingGroupIds.has(group.id)) return
     const before = wallets.filter((wallet) => wallet.groupId === group.id)
     const ids = before.map((wallet) => wallet.id)
+    if (ids.some((id) => refreshingWalletIdsRef.current.has(id))) {
+      onToast(`${group.label} 正在刷新中，请稍后再试`)
+      return
+    }
+    ids.forEach((id) => refreshingWalletIdsRef.current.add(id))
     setRefreshingGroupIds((current) => new Set(current).add(group.id))
     setRefreshingWalletIds((current) => new Set([...current, ...ids]))
     try {
       const updated = await post<WalletGroup>(`/api/v1/wallets/groups/${group.id}/refresh`)
       onGroupUpdated(updated)
-      showBalanceChanges(before, updated.accounts)
+      markChangedWallets(before, updated.accounts)
       const failed = updated.accounts.filter((wallet) => wallet.balanceError).length
       onToast(failed ? `${group.label} 刷新完成，${failed} 个账户失败` : `${group.label} 的余额已刷新`)
     } catch (error) {
       onToast(error instanceof Error ? error.message : '钱包余额刷新失败')
     } finally {
+      ids.forEach((id) => refreshingWalletIdsRef.current.delete(id))
       setRefreshingGroupIds((current) => { const next = new Set(current); next.delete(group.id); return next })
       setRefreshingWalletIds((current) => { const next = new Set(current); ids.forEach((id) => next.delete(id)); return next })
     }
   }
   return <>
-    <PageHeader title="钱包" subtitle={`${wallets.length} 个账户 · Aptos 主网`} actions={<>
-      <button className="secondary" onClick={() => void refreshAll()} disabled={refreshingAll || !wallets.length}><RefreshCw className={refreshingAll ? 'spin' : ''} size={16} />{refreshingAll ? '正在刷新' : '刷新全部余额'}</button>
+      <PageHeader title="钱包" subtitle={`${wallets.length} 个账户 · Aptos 主网 · 每 30 秒自动刷新`} actions={<>
+      <button className="secondary" title="立即刷新全部余额；后台也会每 30 秒自动刷新" onClick={() => void refreshAll()} disabled={refreshingAll || !wallets.length}><RefreshCw className={refreshingAll ? 'spin' : ''} size={16} />{refreshingAll ? '正在刷新' : '刷新全部余额'}</button>
       <button className="secondary" onClick={() => setModal('restore')}><Upload size={16} />恢复钱包</button>
       <button className="primary" onClick={() => setModal('create')}><Plus size={16} />创建钱包</button>
       <details className="action-menu"><summary aria-label="更多操作"><Ellipsis size={18} /></summary><div>
@@ -344,7 +375,7 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
 
 function WalletList({ wallets, refreshingWalletIds, changedWalletIds, onReceive, onHistory, onAlias, onTransfer, onDetails }: { wallets: WalletRecord[]; refreshingWalletIds: Set<string>; changedWalletIds: Set<string>; onReceive: (wallet: WalletRecord) => void; onHistory: (wallet: WalletRecord) => void; onAlias: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void }) {
   return <div className="account-list">{wallets.map((wallet) => { const refreshing = refreshingWalletIds.has(wallet.id); const changed = changedWalletIds.has(wallet.id); return <article className={`account-row ${refreshing ? 'refreshing' : ''} ${changed ? 'balance-changed' : ''}`} key={wallet.id} aria-busy={refreshing}>
-    <div className="account-identity"><strong>{accountLabel(wallet)}</strong><Address value={wallet.address} />{wallet.balanceError && <span className="row-error">{wallet.balanceError}</span>}</div>
+    <div className="account-identity"><div className="account-name-line"><strong className="account-name-badge">{accountLabel(wallet)}</strong><IconButton title={`设置 ${accountLabel(wallet)} 的别名`} icon={<Pencil size={15} />} onClick={() => onAlias(wallet)} /></div><Address value={wallet.address} />{wallet.balanceError && <span className="row-error">{wallet.balanceError}</span>}</div>
     <div className="account-state"><Status value={wallet.accountStatus} /></div>
     <AccountBalance label="APT" value={wallet.balances.find((item) => item.asset === 'APT')?.display ?? '-'} loading={refreshing} />
     <AccountBalance label="USDt" value={wallet.balances.find((item) => item.asset === 'USDT')?.display ?? '-'} loading={refreshing} />
@@ -352,7 +383,6 @@ function WalletList({ wallets, refreshingWalletIds, changedWalletIds, onReceive,
       <button className="secondary small" onClick={() => onReceive(wallet)}><QrCode size={14} />收款</button>
       <button className="secondary small" onClick={() => onHistory(wallet)}><FileClock size={14} />日志</button>
       <button className="primary small" onClick={() => onTransfer(wallet)}><Send size={14} />转账</button>
-      <IconButton title={`设置 ${accountLabel(wallet)} 的别名`} icon={<Pencil size={15} />} onClick={() => onAlias(wallet)} />
       <IconButton title={`${accountLabel(wallet)} 详情`} icon={<Ellipsis size={17} />} onClick={() => onDetails(wallet)} />
     </div>
   </article> })}</div>

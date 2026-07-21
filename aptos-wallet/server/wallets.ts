@@ -134,6 +134,8 @@ function normalizeIndexes(accountCount: number, explicitIndexes: number[]): numb
 }
 
 export class WalletService {
+  private readonly activeRefreshes = new Map<string, Promise<WalletRecord>>()
+
   constructor(
     private readonly db: SqliteDatabase,
     private readonly vault: EncryptedVault,
@@ -314,6 +316,18 @@ export class WalletService {
   }
 
   async refresh(id: string): Promise<WalletRecord> {
+    const active = this.activeRefreshes.get(id)
+    if (active) return active
+    const operation = this.refreshOnce(id)
+    this.activeRefreshes.set(id, operation)
+    try {
+      return await operation
+    } finally {
+      if (this.activeRefreshes.get(id) === operation) this.activeRefreshes.delete(id)
+    }
+  }
+
+  private async refreshOnce(id: string): Promise<WalletRecord> {
     const wallet = this.get(id)
     try {
       const balances = await retryBalanceRead(() => this.balanceReader.getBalances(wallet.address))
