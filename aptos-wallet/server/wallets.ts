@@ -28,6 +28,9 @@ import { EncryptedVault, type WalletSecret } from './vault.js'
 
 export const MAX_ACCOUNT_INDEX = 0x7fffffff
 export const MAX_ACCOUNT_BATCH = 200
+export const BALANCE_REFRESH_CONCURRENCY = 10
+export const BALANCE_REFRESH_MAX_ATTEMPTS = 3
+export const BALANCE_REFRESH_RETRY_DELAY_MS = 250
 export const APTOS_HD_PATH = (index: number) => `m/44'/637'/${index}'/0'/0'`
 const APTOS_HD_PATH_PATTERN = /^m\/44'\/637'\/(\d+)'\/0'\/0'$/
 const ACTIVE_JOB_STATUSES = ['draft', 'previewed', 'running', 'paused', 'uncertain'] as const
@@ -105,7 +108,10 @@ function isFunded(balances: AssetBalance[]): boolean {
 
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : '钱包操作失败'
-  return message.replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]').slice(0, 200)
+  return message
+    .replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]')
+    .replace(/\b0x[0-9a-f]{64}\b/gi, '[ADDRESS]')
+    .slice(0, 200)
 }
 
 function validateIndex(index: number): void {
@@ -249,7 +255,7 @@ export class WalletService {
 
   rename(id: string, label: string): WalletRecord {
     const result = this.db.prepare('UPDATE wallets SET label = ?, updated_at = ? WHERE id = ?')
-      .run(this.validateLabel(label), new Date().toISOString(), id)
+      .run(this.validateLabel(label, '账户别名'), new Date().toISOString(), id)
     if (!result.changes) throw new Error('钱包不存在')
     this.audit('wallet.renamed', id, {})
     return this.get(id)
@@ -310,7 +316,7 @@ export class WalletService {
   async refresh(id: string): Promise<WalletRecord> {
     const wallet = this.get(id)
     try {
-      const balances = await this.balanceReader.getBalances(wallet.address)
+      const balances = await retryBalanceRead(() => this.balanceReader.getBalances(wallet.address))
       const exists = wallet.groupId ? (isFunded(balances) || await this.balanceReader.accountExists(wallet.address)) : true
       const now = new Date().toISOString()
       const status: WalletAccountStatus = wallet.groupId ? (isFunded(balances) ? 'funded' : exists ? 'used' : 'unused') : 'standalone'
@@ -325,8 +331,29 @@ export class WalletService {
   }
 
   async refreshAll(): Promise<WalletRecord[]> {
-    for (const wallet of this.list()) await this.refresh(wallet.id)
+    const ids = this.list().map((wallet) => wallet.id)
+    await this.refreshIds(ids)
     return this.list()
+  }
+
+  async refreshGroup(id: string): Promise<WalletGroup> {
+    const group = this.getGroupRow(id)
+    if (group.archived_at) throw new Error('钱包已归档，不能刷新余额')
+    const ids = (this.db.prepare('SELECT id FROM wallets WHERE group_id = ? AND archived_at IS NULL ORDER BY account_index, created_at').all(id) as Array<{ id: string }>)
+      .map((wallet) => wallet.id)
+    await this.refreshIds(ids)
+    return this.getGroup(id, false)
+  }
+
+  private async refreshIds(ids: string[]): Promise<void> {
+    let nextIndex = 0
+    const worker = async () => {
+      while (nextIndex < ids.length) {
+        const id = ids[nextIndex++]
+        await this.refresh(id)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(BALANCE_REFRESH_CONCURRENCY, ids.length) }, worker))
   }
 
   revealPrivateKeyEncrypted(id: string, publicKeyPem: string): EncryptedSecretResponse {
@@ -374,7 +401,10 @@ export class WalletService {
 
   addressCsv(): string {
     const groups = new Map(this.listGroups(true).map((group) => [group.id, group.label]))
-    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`
+    const quote = (value: string) => {
+      const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value
+      return `"${safe.replaceAll('"', '""')}"`
+    }
     const header = ['group,label,address,source,account_index,derivation_path,archived_at']
     const rows = this.list(true).map((wallet) => [
       wallet.groupId ? groups.get(wallet.groupId) ?? '' : '',
@@ -568,10 +598,11 @@ export class WalletService {
     return Number.isInteger(index) && index <= MAX_ACCOUNT_INDEX ? index : null
   }
 
-  private validateLabel(label: string): string {
+  private validateLabel(label: string, fieldName = '钱包名称'): string {
     const normalized = label.trim()
-    if (!normalized) throw new Error('钱包名称不能为空')
-    if (normalized.length > 120) throw new Error('钱包名称不能超过 120 个字符')
+    if (!normalized) throw new Error(`${fieldName}不能为空`)
+    if (normalized.length > 120) throw new Error(`${fieldName}不能超过 120 个字符`)
+    if (/\p{Cc}/u.test(normalized)) throw new Error(`${fieldName}不能包含控制字符`)
     return normalized
   }
 
@@ -591,4 +622,18 @@ export class WalletService {
     this.db.prepare('INSERT INTO audit_events(id, kind, entity_id, detail_json, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(randomUUID(), kind, entityId, JSON.stringify(detail), new Date().toISOString())
   }
+}
+
+async function retryBalanceRead<T>(action: () => Promise<T>): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= BALANCE_REFRESH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await action()
+    } catch (error) {
+      lastError = error
+      if (attempt === BALANCE_REFRESH_MAX_ATTEMPTS) throw error
+      await new Promise((resolve) => setTimeout(resolve, attempt * BALANCE_REFRESH_RETRY_DELAY_MS))
+    }
+  }
+  throw lastError
 }

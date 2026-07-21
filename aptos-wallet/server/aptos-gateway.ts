@@ -1,5 +1,6 @@
 import {
   Aptos,
+  AptosApiType,
   AptosConfig,
   Network,
   generateUserTransactionHash,
@@ -12,10 +13,6 @@ import {
 import { ASSETS, type AssetBalance, type AssetId } from '../shared/types.js'
 import { formatAmount } from '../shared/amounts.js'
 import type { AppConfig } from './config.js'
-
-interface AptCoinStore {
-  coin: { value: string }
-}
 
 interface FungibleMetadata {
   name: string
@@ -72,19 +69,15 @@ export class AptosMainnetGateway implements ChainGateway {
   async getBalance(address: string, asset: AssetId): Promise<bigint> {
     try {
       if (asset === 'APT') {
-        const resource = await this.aptos.getAccountResource<AptCoinStore>({
-          accountAddress: address,
-          resourceType: '0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>',
-        })
-        return BigInt(resource.coin.value)
+        return await retryRead(() => this.getUnifiedAptBalance(address))
       }
-      const [balance] = await this.aptos.view<[string]>({
+      const [balance] = await retryRead(() => this.aptos.view<[string]>({
         payload: {
           function: '0x1::primary_fungible_store::balance',
           typeArguments: ['0x1::object::ObjectCore'],
           functionArguments: [address, ASSETS.USDT.metadataAddress],
         },
-      })
+      }))
       return BigInt(balance ?? '0')
     } catch (error) {
       if (isNotFound(error)) return 0n
@@ -92,9 +85,23 @@ export class AptosMainnetGateway implements ChainGateway {
     }
   }
 
+  private async getUnifiedAptBalance(address: string): Promise<bigint> {
+    const fullnode = this.aptos.config.getRequestUrl(AptosApiType.FULLNODE).replace(/\/$/, '')
+    const asset = encodeURIComponent('0x1::aptos_coin::AptosCoin')
+    const response = await fetch(`${fullnode}/accounts/${encodeURIComponent(address)}/balance/${asset}`, {
+      headers: { accept: 'application/json' },
+    })
+    if (response.status === 404) return 0n
+    if (!response.ok) throw new Error(`APT 余额查询失败 (HTTP ${response.status})`)
+    const raw = (await response.text()).trim()
+    const match = /^"?(0|[1-9]\d*)"?$/.exec(raw)
+    if (!match) throw new Error('APT 余额响应格式无效')
+    return BigInt(match[1])
+  }
+
   async accountExists(address: string): Promise<boolean> {
     try {
-      await this.aptos.getAccountInfo({ accountAddress: address })
+      await retryRead(() => this.aptos.getAccountInfo({ accountAddress: address }))
       return true
     } catch (error) {
       if (isNotFound(error)) return false
@@ -129,44 +136,45 @@ export class AptosMainnetGateway implements ChainGateway {
   }
 
   async prepareTransfer(request: TransferRequest): Promise<PreparedTransfer> {
-    const first = await this.buildAndSimulate(request)
-    if (!first.simulation.success) {
+    try {
+      const first = await this.buildAndSimulate(request)
+      if (!first.simulation.success) {
+        throw new Error(`交易模拟失败：${first.simulation.vm_status}`)
+      }
+      const gasUsed = BigInt(first.simulation.gas_used)
+      const maxGasAmount = (gasUsed * 125n + 99n) / 100n
+      const gasUnitPrice = BigInt(first.simulation.gas_unit_price)
+      const sequenceNumber = first.transaction.rawTransaction.sequence_number.toString()
+      const transaction = await this.build(request, {
+        accountSequenceNumber: BigInt(sequenceNumber),
+        gasUnitPrice: Number(gasUnitPrice),
+        maxGasAmount: Number(maxGasAmount),
+      })
+      const senderAuthenticator = this.aptos.transaction.sign({ signer: request.sender, transaction })
+      const feePayerAuthenticator = request.feePayer
+        ? this.aptos.transaction.signAsFeePayer({ signer: request.feePayer, transaction })
+        : undefined
+      const txHash = generateUserTransactionHash({ transaction, senderAuthenticator, feePayerAuthenticator })
+      let submittedHash: string | null = null
+      return {
+        txHash,
+        sequenceNumber,
+        gasUnitPrice,
+        maxGasAmount,
+        submit: async () => {
+          const pending = await this.aptos.transaction.submit.simple({ transaction, senderAuthenticator, feePayerAuthenticator })
+          submittedHash = pending.hash
+          if (pending.hash !== txHash) throw new Error('节点返回的交易哈希与本地签名哈希不一致')
+          return pending.hash
+        },
+        wait: async () => {
+          const response = await this.aptos.waitForTransaction({ transactionHash: submittedHash ?? txHash }) as UserTransactionResponse
+          return { success: response.success, vmStatus: response.vm_status }
+        },
+      }
+    } finally {
       request.sender.privateKey.clear()
       request.feePayer?.privateKey.clear()
-      throw new Error(`交易模拟失败：${first.simulation.vm_status}`)
-    }
-    const gasUsed = BigInt(first.simulation.gas_used)
-    const maxGasAmount = (gasUsed * 125n + 99n) / 100n
-    const gasUnitPrice = BigInt(first.simulation.gas_unit_price)
-    const sequenceNumber = first.transaction.rawTransaction.sequence_number.toString()
-    const transaction = await this.build(request, {
-      accountSequenceNumber: BigInt(sequenceNumber),
-      gasUnitPrice: Number(gasUnitPrice),
-      maxGasAmount: Number(maxGasAmount),
-    })
-    const senderAuthenticator = this.aptos.transaction.sign({ signer: request.sender, transaction })
-    const feePayerAuthenticator = request.feePayer
-      ? this.aptos.transaction.signAsFeePayer({ signer: request.feePayer, transaction })
-      : undefined
-    request.sender.privateKey.clear()
-    request.feePayer?.privateKey.clear()
-    const txHash = generateUserTransactionHash({ transaction, senderAuthenticator, feePayerAuthenticator })
-    let submittedHash: string | null = null
-    return {
-      txHash,
-      sequenceNumber,
-      gasUnitPrice,
-      maxGasAmount,
-      submit: async () => {
-        const pending = await this.aptos.transaction.submit.simple({ transaction, senderAuthenticator, feePayerAuthenticator })
-        submittedHash = pending.hash
-        if (pending.hash !== txHash) throw new Error('节点返回的交易哈希与本地签名哈希不一致')
-        return pending.hash
-      },
-      wait: async () => {
-        const response = await this.aptos.waitForTransaction({ transactionHash: submittedHash ?? txHash }) as UserTransactionResponse
-        return { success: response.success, vmStatus: response.vm_status }
-      },
     }
   }
 
@@ -229,7 +237,29 @@ function isNotFound(error: unknown): boolean {
 
 function redactChainError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error)
-  return new Error(message.replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]').slice(0, 500))
+  return new Error(message
+    .replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]')
+    .replace(/\b0x[0-9a-f]{64}\b/gi, '[ADDRESS]')
+    .slice(0, 500))
+}
+
+async function retryRead<T>(action: () => Promise<T>, maxAttempts = 4): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await action()
+    } catch (error) {
+      lastError = error
+      if (!isRateLimited(error) || attempt === maxAttempts) throw error
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250))
+    }
+  }
+  throw lastError
+}
+
+function isRateLimited(error: unknown): boolean {
+  const candidate = error as { status?: number; response?: { status?: number }; message?: string }
+  return candidate?.status === 429 || candidate?.response?.status === 429 || /(?:HTTP 429|Too Many Requests)/i.test(candidate?.message ?? '')
 }
 
 export type { AccountAuthenticator }

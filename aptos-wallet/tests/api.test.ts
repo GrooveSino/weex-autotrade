@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { Account } from '@aptos-labs/ts-sdk'
 import { createApp } from '../server/app.js'
 import type { AppConfig } from '../server/config.js'
 import { openDatabase } from '../server/database.js'
@@ -19,20 +20,20 @@ const apps: Array<Awaited<ReturnType<typeof createApp>>> = []
 
 afterEach(async () => { while (apps.length) await apps.pop()!.close() })
 
-async function setup() {
-  const config: AppConfig = { host: '127.0.0.1', port: 4311, webOrigin: 'http://127.0.0.1:4310', databasePath: join(mkdtempSync(join(tmpdir(), 'aptos-api-')), 'wallet.sqlite'), executionEnabled: false }
+async function setup(executionEnabled = false) {
+  const config: AppConfig = { host: '127.0.0.1', port: 4311, webOrigin: 'http://127.0.0.1:4310', databasePath: join(mkdtempSync(join(tmpdir(), 'aptos-api-')), 'wallet.sqlite'), executionEnabled }
   const db = openDatabase(config.databasePath)
   const vault = new EncryptedVault(db)
   const gateway = new FakeGateway()
   const wallets = new WalletService(db, vault, gateway)
-  const jobs = new JobService(db, wallets, gateway, false)
+  const jobs = new JobService(db, wallets, gateway, executionEnabled)
   const app = await createApp(config, { db, vault, gateway, wallets, jobs, backup: new BackupService(db) })
   apps.push(app)
   const status = await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: config.webOrigin } })
   const csrf = status.json().csrfToken as string
   const initialized = await app.inject({ method: 'POST', url: '/api/v1/vault/initialize', payload: { password: PASSWORD }, headers: { origin: config.webOrigin, 'x-csrf-token': csrf } })
   const headers = { origin: config.webOrigin, 'x-csrf-token': csrf, cookie: `aptos_wallet_session=${initialized.cookies[0].value}` }
-  return { app, config, headers }
+  return { app, config, headers, wallets, jobs, gateway }
 }
 
 describe('local API safety', () => {
@@ -42,12 +43,37 @@ describe('local API safety', () => {
     apps.push(app)
     const status = await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: config.webOrigin } })
     const csrf = status.json().csrfToken as string
+    expect(status.headers['content-security-policy']).toContain("frame-ancestors 'none'")
+    expect(status.headers['x-frame-options']).toBe('DENY')
+    expect(status.headers['cache-control']).toBe('no-store')
+    expect((await app.inject({ method: 'GET', url: '/api/v1/status', headers: { host: 'wallet.example.com', origin: config.webOrigin } })).statusCode).toBe(403)
+    expect((await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: config.webOrigin, 'sec-fetch-site': 'cross-site' } })).statusCode).toBe(403)
     expect((await app.inject({ method: 'POST', url: '/api/v1/vault/initialize', payload: { password: PASSWORD }, headers: { origin: config.webOrigin } })).statusCode).toBe(403)
+    expect((await app.inject({ method: 'POST', url: '/api/v1/vault/initialize', payload: { password: PASSWORD }, headers: { 'x-csrf-token': csrf } })).statusCode).toBe(403)
     const initialized = await app.inject({ method: 'POST', url: '/api/v1/vault/initialize', payload: { password: PASSWORD }, headers: { origin: config.webOrigin, 'x-csrf-token': csrf } })
     expect(initialized.statusCode).toBe(200)
     expect(initialized.headers['set-cookie']).toContain('HttpOnly')
+    const firstCookie = `aptos_wallet_session=${initialized.cookies[0].value}`
+    expect((await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: config.webOrigin } })).json().unlocked).toBe(false)
+    expect((await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: config.webOrigin, cookie: firstCookie } })).json().unlocked).toBe(true)
     expect((await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: 'https://evil.example' } })).statusCode).toBe(403)
     expect((await app.inject({ method: 'GET', url: '/api/v1/wallets', headers: { origin: config.webOrigin } })).statusCode).toBe(423)
+
+    const unlockedAgain = await app.inject({ method: 'POST', url: '/api/v1/vault/unlock', payload: { password: PASSWORD }, headers: { origin: config.webOrigin, 'x-csrf-token': csrf } })
+    const secondCookie = `aptos_wallet_session=${unlockedAgain.cookies[0].value}`
+    expect((await app.inject({ method: 'GET', url: '/api/v1/wallets', headers: { origin: config.webOrigin, cookie: firstCookie } })).statusCode).toBe(423)
+    expect((await app.inject({ method: 'GET', url: '/api/v1/wallets', headers: { origin: config.webOrigin, cookie: secondCookie } })).statusCode).toBe(200)
+  })
+
+  it('rate-limits repeated master-password failures', async () => {
+    const { app, config, headers } = await setup()
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await app.inject({ method: 'POST', url: '/api/v1/vault/unlock', headers, payload: { password: 'incorrect password value' } })
+      expect(response.statusCode).toBe(400)
+    }
+    const blocked = await app.inject({ method: 'POST', url: '/api/v1/vault/unlock', headers, payload: { password: PASSWORD } })
+    expect(blocked.statusCode).toBe(429)
+    expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0)
   })
 
   it('creates, restores, and extends HD wallets without discovery scan routes', async () => {
@@ -87,11 +113,79 @@ describe('local API safety', () => {
     expect(revealed.json().algorithm).toBe('RSA-OAEP-256')
     expect(revealed.body).not.toContain(MNEMONIC)
 
-    const badName = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/archive`, headers, payload: { password: PASSWORD, confirmationName: '错误名称' } })
+    const missingName = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/archive`, headers, payload: { confirmationName: '' } })
+    expect(missingName.statusCode).toBe(400)
+    expect(missingName.json().error).toBe('请手动输入完整钱包名称或账户名称')
+    const badName = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/archive`, headers, payload: { confirmationName: '错误名称' } })
     expect(badName.statusCode).toBe(400)
-    const archived = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/archive`, headers, payload: { password: PASSWORD, confirmationName: '秘密钱包' } })
+    const archived = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/archive`, headers, payload: { confirmationName: '秘密钱包' } })
     expect(archived.json().archivedAt).not.toBeNull()
     expect((await app.inject({ method: 'GET', url: '/api/v1/wallets/groups', headers })).json()).toEqual([])
     expect((await app.inject({ method: 'GET', url: '/api/v1/wallets/groups?includeArchived=true', headers })).json()).toHaveLength(1)
+    const missingPassword = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/unarchive`, headers, payload: {} })
+    expect(missingPassword.statusCode).toBe(400)
+    const wrongPassword = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/unarchive`, headers, payload: { password: 'wrong password value' } })
+    expect(wrongPassword.statusCode).toBe(400)
+    const restoredArchive = await app.inject({ method: 'POST', url: `/api/v1/wallets/groups/${groupId}/unarchive`, headers, payload: { password: PASSWORD } })
+    expect(restoredArchive.statusCode).toBe(200)
+    expect(restoredArchive.json().archivedAt).toBeNull()
+  })
+
+  it('returns paginated per-account transfer logs without secret material', async () => {
+    const { app, headers, wallets, jobs, gateway } = await setup(true)
+    const [source, target] = wallets.restoreGroup('日志钱包', MNEMONIC, 2).accounts
+    gateway.setBalance(source.address, 'APT', 10_000_000n)
+    gateway.setBalance(source.address, 'USDT', 5_000_000n)
+    const draft = jobs.createDraft({ name: '日志任务', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '2', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+
+    const outgoing = await app.inject({ method: 'GET', url: `/api/v1/wallets/${source.id}/transfers?direction=out&limit=50&offset=0`, headers })
+    expect(outgoing.statusCode).toBe(200)
+    expect(outgoing.json()).toMatchObject({ total: 1, counts: { all: 1, in: 0, out: 1 }, items: [{ direction: 'out', counterpartyWalletId: target.id, jobName: '日志任务' }] })
+    expect(outgoing.body).not.toContain(MNEMONIC)
+    expect(outgoing.body).not.toContain('privateKey')
+
+    const incoming = await app.inject({ method: 'GET', url: `/api/v1/wallets/${target.id}/transfers?direction=in`, headers })
+    expect(incoming.json().items[0]).toMatchObject({ direction: 'in', counterpartyWalletId: source.id })
+    expect((await app.inject({ method: 'GET', url: `/api/v1/wallets/${crypto.randomUUID()}/transfers`, headers })).statusCode).toBe(404)
+  })
+
+  it('updates aliases for mnemonic and imported accounts through the protected API', async () => {
+    const { app, headers, wallets } = await setup()
+    const derived = wallets.restoreGroup('别名钱包', MNEMONIC, 1).accounts[0]
+    const standalone = wallets.importPrivateKey('独立账户', Account.generate().privateKey.toString())
+
+    for (const [id, label] of [[derived.id, '日常付款'], [standalone.id, '归集账户']] as const) {
+      const response = await app.inject({ method: 'PATCH', url: `/api/v1/wallets/${id}`, headers, payload: { label } })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().label).toBe(label)
+    }
+    expect((await app.inject({ method: 'PATCH', url: `/api/v1/wallets/${derived.id}`, headers, payload: { label: '   ' } })).statusCode).toBe(400)
+  })
+
+  it('refreshes one wallet group behind session and CSRF protection', async () => {
+    const { app, config, headers, wallets, gateway } = await setup()
+    const group = wallets.restoreGroup('刷新钱包', MNEMONIC, 2)
+    gateway.setBalance(group.accounts[1].address, 'APT', 30_000_000n)
+    const url = `/api/v1/wallets/groups/${group.id}/refresh`
+
+    expect((await app.inject({ method: 'POST', url, headers: { origin: config.webOrigin } })).statusCode).toBe(403)
+    expect((await app.inject({ method: 'POST', url, headers: { origin: config.webOrigin, 'x-csrf-token': headers['x-csrf-token'] } })).statusCode).toBe(423)
+    const refreshed = await app.inject({ method: 'POST', url, headers })
+    expect(refreshed.statusCode).toBe(200)
+    expect(refreshed.json().accounts).toHaveLength(2)
+    expect(refreshed.json().accounts[1].balances[0]).toMatchObject({ asset: 'APT', baseUnits: '30000000', display: '0.3' })
   })
 })
+
+async function waitFor(predicate: () => boolean, timeout = 2_000): Promise<void> {
+  const end = Date.now() + timeout
+  while (Date.now() < end) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out')
+}

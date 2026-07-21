@@ -7,7 +7,7 @@ import { Account } from '@aptos-labs/ts-sdk'
 import { openDatabase, type SqliteDatabase } from '../server/database.js'
 import { BackupService, type VaultBackup } from '../server/backup.js'
 import { EncryptedVault } from '../server/vault.js'
-import { APTOS_HD_PATH, MAX_ACCOUNT_INDEX, WalletService } from '../server/wallets.js'
+import { APTOS_HD_PATH, BALANCE_REFRESH_CONCURRENCY, BALANCE_REFRESH_MAX_ATTEMPTS, MAX_ACCOUNT_INDEX, WalletService } from '../server/wallets.js'
 import { FakeGateway } from './fakes.js'
 
 // Public BIP39 test vector. Never use it for a funded wallet.
@@ -86,6 +86,88 @@ describe('Aptos HD wallet groups', () => {
     expect((await wallets.refresh(funded.id)).accountStatus).toBe('funded')
   })
 
+  it('retries transient balance failures before marking an account failed', async () => {
+    const group = wallets.restoreGroup('重试钱包', MNEMONIC, 1)
+    const account = group.accounts[0]
+    const originalGetBalances = gateway.getBalances.bind(gateway)
+    let calls = 0
+    gateway.getBalances = async (address: string) => {
+      calls += 1
+      if (calls < BALANCE_REFRESH_MAX_ATTEMPTS) throw new Error('temporary gateway timeout')
+      return originalGetBalances(address)
+    }
+
+    const refreshed = await wallets.refresh(account.id)
+    expect(calls).toBe(BALANCE_REFRESH_MAX_ATTEMPTS)
+    expect(refreshed.balanceError).toBeNull()
+  })
+
+  it('records an error only after all balance attempts fail', async () => {
+    const group = wallets.restoreGroup('最终失败钱包', MNEMONIC, 1)
+    const account = group.accounts[0]
+    let calls = 0
+    gateway.getBalances = async () => {
+      calls += 1
+      throw new Error('gateway unavailable')
+    }
+
+    const refreshed = await wallets.refresh(account.id)
+    expect(calls).toBe(BALANCE_REFRESH_MAX_ATTEMPTS)
+    expect(refreshed.balanceError).toBe('gateway unavailable')
+  })
+
+  it('refreshes every account with at most ten concurrent balance requests', async () => {
+    const group = wallets.restoreGroup('并发刷新钱包', MNEMONIC, 25)
+    const originalGetBalances = gateway.getBalances.bind(gateway)
+    let active = 0
+    let peak = 0
+    let calls = 0
+    gateway.getBalances = async (address: string) => {
+      active += 1
+      calls += 1
+      peak = Math.max(peak, active)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      try {
+        return await originalGetBalances(address)
+      } finally {
+        active -= 1
+      }
+    }
+
+    const refreshed = await wallets.refreshAll()
+    expect(refreshed).toHaveLength(group.accounts.length)
+    expect(calls).toBe(group.accounts.length)
+    expect(peak).toBe(BALANCE_REFRESH_CONCURRENCY)
+  })
+
+  it('refreshes only active accounts in one wallet with at most ten concurrent requests', async () => {
+    const group = wallets.restoreGroup('局部刷新钱包', MNEMONIC, 22)
+    wallets.restoreGroup('其他钱包', 'legal winner thank year wave sausage worth useful legal winner thank yellow', 1)
+    wallets.archive(group.accounts[0].id)
+    const targetIds = new Set(group.accounts.slice(1).map((account) => account.id))
+    const originalGetBalances = gateway.getBalances.bind(gateway)
+    let active = 0
+    let peak = 0
+    const calls: string[] = []
+    gateway.getBalances = async (address: string) => {
+      active += 1
+      peak = Math.max(peak, active)
+      calls.push(address)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      try {
+        return await originalGetBalances(address)
+      } finally {
+        active -= 1
+      }
+    }
+
+    const refreshed = await wallets.refreshGroup(group.id)
+    expect(refreshed.accounts).toHaveLength(21)
+    expect(calls).toHaveLength(21)
+    expect(calls.every((address) => [...targetIds].some((id) => wallets.get(id).address === address))).toBe(true)
+    expect(peak).toBe(BALANCE_REFRESH_CONCURRENCY)
+  })
+
   it('encrypts revealed secrets to an ephemeral RSA key and audits the operation', () => {
     const group = wallets.restoreGroup('秘密钱包', MNEMONIC, 1)
     const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
@@ -94,6 +176,26 @@ describe('Aptos HD wallet groups', () => {
     const plaintext = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(response.ciphertext, 'base64')).toString()
     expect(plaintext).toBe(MNEMONIC)
     expect(db.prepare(`SELECT COUNT(*) AS count FROM audit_events WHERE kind = 'wallet_group.mnemonic_revealed'`).get()).toEqual({ count: 1 })
+  })
+
+  it('neutralizes spreadsheet formulas in exported address labels', () => {
+    const group = wallets.restoreGroup('导出钱包', MNEMONIC, 1)
+    wallets.renameGroup(group.id, '=HYPERLINK("https://example.invalid")')
+    wallets.rename(group.accounts[0].id, '+SUM(1,1)')
+    const csv = wallets.addressCsv()
+    expect(csv).toContain(`"'=HYPERLINK(""https://example.invalid"")"`)
+    expect(csv).toContain(`"'+SUM(1,1)"`)
+  })
+
+  it('lets every account use a trimmed local alias and audits the change', () => {
+    const derived = wallets.restoreGroup('别名钱包', MNEMONIC, 1).accounts[0]
+    const standalone = wallets.importPrivateKey('独立账户', Account.generate().privateKey.toString())
+
+    expect(wallets.rename(derived.id, '  日常付款  ').label).toBe('日常付款')
+    expect(wallets.rename(standalone.id, '归集账户').label).toBe('归集账户')
+    expect(() => wallets.rename(derived.id, '   ')).toThrow('账户别名不能为空')
+    expect(() => wallets.rename(derived.id, '包含\n换行')).toThrow('账户别名不能包含控制字符')
+    expect(db.prepare(`SELECT COUNT(*) AS count FROM audit_events WHERE kind = 'wallet.renamed'`).get()).toEqual({ count: 2 })
   })
 
   it('migrates legacy mnemonic rows without changing wallet ids', () => {

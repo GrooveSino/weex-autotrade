@@ -1,6 +1,7 @@
 import { ASSETS, type AssetId } from './types.js'
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(\.\d+)?$/
+export const RANDOM_AMOUNT_DECIMALS = 2
 
 export function parseAmount(value: string, asset: AssetId): bigint {
   const normalized = value.trim()
@@ -9,6 +10,12 @@ export function parseAmount(value: string, asset: AssetId): bigint {
   const [whole, fraction = ''] = normalized.split('.')
   if (fraction.length > decimals) throw new Error(`${ASSETS[asset].symbol} 最多支持 ${decimals} 位小数`)
   return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, '0') || '0')
+}
+
+export function hasAtMostDecimals(value: string, maxDecimals: number): boolean {
+  const normalized = value.trim()
+  if (!DECIMAL_PATTERN.test(normalized)) return false
+  return (normalized.split('.')[1]?.length ?? 0) <= maxDecimals
 }
 
 export function formatAmount(value: bigint | string, asset: AssetId): string {
@@ -34,6 +41,13 @@ export function randomBigIntInclusive(min: bigint, max: bigint): bigint {
     }
     if (candidate < range) return min + candidate
   }
+}
+
+export function randomAmountInclusive(min: bigint, max: bigint, asset: AssetId): bigint {
+  const precision = ASSETS[asset].decimals
+  const quantum = 10n ** BigInt(precision - RANDOM_AMOUNT_DECIMALS)
+  if (min % quantum !== 0n || max % quantum !== 0n) throw new Error('随机金额必须按 0.01 的步长设置')
+  return randomBigIntInclusive(min / quantum, max / quantum) * quantum
 }
 
 function randomSafeInt(maxExclusive: number): number {

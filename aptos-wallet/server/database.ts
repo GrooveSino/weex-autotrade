@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
 
@@ -10,8 +10,9 @@ function ensureColumn(db: SqliteDatabase, table: string, column: string, definit
 }
 
 export function openDatabase(path: string): SqliteDatabase {
-  mkdirSync(dirname(path), { recursive: true })
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const db = new Database(path)
+  restrictDatabaseFiles(path)
   db.pragma('foreign_keys = ON')
   db.pragma('journal_mode = WAL')
   db.pragma('synchronous = FULL')
@@ -121,6 +122,8 @@ export function openDatabase(path: string): SqliteDatabase {
     );
 
     CREATE INDEX IF NOT EXISTS idx_steps_job_position ON job_steps(job_id, position);
+    CREATE INDEX IF NOT EXISTS idx_steps_source_updated ON job_steps(source_wallet_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_steps_target_updated ON job_steps(target_wallet_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_attempts_job ON transaction_attempts(job_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
   `)
@@ -156,5 +159,13 @@ export function openDatabase(path: string): SqliteDatabase {
     UPDATE job_steps SET status = 'uncertain', error = '服务在交易终态确认前重启', updated_at = ?
     WHERE status IN ('preparing', 'submitting')
   `).run(recoveryTime)
+  restrictDatabaseFiles(path)
   return db
+}
+
+function restrictDatabaseFiles(path: string): void {
+  if (path === ':memory:') return
+  for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
+    if (existsSync(candidate)) chmodSync(candidate, 0o600)
+  }
 }

@@ -11,6 +11,7 @@ export class FakeGateway implements ChainGateway {
   submitError = false
   commitBeforeError = false
   validationError = false
+  estimateError: string | null = null
   private outcomes = new Map<string, { success: boolean; vmStatus: string }>()
 
   setBalance(address: string, asset: AssetId, value: bigint): void {
@@ -41,6 +42,7 @@ export class FakeGateway implements ChainGateway {
   async estimateGas(request: TransferRequest): Promise<{ gasUnitPrice: bigint; maxGasAmount: bigint }> {
     request.sender.privateKey.clear()
     request.feePayer?.privateKey.clear()
+    if (this.estimateError) throw new Error(this.estimateError)
     return { gasUnitPrice: 1n, maxGasAmount: 10n }
   }
 

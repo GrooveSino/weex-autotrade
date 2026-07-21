@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -12,6 +12,7 @@ describe('encrypted vault', () => {
   it('encrypts wallet material and supports password rotation', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'aptos-vault-')), 'wallet.sqlite')
     db = openDatabase(path)
+    expect(statSync(path).mode & 0o777).toBe(0o600)
     const vault = new EncryptedVault(db)
     await vault.initialize('correct horse battery staple')
     const plaintext = 'ed25519-priv-0xabc123supersecret'
@@ -25,5 +26,6 @@ describe('encrypted vault', () => {
     await expect(vault.unlock('correct horse battery staple')).rejects.toThrow('主密码错误')
     await vault.unlock('another secure password')
     expect(vault.decryptSecret(envelope).privateKey).toBe(plaintext)
+    expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 })

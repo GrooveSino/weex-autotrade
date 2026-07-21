@@ -152,6 +152,33 @@ export interface TransactionAttempt {
   updatedAt: string
 }
 
+export interface AccountTransferLog {
+  id: string
+  jobId: string
+  jobName: string
+  jobStatus: JobStatus
+  position: number
+  direction: 'in' | 'out'
+  counterpartyAddress: string
+  counterpartyWalletId: string | null
+  asset: AssetId
+  amountMode: AmountMode
+  amountMin: string | null
+  amountMax: string | null
+  frozenAmountDisplay: string | null
+  status: StepStatus
+  txHash: string | null
+  error: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AccountTransferLogPage {
+  items: AccountTransferLog[]
+  total: number
+  counts: { all: number; in: number; out: number }
+}
+
 export interface VaultStatus {
   initialized: boolean
   unlocked: boolean

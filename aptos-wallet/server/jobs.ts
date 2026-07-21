@@ -1,10 +1,12 @@
 import { EventEmitter } from 'node:events'
 import { randomInt, randomUUID } from 'node:crypto'
 import { AccountAddress } from '@aptos-labs/ts-sdk'
-import { formatAmount, parseAmount, randomBigIntInclusive } from '../shared/amounts.js'
+import { formatAmount, hasAtMostDecimals, parseAmount, randomAmountInclusive } from '../shared/amounts.js'
 import {
   ASSETS,
   type AssetId,
+  type AccountTransferLog,
+  type AccountTransferLogPage,
   type FrozenTransferStep,
   type JobDraftInput,
   type JobPreflight,
@@ -54,6 +56,27 @@ interface StepRow {
   error: string | null
 }
 
+interface AccountTransferRow {
+  id: string
+  job_id: string
+  job_name: string
+  job_status: JobStatus
+  position: number
+  direction: 'in' | 'out'
+  counterparty_address: string
+  counterparty_wallet_id: string | null
+  asset: AssetId
+  amount_mode: 'fixed' | 'random' | 'max'
+  amount_min: string | null
+  amount_max: string | null
+  frozen_amount_display: string | null
+  status: StepStatus
+  tx_hash: string | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
 function mapStep(row: StepRow): FrozenTransferStep {
   return {
     id: row.id,
@@ -71,6 +94,29 @@ function mapStep(row: StepRow): FrozenTransferStep {
     status: row.status,
     txHash: row.tx_hash,
     error: row.error,
+  }
+}
+
+function mapAccountTransfer(row: AccountTransferRow): AccountTransferLog {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    jobName: row.job_name,
+    jobStatus: row.job_status,
+    position: row.position,
+    direction: row.direction,
+    counterpartyAddress: row.counterparty_address,
+    counterpartyWalletId: row.counterparty_wallet_id,
+    asset: row.asset,
+    amountMode: row.amount_mode,
+    amountMin: row.amount_min,
+    amountMax: row.amount_max,
+    frozenAmountDisplay: row.frozen_amount_display,
+    status: row.status,
+    txHash: row.tx_hash,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }
 
@@ -107,7 +153,6 @@ export class JobService extends EventEmitter {
       VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?)
     `).run(id, input.name.trim(), input.gasPayerWalletId, input.intervalMinSeconds, input.intervalMaxSeconds, Number(input.shuffle), now, now)
     this.replaceSteps(id, input.steps.map((step, position) => ({ ...step, position })))
-    this.audit('job.created', id, { stepCount: input.steps.length })
     return this.get(id)
   }
 
@@ -153,7 +198,7 @@ export class JobService extends EventEmitter {
     }
     const { summary, projectedMaxAmounts, checks } = await this.inspectBalances(job, frozen)
     if (checks.some((check) => !check.valid)) return { valid: false, job: { ...job, steps: frozen }, checks, summary }
-    const phrase = `执行 ${job.id} APTOS MAINNET ${frozen.length} 笔`
+    const phrase = this.confirmationPhrase(job.id, frozen.length)
     const now = new Date().toISOString()
     this.db.transaction(() => {
       this.db.prepare('UPDATE job_steps SET position = position + 10000 WHERE job_id = ?').run(id)
@@ -169,9 +214,47 @@ export class JobService extends EventEmitter {
           step.waitAfterSeconds, now, step.id)
       }
     })()
-    this.audit('job.previewed', id, summary)
     this.emitChange()
     return { valid: true, job: this.get(id), checks, summary }
+  }
+
+  async reorderPreview(id: string, stepIds: string[]): Promise<JobPreflight> {
+    const job = this.get(id)
+    if (job.status !== 'previewed') throw new Error('只有已完成预览的任务可以打乱顺序')
+    const current = job.steps
+    if (stepIds.length !== current.length || new Set(stepIds).size !== current.length || stepIds.some((stepId) => !current.some((step) => step.id === stepId))) {
+      throw new Error('预览步骤清单不匹配，已拒绝重排')
+    }
+    const now = new Date().toISOString()
+    const ordered = stepIds.map((stepId) => current.find((step) => step.id === stepId)!)
+      .map((step, position) => ({ ...step, position, waitAfterSeconds: position === current.length - 1 ? 0 : step.waitAfterSeconds, status: 'pending' as const, txHash: null, error: null }))
+    let checks: TransferStepCheck[]
+    let summary: JobSummary | null = null
+    let projectedMaxAmounts = new Map<string, bigint>()
+    try {
+      validateMaxOrdering(ordered)
+      const inspected = await this.inspectBalances(job, ordered)
+      checks = inspected.checks
+      summary = inspected.summary
+      projectedMaxAmounts = inspected.projectedMaxAmounts
+    } catch (error) {
+      const message = safeError(error)
+      const position = Number(message.match(/第 (\d+) 笔/)?.[1] ?? '1') - 1
+      checks = ordered.map((step) => ({ stepId: step.id, position: step.position, valid: step.position !== position, error: step.position === position ? message : null, estimatedGasBaseUnits: '0', gasWalletId: job.gasPayerWalletId ?? step.sourceWalletId, gasBalanceBaseUnits: '0' }))
+    }
+    const valid = Boolean(summary && checks.every((check) => check.valid))
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE job_steps SET position = position + 10000 WHERE job_id = ?').run(id)
+      const update = this.db.prepare('UPDATE job_steps SET position = ?, frozen_amount_display = ?, wait_after_seconds = ?, status = \'pending\', tx_hash = NULL, error = NULL, updated_at = ? WHERE id = ?')
+      for (const step of ordered) {
+        const maxProjection = projectedMaxAmounts.get(step.id)
+        update.run(step.position, maxProjection ? formatAmount(maxProjection, step.asset) : step.frozenAmountDisplay, step.waitAfterSeconds, now, step.id)
+      }
+      this.db.prepare('UPDATE jobs SET status = ?, confirmation_phrase = ?, summary_json = ?, error = NULL, updated_at = ? WHERE id = ?')
+        .run(valid ? 'previewed' : 'draft', valid ? this.confirmationPhrase(job.id, ordered.length) : null, valid && summary ? JSON.stringify(summary) : null, now, id)
+    })()
+    this.emitChange()
+    return { valid, job: this.get(id), checks, summary }
   }
 
   confirm(id: string, confirmation: string): TransferJob {
@@ -197,6 +280,7 @@ export class JobService extends EventEmitter {
   }
 
   resume(id: string): TransferJob {
+    if (!this.executionEnabled) throw new Error('主网执行门禁未开启：APTOS_MAINNET_EXECUTION_ENABLED 必须为 true')
     const job = this.get(id)
     if (job.status !== 'paused') throw new Error('只有暂停任务可以恢复')
     if (job.steps.some((step) => step.status === 'uncertain')) throw new Error('存在结果不确定的交易，禁止恢复')
@@ -209,11 +293,14 @@ export class JobService extends EventEmitter {
     return this.get(id)
   }
 
-  cancel(id: string): TransferJob {
+  cancel(id: string): TransferJob | null {
     const job = this.get(id)
     if (!['draft', 'previewed', 'running', 'paused'].includes(job.status)) throw new Error('当前任务不能取消')
     this.cancelRequested = true
-    if (job.status !== 'running') this.finishCancel(id)
+    if (job.status !== 'running') {
+      const removed = this.finishCancel(id)
+      if (removed) return null
+    }
     this.audit('job.cancel_requested', id, {})
     return this.get(id)
   }
@@ -223,17 +310,72 @@ export class JobService extends EventEmitter {
     return this.db.prepare('SELECT * FROM transaction_attempts WHERE job_id = ? ORDER BY created_at ASC').all(jobId) as Record<string, unknown>[]
   }
 
+  accountTransfers(walletId: string, limit = 100, offset = 0, direction: 'all' | 'in' | 'out' = 'all'): AccountTransferLogPage {
+    this.wallets.get(walletId)
+    const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit)))
+    const boundedOffset = Math.max(0, Math.trunc(offset))
+    const counts = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN source_wallet_id = ? THEN 1 ELSE 0 END) AS outgoing,
+        SUM(CASE WHEN source_wallet_id <> ? AND target_wallet_id = ? THEN 1 ELSE 0 END) AS incoming
+      FROM job_steps
+      WHERE (source_wallet_id = ? OR target_wallet_id = ?)
+        AND EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = job_steps.id)
+    `).get(walletId, walletId, walletId, walletId, walletId) as { total: number; incoming: number | null; outgoing: number | null }
+    const condition = direction === 'out' ? 'step.source_wallet_id = ?'
+      : direction === 'in' ? 'step.source_wallet_id <> ? AND step.target_wallet_id = ?'
+        : 'step.source_wallet_id = ? OR step.target_wallet_id = ?'
+    const conditionParams = direction === 'out' ? [walletId] : [walletId, walletId]
+    const total = direction === 'out' ? counts.outgoing ?? 0 : direction === 'in' ? counts.incoming ?? 0 : counts.total
+    const rows = this.db.prepare(`
+      SELECT
+        step.id,
+        step.job_id,
+        job.name AS job_name,
+        job.status AS job_status,
+        step.position,
+        CASE WHEN step.source_wallet_id = ? THEN 'out' ELSE 'in' END AS direction,
+        CASE WHEN step.source_wallet_id = ? THEN step.target_address ELSE source.address END AS counterparty_address,
+        CASE WHEN step.source_wallet_id = ? THEN step.target_wallet_id ELSE step.source_wallet_id END AS counterparty_wallet_id,
+        step.asset,
+        step.amount_mode,
+        step.amount_min,
+        step.amount_max,
+        step.frozen_amount_display,
+        step.status,
+        step.tx_hash,
+        step.error,
+        job.created_at,
+        step.updated_at
+      FROM job_steps AS step
+      JOIN jobs AS job ON job.id = step.job_id
+      JOIN wallets AS source ON source.id = step.source_wallet_id
+      WHERE (${condition})
+        AND EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = step.id)
+      ORDER BY step.updated_at DESC, job.created_at DESC, step.position DESC
+      LIMIT ? OFFSET ?
+    `).all(walletId, walletId, walletId, ...conditionParams, boundedLimit, boundedOffset) as AccountTransferRow[]
+    return { items: rows.map(mapAccountTransfer), total, counts: { all: counts.total, in: counts.incoming ?? 0, out: counts.outgoing ?? 0 } }
+  }
+
   private async run(jobId: string): Promise<void> {
     const job = this.get(jobId)
     for (const step of job.steps.filter((candidate) => candidate.status === 'pending' || candidate.status === 'waiting')) {
-      if (this.cancelRequested) return this.finishCancel(jobId)
+      if (this.cancelRequested) {
+        this.finishCancel(jobId)
+        return
+      }
       if (this.pauseRequested) return this.setJobStatus(jobId, 'paused', '用户暂停')
       if (step.position > 0) {
         const previous = this.get(jobId).steps[step.position - 1]
         if (previous?.waitAfterSeconds) {
           this.setStepStatus(step.id, 'waiting', null)
           await sleepInterruptible(previous.waitAfterSeconds * 1000, () => this.pauseRequested || this.cancelRequested)
-          if (this.cancelRequested) return this.finishCancel(jobId)
+          if (this.cancelRequested) {
+            this.finishCancel(jobId)
+            return
+          }
           if (this.pauseRequested) return this.setJobStatus(jobId, 'paused', '用户暂停')
         }
       }
@@ -316,15 +458,25 @@ export class JobService extends EventEmitter {
   }
 
   private transferRequest(job: TransferJob, step: FrozenTransferStep, amount: bigint): TransferRequest {
-    return {
-      sender: this.wallets.getAccount(step.sourceWalletId),
-      feePayer: job.gasPayerWalletId && job.gasPayerWalletId !== step.sourceWalletId
-        ? this.wallets.getAccount(job.gasPayerWalletId)
-        : null,
-      recipient: step.targetAddress,
-      asset: step.asset,
-      amount,
+    const sender = this.wallets.getAccount(step.sourceWalletId)
+    try {
+      return {
+        sender,
+        feePayer: job.gasPayerWalletId && job.gasPayerWalletId !== step.sourceWalletId
+          ? this.wallets.getAccount(job.gasPayerWalletId)
+          : null,
+        recipient: step.targetAddress,
+        asset: step.asset,
+        amount,
+      }
+    } catch (error) {
+      sender.privateKey.clear()
+      throw error
     }
+  }
+
+  private confirmationPhrase(jobId: string, stepCount: number): string {
+    return `执行 ${jobId} APTOS MAINNET ${stepCount} 笔 · ${randomUUID().slice(0, 8)}`
   }
 
   private async reconcile(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string }> {
@@ -390,7 +542,7 @@ export class JobService extends EventEmitter {
         check.estimatedGasBaseUnits = gasCost.toString()
         estimatedGas += gasCost
       } catch (error) {
-        check.error = `交易模拟失败：${safeError(error).replace(/^交易模拟失败：/, '')}`
+        check.error = safeError(error)
         checks.push(check)
         continue
       }
@@ -502,13 +654,27 @@ export class JobService extends EventEmitter {
       .run(state, error, new Date().toISOString(), id)
   }
 
-  private finishCancel(id: string): void {
+  private finishCancel(id: string): boolean {
     const now = new Date().toISOString()
+    const attempts = this.db.prepare('SELECT 1 FROM transaction_attempts WHERE job_id = ? LIMIT 1').get(id)
+    if (!attempts) {
+      this.db.transaction(() => {
+        this.db.prepare("DELETE FROM audit_events WHERE entity_id = ? AND kind LIKE 'job.%'").run(id)
+        this.db.prepare('DELETE FROM jobs WHERE id = ?').run(id)
+      })()
+      this.emitChange()
+      return true
+    }
     this.db.transaction(() => {
-      this.db.prepare(`UPDATE job_steps SET status = 'cancelled', updated_at = ? WHERE job_id = ? AND status IN ('pending','waiting')`).run(now, id)
+      this.db.prepare(`
+        DELETE FROM job_steps
+        WHERE job_id = ?
+          AND NOT EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = job_steps.id)
+      `).run(id)
       this.db.prepare(`UPDATE jobs SET status = 'cancelled', error = NULL, updated_at = ? WHERE id = ?`).run(now, id)
     })()
     this.emitChange()
+    return false
   }
 
   private audit(kind: string, entityId: string, detail: Record<string, unknown> | JobSummary): void {
@@ -534,6 +700,7 @@ function validateDraft(input: JobDraftInput): void {
       if (!step.amountMin || parseAmount(step.amountMin, step.asset) <= 0n) throw new Error('固定金额必须大于零')
     } else if (step.amountMode === 'random') {
       if (!step.amountMin || !step.amountMax) throw new Error('随机金额需要最小值和最大值')
+      if (!hasAtMostDecimals(step.amountMin, 2) || !hasAtMostDecimals(step.amountMax, 2)) throw new Error('随机金额最多支持 2 位小数，并按 0.01 的步长随机')
       const min = parseAmount(step.amountMin, step.asset)
       const max = parseAmount(step.amountMax, step.asset)
       if (min <= 0n || min > max) throw new Error('随机金额范围无效')
@@ -544,7 +711,7 @@ function validateDraft(input: JobDraftInput): void {
 function freezeStep(row: StepRow, position: number, intervalMin: number, intervalMax: number, last: boolean): FrozenTransferStep {
   let amount: bigint | null = null
   if (row.amount_mode === 'fixed') amount = parseAmount(row.amount_min!, row.asset)
-  if (row.amount_mode === 'random') amount = randomBigIntInclusive(parseAmount(row.amount_min!, row.asset), parseAmount(row.amount_max!, row.asset))
+  if (row.amount_mode === 'random') amount = randomAmountInclusive(parseAmount(row.amount_min!, row.asset), parseAmount(row.amount_max!, row.asset), row.asset)
   return {
     ...mapStep(row),
     position,
@@ -583,5 +750,18 @@ async function sleepInterruptible(milliseconds: number, interrupted: () => boole
 
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  return message.replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]').slice(0, 500)
+  const normalized = message.toUpperCase()
+  if (normalized.includes('INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE')) {
+    return '交易无法支付 APT 网络手续费：请给转出账户充值 APT，或选择一个有 APT 余额的手续费账户。'
+  }
+  if (normalized.includes('SEQUENCE_NUMBER')) {
+    return '账户交易序号已变化：请返回编辑并重新预览后再发送。'
+  }
+  if (normalized.includes('INVALID_AUTH_KEY') || normalized.includes('INVALID_SIGNATURE')) {
+    return '交易签名校验失败：请锁定并重新解锁钱包后再试。'
+  }
+  return message
+    .replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]')
+    .replace(/\b0x[0-9a-f]{64}\b/gi, '[ADDRESS]')
+    .slice(0, 500)
 }

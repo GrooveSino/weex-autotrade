@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
-  Archive, ArrowDown, ArrowUp, ArrowUpRight, Boxes, Check, ChevronRight, CircleDollarSign, Copy, Download, Ellipsis,
-  Eye, FileClock, GripVertical, KeyRound, Layers3, Lock, Pencil, Plus, QrCode, RefreshCw, RotateCcw, Send,
-  ShieldAlert, Shuffle, Trash2, Upload, WalletCards, X,
+  Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleDollarSign, Clock3, Copy, Download, Ellipsis,
+  Eye, FileClock, KeyRound, Layers3, Lock, Pencil, Plus, QrCode, RefreshCw, RotateCcw, Search, Send,
+  ShieldAlert, Shuffle, Upload, WalletCards, X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import type { AmountMode, AssetId, JobDraftInput, JobPreflight, MnemonicRestorePreview, TransferJob, TransferStepDraft, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
-import { formatAmount } from '../shared/amounts'
+import type { AccountTransferLog, AccountTransferLogPage, AmountMode, AssetId, JobDraftInput, JobPreflight, MnemonicRestorePreview, TransferJob, TransferStepDraft, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
+import { formatAmount, hasAtMostDecimals } from '../shared/amounts'
 import { download, getStatus, loadWorkspace, post, request, saveAndPreviewJob, subscribe } from './api'
 import { createMnemonic, parseAccountIndexes, pickConfirmationIndexes } from './mnemonic'
 import { requestEncryptedSecret } from './secret-transport'
+import { pairTransferEndpoints } from './transfer-pairing'
 
 type View = 'wallets' | 'transfer' | 'jobs'
-type Modal = 'create' | 'restore' | 'private' | 'bulk' | 'confirm' | 'secret' | 'password' | 'accounts' | 'archiveGroup' | 'secretAuth' | 'archived' | 'receive' | 'accountDetails' | null
+type Modal = 'create' | 'restore' | 'private' | 'confirm' | 'secret' | 'password' | 'accounts' | 'archiveGroup' | 'secretAuth' | 'archived' | 'receive' | 'accountDetails' | 'accountAlias' | 'accountHistory' | null
 type SecretTarget = { kind: 'mnemonic'; group: WalletGroup } | { kind: 'privateKey'; wallet: WalletRecord }
 const statusLabels: Record<string, string> = {
   draft: '草稿', previewed: '待确认', running: '运行中', paused: '已暂停', cancelled: '已取消',
@@ -31,6 +32,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [previewJob, setPreviewJob] = useState<TransferJob | null>(null)
+  const [previewPreflight, setPreviewPreflight] = useState<JobPreflight | null>(null)
   const [secret, setSecret] = useState('')
   const [secretTitle, setSecretTitle] = useState('秘密')
   const [selectedGroup, setSelectedGroup] = useState<WalletGroup | null>(null)
@@ -45,6 +47,17 @@ export function App() {
     setWallets(snapshot.wallets)
     setGroups(snapshot.groups)
     setJobs(snapshot.jobs)
+  }
+  const applyWalletUpdate = (updated: WalletRecord) => {
+    setWallets((current) => current.map((wallet) => wallet.id === updated.id ? updated : wallet))
+    setGroups((current) => current.map((group) => group.id === updated.groupId
+      ? { ...group, accounts: group.accounts.map((wallet) => wallet.id === updated.id ? updated : wallet) }
+      : group))
+  }
+  const applyGroupUpdate = (updated: WalletGroup) => {
+    setGroups((current) => current.map((group) => group.id === updated.id ? updated : group))
+    const accounts = new Map(updated.accounts.map((wallet) => [wallet.id, wallet]))
+    setWallets((current) => current.map((wallet) => accounts.get(wallet.id) ?? wallet))
   }
   const run = async (action: () => Promise<void>, success?: string) => {
     setBusy(true)
@@ -99,7 +112,7 @@ export function App() {
         <div className="sidebar-foot">
           <div className={`execution-state ${status.executionEnabled ? 'enabled' : ''}`}>
             <ShieldAlert size={16} />
-            <div><strong>Mainnet</strong><span>{status.executionEnabled ? '执行已开启' : '仅预览'}</span></div>
+            <div><strong>Aptos 主网</strong><span>{status.executionEnabled ? '真实转账已开启' : '安全模式 · 真实转账已关闭'}</span></div>
           </div>
           <button className="nav-button" title="锁定钱包" aria-label="锁定钱包" onClick={() => void run(async () => {
             await post('/api/v1/vault/lock')
@@ -109,20 +122,22 @@ export function App() {
         </div>
       </aside>
       <main>
-        {view === 'wallets' && <WalletView wallets={wallets} groups={groups} busy={busy} setModal={setModal} run={run} reload={reload}
+        {view === 'wallets' && <WalletView wallets={wallets} groups={groups} setModal={setModal} run={run} reload={reload} onWalletUpdated={applyWalletUpdate} onGroupUpdated={applyGroupUpdate} onToast={setToast}
           onAccounts={(group) => { setSelectedGroup(group); setModal('accounts') }}
           onArchive={(group) => { setSelectedGroup(group); setModal('archiveGroup') }}
           onRevealMnemonic={(group) => { setSecretTarget({ kind: 'mnemonic', group }); setModal('secretAuth') }}
           onReceive={(wallet) => { setSelectedWallet(wallet); setModal('receive') }}
+          onHistory={(wallet) => { setSelectedWallet(wallet); setModal('accountHistory') }}
+          onAlias={(wallet) => { setSelectedWallet(wallet); setModal('accountAlias') }}
           onDetails={(wallet) => { setSelectedWallet(wallet); setModal('accountDetails') }}
           onTransfer={(wallet) => { setTransferSourceWalletId(wallet.id); setView('transfer') }} />}
-        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} busy={busy} setModal={setModal} run={run} initialSourceWalletId={transferSourceWalletId} onPreview={(job) => { setPreviewJob(job); setModal('confirm') }} />}
-        {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} run={run} setPreviewJob={setPreviewJob} setModal={setModal} />}
+        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
+        {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} run={run} setPreviewJob={(job) => { setPreviewPreflight(null); setPreviewJob(job) }} setModal={setModal} />}
       </main>
       {modal === 'create' && <CreateWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'restore' && <RestoreWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'private' && <ImportPrivateKeyDialog close={() => setModal(null)} run={run} reload={reload} />}
-      {modal === 'confirm' && previewJob && <ConfirmDialog job={previewJob} executionEnabled={status.executionEnabled} close={() => setModal(null)} run={run} onStarted={() => { setModal(null); setView('jobs') }} />}
+      {modal === 'confirm' && previewJob && <ConfirmDialog job={previewJob} wallets={wallets} initialPreflight={previewPreflight} executionEnabled={status.executionEnabled} close={() => { setModal(null); setPreviewPreflight(null) }} run={run} onChanged={(result) => { setPreviewPreflight(result); setPreviewJob(result.job) }} onStarted={() => { setModal(null); setPreviewPreflight(null); setView('jobs') }} />}
       {modal === 'secret' && <SecretDialog title={secretTitle} secret={secret} close={() => { setSecret(''); setModal(null) }} />}
       {modal === 'password' && <PasswordDialog close={() => setModal(null)} run={run} />}
       {modal === 'accounts' && selectedGroup && <AccountDialog group={selectedGroup} close={() => { setSelectedGroup(null); setModal(null) }} run={run} reload={reload} />}
@@ -130,8 +145,12 @@ export function App() {
       {modal === 'secretAuth' && secretTarget && <SecretAuthDialog target={secretTarget} close={() => { setSecretTarget(null); setModal(null) }} run={run} onSecret={(title, value) => { setSecretTitle(title); setSecret(value); setSecretTarget(null); setModal('secret') }} />}
       {modal === 'archived' && <ArchivedDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'receive' && selectedWallet && <ReceiveDialog wallet={selectedWallet} close={() => { setSelectedWallet(null); setModal(null) }} />}
+      {modal === 'accountHistory' && selectedWallet && <AccountHistoryDialog wallet={selectedWallet} wallets={wallets} close={() => { setSelectedWallet(null); setModal(null) }} />}
+      {modal === 'accountAlias' && selectedWallet && <AccountAliasDialog wallet={selectedWallet} close={() => { setSelectedWallet(null); setModal(null) }} run={run} onUpdated={applyWalletUpdate} />}
       {modal === 'accountDetails' && selectedWallet && <AccountDetailsDialog wallet={selectedWallet} close={() => { setSelectedWallet(null); setModal(null) }} run={run} reload={reload}
         onReceive={() => setModal('receive')}
+        onHistory={() => setModal('accountHistory')}
+        onAlias={() => setModal('accountAlias')}
         onTransfer={() => { setSelectedWallet(null); setModal(null); setTransferSourceWalletId(selectedWallet.id); setView('transfer') }}
         onReveal={() => { setSecretTarget({ kind: 'privateKey', wallet: selectedWallet }); setSelectedWallet(null); setModal('secretAuth') }} />}
       {toast && <div className="toast">{toast}</div>}
@@ -177,23 +196,92 @@ function VaultGate({ status, onDone, setToast }: { status: VaultStatus; onDone: 
   </div>
 }
 
-function WalletView({ wallets, groups, busy, setModal, run, reload, onAccounts, onArchive, onRevealMnemonic, onReceive, onTransfer, onDetails }: {
-  wallets: WalletRecord[]; groups: WalletGroup[]; busy: boolean; setModal: (value: Modal) => void
+function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, onGroupUpdated, onToast, onAccounts, onArchive, onRevealMnemonic, onReceive, onHistory, onAlias, onTransfer, onDetails }: {
+  wallets: WalletRecord[]; groups: WalletGroup[]; setModal: (value: Modal) => void
   run: (action: () => Promise<void>, success?: string) => Promise<void>; reload: () => Promise<void>
+  onWalletUpdated: (wallet: WalletRecord) => void; onGroupUpdated: (group: WalletGroup) => void; onToast: (message: string) => void
   onAccounts: (group: WalletGroup) => void; onArchive: (group: WalletGroup) => void
-  onRevealMnemonic: (group: WalletGroup) => void; onReceive: (wallet: WalletRecord) => void
-  onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void
+  onRevealMnemonic: (group: WalletGroup) => void; onReceive: (wallet: WalletRecord) => void; onHistory: (wallet: WalletRecord) => void
+  onAlias: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(groups.map((group) => group.id)))
+  const [refreshingWalletIds, setRefreshingWalletIds] = useState<Set<string>>(new Set())
+  const [changedWalletIds, setChangedWalletIds] = useState<Set<string>>(new Set())
+  const [refreshingAll, setRefreshingAll] = useState(false)
+  const [refreshingGroupIds, setRefreshingGroupIds] = useState<Set<string>>(new Set())
   const standalone = wallets.filter((wallet) => !wallet.groupId)
   const totalApt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'APT')?.baseUnits ?? '0'), 0n)
   const totalUsdt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'USDT')?.baseUnits ?? '0'), 0n)
+  const refreshAll = async () => {
+    if (refreshingAll || !wallets.length) return
+    setRefreshingAll(true)
+    let nextIndex = 0
+    let failed = 0
+    const worker = async () => {
+      while (nextIndex < wallets.length) {
+        const wallet = wallets[nextIndex++]
+        const before = wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
+        setRefreshingWalletIds((current) => new Set(current).add(wallet.id))
+        try {
+          const updated = await post<WalletRecord>(`/api/v1/wallets/${wallet.id}/refresh`)
+          onWalletUpdated(updated)
+          const after = updated.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
+          if (before !== after) {
+            setChangedWalletIds((current) => new Set(current).add(wallet.id))
+            window.setTimeout(() => setChangedWalletIds((current) => {
+              const next = new Set(current); next.delete(wallet.id); return next
+            }), 1_800)
+          }
+          if (updated.balanceError) failed += 1
+        } catch (error) {
+          failed += 1
+          onWalletUpdated({ ...wallet, balanceError: error instanceof Error ? error.message : '余额刷新失败' })
+        } finally {
+          setRefreshingWalletIds((current) => { const next = new Set(current); next.delete(wallet.id); return next })
+        }
+      }
+    }
+    try {
+      await Promise.all(Array.from({ length: Math.min(10, wallets.length) }, worker))
+      onToast(failed ? `余额刷新完成，${failed} 个账户失败` : `已刷新 ${wallets.length} 个账户`)
+    } finally {
+      setRefreshingAll(false)
+    }
+  }
+  const showBalanceChanges = (before: WalletRecord[], after: WalletRecord[]) => {
+    const previous = new Map(before.map((wallet) => [wallet.id, wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')]))
+    const changed = after.filter((wallet) => previous.get(wallet.id) !== wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')).map((wallet) => wallet.id)
+    if (!changed.length) return
+    setChangedWalletIds((current) => new Set([...current, ...changed]))
+    window.setTimeout(() => setChangedWalletIds((current) => {
+      const next = new Set(current); changed.forEach((id) => next.delete(id)); return next
+    }), 1_800)
+  }
+  const refreshGroup = async (group: WalletGroup) => {
+    if (refreshingGroupIds.has(group.id)) return
+    const before = wallets.filter((wallet) => wallet.groupId === group.id)
+    const ids = before.map((wallet) => wallet.id)
+    setRefreshingGroupIds((current) => new Set(current).add(group.id))
+    setRefreshingWalletIds((current) => new Set([...current, ...ids]))
+    try {
+      const updated = await post<WalletGroup>(`/api/v1/wallets/groups/${group.id}/refresh`)
+      onGroupUpdated(updated)
+      showBalanceChanges(before, updated.accounts)
+      const failed = updated.accounts.filter((wallet) => wallet.balanceError).length
+      onToast(failed ? `${group.label} 刷新完成，${failed} 个账户失败` : `${group.label} 的余额已刷新`)
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '钱包余额刷新失败')
+    } finally {
+      setRefreshingGroupIds((current) => { const next = new Set(current); next.delete(group.id); return next })
+      setRefreshingWalletIds((current) => { const next = new Set(current); ids.forEach((id) => next.delete(id)); return next })
+    }
+  }
   return <>
     <PageHeader title="钱包" subtitle={`${wallets.length} 个账户 · Aptos 主网`} actions={<>
+      <button className="secondary" onClick={() => void refreshAll()} disabled={refreshingAll || !wallets.length}><RefreshCw className={refreshingAll ? 'spin' : ''} size={16} />{refreshingAll ? '正在刷新' : '刷新全部余额'}</button>
       <button className="secondary" onClick={() => setModal('restore')}><Upload size={16} />恢复钱包</button>
       <button className="primary" onClick={() => setModal('create')}><Plus size={16} />创建钱包</button>
       <details className="action-menu"><summary aria-label="更多操作"><Ellipsis size={18} /></summary><div>
-        <button onClick={() => void run(async () => { await post('/api/v1/wallets/refresh-all'); await reload() }, '余额已刷新')} disabled={busy}><RefreshCw size={15} />刷新全部余额</button>
         <button onClick={() => setModal('private')}><KeyRound size={15} />导入私钥</button>
         <button onClick={() => void download('/api/v1/vault/backup', 'aptos-wallet-backup.json')}><Download size={15} />下载加密备份</button>
         <button onClick={() => void download('/api/v1/wallets/addresses.csv', 'aptos-addresses.csv')}><Download size={15} />导出地址 CSV</button>
@@ -219,103 +307,171 @@ function WalletView({ wallets, groups, busy, setModal, run, reload, onAccounts, 
             <div className="row-actions">
               {group.derivationProfile === 'aptos_hd' && <button className="secondary small" onClick={() => onAccounts(group)}><Plus size={14} />添加账户</button>}
               <details className="action-menu row-menu"><summary aria-label={`${group.label} 更多操作`}><Ellipsis size={17} /></summary><div>
+                <button disabled={refreshingGroupIds.has(group.id)} onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); void refreshGroup(group) }}><RefreshCw className={refreshingGroupIds.has(group.id) ? 'spin' : ''} size={15} />{refreshingGroupIds.has(group.id) ? '正在刷新余额' : '刷新钱包余额'}</button>
                 <button onClick={() => onRevealMnemonic(group)}><Eye size={15} />查看助记词</button>
                 <button onClick={() => { const label = window.prompt('钱包名称', group.label); if (label?.trim()) void run(async () => { await request(`/api/v1/wallets/groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ label }) }); await reload() }, '钱包已重命名') }}><Pencil size={15} />重命名钱包</button>
                 <button className="danger-text" onClick={() => onArchive(group)}><Archive size={15} />归档钱包</button>
               </div></details>
             </div>
           </div>
-          {isOpen && <WalletList wallets={group.accounts} onReceive={onReceive} onTransfer={onTransfer} onDetails={onDetails} />}
+          {isOpen && <WalletList wallets={wallets.filter((wallet) => wallet.groupId === group.id)} refreshingWalletIds={refreshingWalletIds} changedWalletIds={changedWalletIds} onReceive={onReceive} onHistory={onHistory} onAlias={onAlias} onTransfer={onTransfer} onDetails={onDetails} />}
         </div>
       })}
     </section>
     <section className="table-section standalone-section">
       <div className="section-head"><h2>导入的账户</h2><span>使用私钥单独导入</span></div>
       {wallets.length === 0 ? <Empty icon={<WalletCards size={28} />} text="还没有钱包，先创建或恢复一个钱包。" /> :
-        standalone.length === 0 ? <Empty icon={<WalletCards size={28} />} text="没有导入的账户。" /> : <WalletList wallets={standalone} onReceive={onReceive} onTransfer={onTransfer} onDetails={onDetails} />}
+        standalone.length === 0 ? <Empty icon={<WalletCards size={28} />} text="没有导入的账户。" /> : <WalletList wallets={standalone} refreshingWalletIds={refreshingWalletIds} changedWalletIds={changedWalletIds} onReceive={onReceive} onHistory={onHistory} onAlias={onAlias} onTransfer={onTransfer} onDetails={onDetails} />}
     </section>
   </>
 }
 
-function WalletList({ wallets, onReceive, onTransfer, onDetails }: { wallets: WalletRecord[]; onReceive: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void }) {
-  return <div className="account-list">{wallets.map((wallet) => <article className="account-row" key={wallet.id}>
+function WalletList({ wallets, refreshingWalletIds, changedWalletIds, onReceive, onHistory, onAlias, onTransfer, onDetails }: { wallets: WalletRecord[]; refreshingWalletIds: Set<string>; changedWalletIds: Set<string>; onReceive: (wallet: WalletRecord) => void; onHistory: (wallet: WalletRecord) => void; onAlias: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void }) {
+  return <div className="account-list">{wallets.map((wallet) => { const refreshing = refreshingWalletIds.has(wallet.id); const changed = changedWalletIds.has(wallet.id); return <article className={`account-row ${refreshing ? 'refreshing' : ''} ${changed ? 'balance-changed' : ''}`} key={wallet.id} aria-busy={refreshing}>
     <div className="account-identity"><strong>{accountLabel(wallet)}</strong><Address value={wallet.address} />{wallet.balanceError && <span className="row-error">{wallet.balanceError}</span>}</div>
     <div className="account-state"><Status value={wallet.accountStatus} /></div>
-    <AccountBalance label="APT" value={wallet.balances.find((item) => item.asset === 'APT')?.display ?? '-'} />
-    <AccountBalance label="USDt" value={wallet.balances.find((item) => item.asset === 'USDT')?.display ?? '-'} />
+    <AccountBalance label="APT" value={wallet.balances.find((item) => item.asset === 'APT')?.display ?? '-'} loading={refreshing} />
+    <AccountBalance label="USDt" value={wallet.balances.find((item) => item.asset === 'USDT')?.display ?? '-'} loading={refreshing} />
     <div className="account-actions">
       <button className="secondary small" onClick={() => onReceive(wallet)}><QrCode size={14} />收款</button>
+      <button className="secondary small" onClick={() => onHistory(wallet)}><FileClock size={14} />日志</button>
       <button className="primary small" onClick={() => onTransfer(wallet)}><Send size={14} />转账</button>
+      <IconButton title={`设置 ${accountLabel(wallet)} 的别名`} icon={<Pencil size={15} />} onClick={() => onAlias(wallet)} />
       <IconButton title={`${accountLabel(wallet)} 详情`} icon={<Ellipsis size={17} />} onClick={() => onDetails(wallet)} />
     </div>
-  </article>)}</div>
+  </article> })}</div>
 }
 
-function AccountBalance({ label, value }: { label: string; value: string }) {
-  return <div className="account-balance"><span>{label}</span><strong>{value}</strong></div>
+function AccountBalance({ label, value, loading = false }: { label: string; value: string; loading?: boolean }) {
+  return <div className="account-balance" aria-live="polite"><span>{label}</span><strong>{loading ? <RefreshCw className="spin" size={16} aria-label={`${label} 余额刷新中`} /> : value}</strong></div>
 }
 
-function TransferView({ wallets, groups, busy, setModal, run, onPreview, initialSourceWalletId }: {
-  wallets: WalletRecord[]; groups: WalletGroup[]; busy: boolean; setModal: (value: Modal) => void
-  run: (action: () => Promise<void>, success?: string) => Promise<void>; onPreview: (job: TransferJob) => void
+function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWalletId }: {
+  wallets: WalletRecord[]; groups: WalletGroup[]; busy: boolean
+  run: (action: () => Promise<void>, success?: string) => Promise<void>; onPreview: (result: JobPreflight) => void
   initialSourceWalletId: string | null
 }) {
   const [name, setName] = useState(`转账计划 ${new Date().toLocaleDateString()}`)
-  const [steps, setSteps] = useState<TransferStepDraft[]>(() => initialSourceWalletId ? [blankStep(initialSourceWalletId)] : [])
+  const [sourceWalletIds, setSourceWalletIds] = useState<string[]>(() => initialSourceWalletId ? [initialSourceWalletId] : [])
+  const [internalTargetWalletIds, setInternalTargetWalletIds] = useState<string[]>([])
+  const [externalTargets, setExternalTargets] = useState('')
+  const [sourceSearch, setSourceSearch] = useState('')
+  const [targetPickerOpen, setTargetPickerOpen] = useState(false)
+  const [asset, setAsset] = useState<AssetId>('USDT')
+  const [amountMode, setAmountMode] = useState<AmountMode>('random')
+  const [amountMin, setAmountMin] = useState('1')
+  const [amountMax, setAmountMax] = useState('5')
+  const [steps, setSteps] = useState<TransferStepDraft[]>([])
   const [gasPayerWalletId, setGasPayer] = useState<string | null>(null)
   const [intervalMinSeconds, setIntervalMin] = useState(5)
   const [intervalMaxSeconds, setIntervalMax] = useState(30)
-  const [shuffleSteps, setShuffle] = useState(false)
-  const [bulkOpen, setBulkOpen] = useState(false)
-  const [dragged, setDragged] = useState<number | null>(null)
   const [preflight, setPreflight] = useState<JobPreflight | null>(null)
   const initialSource = wallets.find((wallet) => wallet.id === initialSourceWalletId)
-  const addStep = () => { setPreflight(null); setSteps((current) => [...current, blankStep(wallets[0]?.id ?? '')]) }
-  const updateStep = (index: number, change: Partial<TransferStepDraft>) => { setPreflight(null); setSteps((current) => current.map((step, position) => position === index ? { ...step, ...change } : step)) }
-  const move = (from: number, to: number) => { setPreflight(null); setSteps((current) => { const copy = [...current]; const [item] = copy.splice(from, 1); copy.splice(to, 0, item); return copy }) }
+  const invalidate = () => { setPreflight(null); setSteps([]) }
+  const toggle = (values: string[], id: string, setter: (next: string[]) => void) => {
+    invalidate()
+    setter(values.includes(id) ? values.filter((value) => value !== id) : [...values, id])
+  }
+  const orderedWallets = useMemo(() => [
+    ...groups.flatMap((group) => wallets.filter((wallet) => wallet.groupId === group.id)),
+    ...wallets.filter((wallet) => !wallet.groupId),
+  ], [groups, wallets])
+  const orderedSourceWalletIds = useMemo(() => orderedWallets.filter((wallet) => sourceWalletIds.includes(wallet.id)).map((wallet) => wallet.id), [orderedWallets, sourceWalletIds])
+  const targets = useMemo(() => {
+    const selected = orderedWallets.filter((wallet) => internalTargetWalletIds.includes(wallet.id))
+      .map((wallet) => ({ walletId: wallet.id, address: wallet.address, label: walletOptionLabel(wallet, groups) }))
+    const typed = externalTargets.split(/[\n,]/).map((value) => value.trim()).filter(Boolean).map((address) => {
+      const wallet = wallets.find((item) => item.address.toLowerCase() === address.toLowerCase())
+      return { walletId: wallet?.id ?? null, address: wallet?.address ?? address, label: wallet ? walletOptionLabel(wallet, groups) : '外部地址' }
+    })
+    const unique = new Map<string, { walletId: string | null; address: string; label: string }>()
+    for (const target of [...selected, ...typed]) unique.set(target.address.toLowerCase(), target)
+    return [...unique.values()]
+  }, [externalTargets, groups, internalTargetWalletIds, orderedWallets, wallets])
+  const pairing = useMemo(() => pairTransferEndpoints(orderedSourceWalletIds, targets), [orderedSourceWalletIds, targets])
+  const pairs = pairing.pairs
+  const maxConflict = amountMode === 'max' && pairing.mode === 'one_to_many' && pairs.length > 1
+  const invalidInterval = intervalMinSeconds < 0 || intervalMaxSeconds < intervalMinSeconds
+  const randomPrecisionIssue = amountMode === 'random' && [amountMin, amountMax].some((value) => value.trim() && !hasAtMostDecimals(value, 2))
+  const canPreview = pairs.length > 0 && pairs.length <= 1000 && !pairing.issue && !maxConflict && !invalidInterval && !randomPrecisionIssue && (amountMode === 'max' || Boolean(amountMin.trim())) && (amountMode !== 'random' || Boolean(amountMax.trim()))
   const preview = () => void run(async () => {
-    const draft: JobDraftInput = { name, steps, gasPayerWalletId, intervalMinSeconds, intervalMaxSeconds, shuffle: shuffleSteps }
+    const generated = pairs.map(({ sourceWalletId, target }) => ({
+      id: crypto.randomUUID(), sourceWalletId, targetAddress: target.address, targetWalletId: target.walletId,
+      asset, amountMode, amountMin: amountMode === 'max' ? null : amountMin,
+      amountMax: amountMode === 'random' ? amountMax : null,
+    }))
+    setSteps(generated)
+    const draft: JobDraftInput = { name, steps: generated, gasPayerWalletId, intervalMinSeconds, intervalMaxSeconds, shuffle: false }
     const result = await saveAndPreviewJob(draft)
     setPreflight(result)
-    if (result.valid) onPreview(result.job)
+    onPreview(result)
   })
   return <>
-    <PageHeader title="转账计划" subtitle={initialSource ? `从 ${walletOptionLabel(initialSource, groups)} 发起` : '安排并检查每一笔转账'} actions={<>
-      <button className="secondary" onClick={() => setBulkOpen(true)} disabled={!wallets.length}><Boxes size={16} />批量向导</button>
-      <button className="primary" onClick={preview} disabled={busy || !steps.length}><Eye size={16} />检查并预览</button>
-    </>} />
-    <section className="builder-settings">
-      <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>手续费账户<select value={gasPayerWalletId ?? ''} onChange={(event) => { setPreflight(null); setGasPayer(event.target.value || null) }}><option value="">由转出账户支付</option><WalletOptions wallets={wallets} groups={groups} /></select></label>
-      <label>最短间隔（秒）<input type="number" min="0" max="604800" value={intervalMinSeconds} onChange={(event) => { setPreflight(null); setIntervalMin(Number(event.target.value)) }} /></label>
-      <label>最长间隔（秒）<input type="number" min={intervalMinSeconds} max="604800" value={intervalMaxSeconds} onChange={(event) => { setPreflight(null); setIntervalMax(Number(event.target.value)) }} /></label>
-      <label className="check-field"><input type="checkbox" checked={shuffleSteps} onChange={(event) => { setPreflight(null); setShuffle(event.target.checked) }} /><Shuffle size={16} />预览时随机排序</label>
+    <PageHeader title="转账计划" subtitle={initialSource ? `已选择 ${walletOptionLabel(initialSource, groups)}` : '选择转出账户与收款地址，统一设置本次转账'} />
+    <section className="transfer-global-settings" aria-label="转账统一设置">
+      <div className="settings-intro"><div><span className="settings-kicker">TRANSFER WORKSPACE</span><strong>本次转账规则</strong></div><span>先设定统一规则，再选择账户与地址</span></div>
+      <div className="global-settings-row primary-settings">
+        <label className="task-name setting-card"><span className="setting-label">计划名称</span><input value={name} onChange={(event) => { invalidate(); setName(event.target.value) }} /></label>
+        <fieldset className="segmented-field setting-card"><legend>资产</legend><div className="segmented-control">
+          <label><input type="radio" name="asset" value="USDT" checked={asset === 'USDT'} onChange={() => { invalidate(); setAsset('USDT') }} /><span>USDt</span></label>
+          <label><input type="radio" name="asset" value="APT" checked={asset === 'APT'} onChange={() => { invalidate(); setAsset('APT') }} /><span>APT</span></label>
+        </div></fieldset>
+        <fieldset className="segmented-field amount-mode setting-card"><legend>金额方式</legend><div className="segmented-control">
+          <label><input type="radio" name="amount-mode" value="random" checked={amountMode === 'random'} onChange={() => { invalidate(); setAmountMode('random') }} /><span>随机范围</span></label>
+          <label><input type="radio" name="amount-mode" value="fixed" checked={amountMode === 'fixed'} onChange={() => { invalidate(); setAmountMode('fixed') }} /><span>固定金额</span></label>
+          <label><input type="radio" name="amount-mode" value="max" checked={amountMode === 'max'} onChange={() => { invalidate(); setAmountMode('max') }} /><span>全部余额</span></label>
+        </div></fieldset>
+        {amountMode !== 'max' && <div className={`amount-range-field setting-card ${amountMode === 'random' ? 'is-range' : 'is-fixed'}`}>
+          <span className="setting-label">{amountMode === 'random' ? '金额范围' : '转账金额'}</span>
+          <div className="amount-range-inputs">
+            <label><span className="sr-only">{amountMode === 'random' ? '最小金额' : '转账金额'}</span><div className="amount-input"><input aria-label={amountMode === 'random' ? '最小金额' : '转账金额'} inputMode="decimal" step={amountMode === 'random' ? '0.01' : 'any'} value={amountMin} onChange={(event) => { invalidate(); setAmountMin(event.target.value) }} /><span>{asset === 'USDT' ? 'USDt' : 'APT'}</span></div></label>
+            {amountMode === 'random' && <><span className="range-separator" aria-hidden="true">至</span><label><span className="sr-only">最大金额</span><div className="amount-input"><input aria-label="最大金额" inputMode="decimal" step="0.01" value={amountMax} onChange={(event) => { invalidate(); setAmountMax(event.target.value) }} /><span>{asset === 'USDT' ? 'USDt' : 'APT'}</span></div></label></>}
+          </div>
+          {amountMode === 'random' && <small className="field-hint">每笔独立随机，精确到 0.01</small>}
+        </div>}
+        {amountMode === 'max' && <div className="amount-range-field setting-card max-amount-note"><span className="setting-label">金额范围</span><strong>执行时读取最新余额</strong><small className="field-hint">每个转出账户的最后一笔出账</small></div>}
+      </div>
+      <div className="global-settings-row secondary-settings">
+        <label className="gas-field setting-card"><span className="setting-label">手续费账户</span><select value={gasPayerWalletId ?? ''} onChange={(event) => { invalidate(); setGasPayer(event.target.value || null) }}><option value="">由每个转出账户支付</option><WalletOptions wallets={wallets} groups={groups} /></select></label>
+        <div className="interval-field setting-card"><span className="setting-label">执行节奏</span><div className="interval-inputs"><label><span>最短间隔（秒）</span><input type="number" min="0" max="604800" value={intervalMinSeconds} onChange={(event) => { invalidate(); setIntervalMin(Number(event.target.value)) }} /></label><span className="interval-separator">至</span><label><span>最长间隔（秒）</span><input type="number" min={intervalMinSeconds} max="604800" value={intervalMaxSeconds} onChange={(event) => { invalidate(); setIntervalMax(Number(event.target.value)) }} /></label></div></div>
+      </div>
     </section>
     {preflight && <div className={`preflight-summary ${preflight.valid ? 'valid' : 'invalid'}`}>
       {preflight.valid ? <Check size={17} /> : <ShieldAlert size={17} />}
       <div><strong>{preflight.valid ? '检查通过' : `${preflight.checks.filter((check) => !check.valid).length} 笔转账需要处理`}</strong><span>预计手续费 {formatAmount(preflight.summary?.estimatedGasBaseUnits ?? '0', 'APT')} APT</span></div>
     </div>}
-    <section className="steps-section">
-      <div className="section-head"><div><h2>转账步骤</h2><span>{steps.length} / 1000 笔</span></div><button className="secondary small" onClick={addStep} disabled={!wallets.length}><Plus size={15} />添加一笔</button></div>
-      {!wallets.length ? <Empty icon={<KeyRound size={28} />} text="需要先导入或生成来源钱包。" /> : !steps.length ? <Empty icon={<CircleDollarSign size={28} />} text="添加单笔转账，或使用批量向导生成一对多和多对多清单。" /> :
-        <div className="step-list">{steps.map((step, index) => { const check = preflight?.checks.find((item) => item.stepId === step.id); return <div className={`step-row ${check && !check.valid ? 'step-invalid' : ''}`} draggable key={step.id}
-          onDragStart={() => setDragged(index)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (dragged !== null && dragged !== index) move(dragged, index); setDragged(null) }}>
-          <div className="drag-handle"><GripVertical size={16} /><span>{index + 1}</span></div>
-          <label>来源<select value={step.sourceWalletId} onChange={(event) => updateStep(index, { sourceWalletId: event.target.value })}><WalletOptions wallets={wallets} groups={groups} /></select></label>
-          <label className="target-field">目标地址<input list="wallet-addresses" value={step.targetAddress} onChange={(event) => {
-            const target = wallets.find((wallet) => wallet.address === event.target.value)
-            updateStep(index, { targetAddress: event.target.value, targetWalletId: target?.id ?? null })
-          }} placeholder="0x..." /></label>
-          <label>资产<select value={step.asset} onChange={(event) => updateStep(index, { asset: event.target.value as AssetId })}><option value="APT">APT</option><option value="USDT">USDt</option></select></label>
-          <label>金额方式<select value={step.amountMode} onChange={(event) => updateStep(index, { amountMode: event.target.value as AmountMode })}><option value="fixed">固定金额</option><option value="random">随机范围</option><option value="max">全额</option></select></label>
-          {step.amountMode !== 'max' && <label>最小/固定<input inputMode="decimal" value={step.amountMin ?? ''} onChange={(event) => updateStep(index, { amountMin: event.target.value })} placeholder="0.0" /></label>}
-          {step.amountMode === 'random' && <label>最大<input inputMode="decimal" value={step.amountMax ?? ''} onChange={(event) => updateStep(index, { amountMax: event.target.value })} placeholder="0.0" /></label>}
-          <div className="row-actions"><IconButton title="上移" icon={<ArrowUp size={15} />} disabled={index === 0} onClick={() => move(index, index - 1)} /><IconButton title="下移" icon={<ArrowDown size={15} />} disabled={index === steps.length - 1} onClick={() => move(index, index + 1)} /><IconButton title="删除" danger icon={<Trash2 size={15} />} onClick={() => { setPreflight(null); setSteps((current) => current.filter((_, position) => position !== index)) }} /></div>
-          {check && <div className={`step-check ${check.valid ? 'valid' : 'invalid'}`}>{check.valid ? <Check size={14} /> : <ShieldAlert size={14} />}<span>{check.error ?? '余额与手续费检查通过'}</span><strong>{BigInt(check.estimatedGasBaseUnits) > 0n ? `预计 ${formatAmount(check.estimatedGasBaseUnits, 'APT')} APT` : '手续费待估算'}</strong></div>}
-        </div> })}</div>}
-      <datalist id="wallet-addresses">{wallets.map((wallet) => <option key={wallet.id} value={wallet.address}>{walletOptionLabel(wallet, groups)}</option>)}</datalist>
+    <section className="transfer-compose-grid">
+      <div className="selection-panel source-panel">
+        <div className="selection-head"><div><span className="step-number">1</span><div><h2>转出账户</h2><p>已选 {sourceWalletIds.length} 个</p></div></div>{sourceWalletIds.length > 0 && <button className="text-button" onClick={() => { invalidate(); setSourceWalletIds([]) }}>清空</button>}</div>
+        <label className="selection-search"><Search size={15} /><input aria-label="搜索转出账户" value={sourceSearch} onChange={(event) => setSourceSearch(event.target.value)} placeholder="搜索账户或地址" /></label>
+        <WalletSelectionList wallets={wallets} groups={groups} selected={sourceWalletIds} search={sourceSearch} onToggle={(id) => toggle(sourceWalletIds, id, setSourceWalletIds)} onSelectGroup={(ids) => { invalidate(); setSourceWalletIds(ids.every((id) => sourceWalletIds.includes(id)) ? sourceWalletIds.filter((id) => !ids.includes(id)) : [...new Set([...sourceWalletIds, ...ids])]) }} />
+      </div>
+      <div className="compose-arrow" aria-hidden="true"><ArrowRight size={20} /><span>{pairs.length} 笔</span></div>
+      <div className="selection-panel target-panel">
+        <div className="selection-head"><div><span className="step-number">2</span><div><h2>收款地址</h2><p>已选 {targets.length} 个</p></div></div><button className="secondary small" onClick={() => setTargetPickerOpen(true)}><WalletCards size={14} />从我的账户选择</button></div>
+        <label className="target-entry">外部 Aptos 地址<textarea aria-label="外部 Aptos 地址" value={externalTargets} onChange={(event) => { invalidate(); setExternalTargets(event.target.value) }} placeholder="每行填写一个 0x 地址，也可用逗号分隔" /></label>
+        <div className="selected-targets" aria-live="polite">
+          {targets.length === 0 ? <div className="target-empty">尚未添加收款地址</div> : targets.map((target) => <div className="selected-target" key={target.address}><div><strong>{target.label}</strong><code>{short(target.address)}</code></div><IconButton title={`移除 ${target.label}`} icon={<X size={15} />} onClick={() => {
+            invalidate()
+            if (target.walletId) setInternalTargetWalletIds((current) => current.filter((id) => id !== target.walletId))
+            setExternalTargets((current) => current.split(/[\n,]/).map((value) => value.trim()).filter((value) => value && value.toLowerCase() !== target.address.toLowerCase()).join('\n'))
+          }} /></div>)}
+        </div>
+      </div>
     </section>
-    {bulkOpen && <BulkDialog wallets={wallets} groups={groups} close={() => setBulkOpen(false)} onAdd={(generated) => { setPreflight(null); setSteps((current) => [...current, ...generated]); setBulkOpen(false) }} />}
+    {pairing.mode === 'one_to_one' && pairs.length > 1 && !pairing.issue && <section className="pairing-preview" aria-label="一一配对预览">
+      <div className="pairing-preview-head"><strong>按顺序一一配对</strong><span>第 N 个转出账户对应第 N 个收款地址</span></div>
+      {pairs.slice(0, 10).map(({ sourceWalletId, target }, position) => <div className="pairing-preview-row" key={`${sourceWalletId}:${target.address}`}><span>{position + 1}</span><strong>{walletLabel(sourceWalletId, wallets)}</strong><ArrowRight size={14} /><div><strong>{target.label}</strong><code>{short(target.address)}</code></div></div>)}
+      {pairs.length > 10 && <div className="list-overflow-note">另有 {pairs.length - 10} 组配对，将继续按当前顺序处理。</div>}
+    </section>}
+    <section className="transfer-summary-band">
+      <div><strong>{sourceWalletIds.length} 个转出账户 → {targets.length} 个收款地址</strong><span>{pairing.mode === 'one_to_many' ? `一对多，共生成 ${pairs.length} 笔转账` : pairing.mode === 'many_to_one' ? `多对一，共生成 ${pairs.length} 笔转账` : pairing.mode === 'one_to_one' ? `按顺序一一对应，共生成 ${pairs.length} 笔转账` : '请选择可配对的账户与地址'}</span></div>
+      <div className="summary-amount"><span>统一金额</span><strong>{amountMode === 'max' ? '全部余额' : amountMode === 'random' ? `${amountMin || '-'} - ${amountMax || '-'} ${asset === 'USDT' ? 'USDt' : 'APT'}` : `${amountMin || '-'} ${asset === 'USDT' ? 'USDt' : 'APT'}`}</strong></div>
+      <button className="primary" onClick={preview} disabled={busy || !canPreview}><Eye size={16} />进入转账预览</button>
+    </section>
+    {(pairing.issue || maxConflict || pairs.length > 1000 || invalidInterval || randomPrecisionIssue) && <div className="error-banner"><ShieldAlert size={17} />{pairing.issue?.kind === 'count_mismatch' ? `多对多转账必须一一对应：当前有 ${sourceWalletIds.length} 个转出账户和 ${targets.length} 个收款地址，请调整为相同数量。` : pairing.issue?.kind === 'self_transfer' ? `第 ${pairing.issue.position + 1} 组的转出账户和收款账户相同，请调整对应顺序或收款地址。` : maxConflict ? '全部余额模式下，一个转出账户只能对应一个收款地址。' : pairs.length > 1000 ? '转账超过 1000 笔，请减少账户或地址。' : invalidInterval ? '最长间隔不能小于最短间隔。' : '随机金额最多保留 2 位小数，例如 1.25。'}</div>}
+    {preflight && <TransferCheckList steps={steps} checks={preflight.checks} wallets={wallets} />}
+    {targetPickerOpen && <AddressBookDialog wallets={wallets} groups={groups} selected={internalTargetWalletIds} setSelected={(ids) => { invalidate(); setInternalTargetWalletIds(ids) }} close={() => setTargetPickerOpen(false)} />}
   </>
 }
 
@@ -420,15 +576,15 @@ function AccountDialog({ group, close, run, reload }: { group: WalletGroup } & D
 }
 
 function ArchiveGroupDialog({ group, close, run, reload }: { group: WalletGroup } & DialogProps) {
-  const [password, setPassword] = useState('')
   const [confirmationName, setName] = useState('')
+  const nameMatches = confirmationName === group.label
   return <Dialog title="归档钱包" close={close}><form onSubmit={(event) => { event.preventDefault(); void run(async () => {
-    await post(`/api/v1/wallets/groups/${group.id}/archive`, { password, confirmationName }); await reload(); close()
+    if (!nameMatches) return
+    await post(`/api/v1/wallets/groups/${group.id}/archive`, { confirmationName }); await reload(); close()
   }, '钱包已归档') }}>
-    <div className="warning-box"><Archive size={16} />归档后，这个钱包里的账户不会出现在转账选择器中。</div>
-    <label>主密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-    <label>输入完整钱包名称<input value={confirmationName} onChange={(event) => setName(event.target.value)} placeholder={group.label} /></label>
-    <DialogActions close={close} submit="确认归档" />
+    <div className="warning-box"><Archive size={16} />归档后，这个钱包里的账户不会出现在转账选择器中。恢复钱包时需要主密码。</div>
+    <label>手动输入完整钱包名称<input autoComplete="off" required value={confirmationName} onChange={(event) => setName(event.target.value)} placeholder={`请手动输入：${group.label}`} />{confirmationName && !nameMatches && <span className="row-error">钱包名称不匹配，请按上方提示完整输入。</span>}</label>
+    <DialogActions close={close} submit="确认归档" disabled={!nameMatches} />
   </form></Dialog>
 }
 
@@ -436,34 +592,51 @@ function SecretAuthDialog({ target, close, run, onSecret }: { target: SecretTarg
   const entity = target.kind === 'mnemonic' ? target.group : target.wallet
   const [password, setPassword] = useState('')
   const [confirmationName, setName] = useState('')
+  const nameMatches = confirmationName === entity.label
   return <Dialog title={target.kind === 'mnemonic' ? '查看助记词' : '查看私钥'} close={close}><form onSubmit={(event) => { event.preventDefault(); void run(async () => {
     const value = await requestEncryptedSecret((publicKey) => target.kind === 'mnemonic'
       ? post(`/api/v1/wallets/groups/${target.group.id}/reveal-mnemonic`, { password, confirmationName, publicKey })
       : post(`/api/v1/wallets/${target.wallet.id}/reveal`, { password, confirmationName, publicKey }))
     onSecret(target.kind === 'mnemonic' ? `${entity.label} · 助记词` : `${entity.label} · 私钥`, value)
   }) }}>
-    <label>主密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-    <label>输入完整名称<input value={confirmationName} onChange={(event) => setName(event.target.value)} placeholder={entity.label} /></label>
-    <DialogActions close={close} submit="安全显示" />
+    <label>主密码<input type="password" minLength={12} required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+    <label>手动输入完整名称<input autoComplete="off" required value={confirmationName} onChange={(event) => setName(event.target.value)} placeholder={`请手动输入：${entity.label}`} />{confirmationName && !nameMatches && <span className="row-error">名称不匹配，请按上方提示完整输入。</span>}</label>
+    <DialogActions close={close} submit="安全显示" disabled={password.length < 12 || !nameMatches} />
   </form></Dialog>
 }
 
 function ArchivedDialog({ close, run, reload }: DialogProps) {
   const [wallets, setWallets] = useState<WalletRecord[]>([])
   const [groups, setGroups] = useState<WalletGroup[]>([])
+  const [restoreTarget, setRestoreTarget] = useState<{ path: string; label: string; success: string; kind: 'group' | 'wallet' } | null>(null)
   const load = async () => {
     const [allWallets, allGroups] = await Promise.all([request<WalletRecord[]>('/api/v1/wallets?includeArchived=true'), request<WalletGroup[]>('/api/v1/wallets/groups?includeArchived=true')])
     setWallets(allWallets.filter((wallet) => wallet.archivedAt)); setGroups(allGroups.filter((group) => group.archivedAt))
   }
   useEffect(() => { void load() }, [])
-  const restore = (path: string, success: string) => void run(async () => { await post(path); await load(); await reload() }, success)
   const groupIds = new Set(groups.map((group) => group.id))
   const individual = wallets.filter((wallet) => !wallet.groupId || !groupIds.has(wallet.groupId))
-  return <Dialog title="归档" close={close} wide><div className="archive-list">
-    {groups.map((group) => <div key={group.id}><div><strong>{group.label}</strong><span>{group.totalAccountCount} 个账户</span></div><button className="secondary" onClick={() => restore(`/api/v1/wallets/groups/${group.id}/unarchive`, '钱包已恢复')}><RotateCcw size={15} />恢复</button></div>)}
-    {individual.map((wallet) => <div key={wallet.id}><div><strong>{wallet.label}</strong><Address value={wallet.address} /></div><button className="secondary" onClick={() => restore(`/api/v1/wallets/${wallet.id}/unarchive`, '账户已恢复')}><RotateCcw size={15} />恢复</button></div>)}
-    {!groups.length && !individual.length && <Empty icon={<Archive size={28} />} text="归档为空。" />}
-  </div></Dialog>
+  return <>
+    <Dialog title="归档" close={close} wide><div className="archive-list">
+      {groups.map((group) => <div key={group.id}><div><strong>{group.label}</strong><span>{group.totalAccountCount} 个账户</span></div><button className="secondary" onClick={() => setRestoreTarget({ path: `/api/v1/wallets/groups/${group.id}/unarchive`, label: group.label, success: '钱包已恢复', kind: 'group' })}><RotateCcw size={15} />恢复</button></div>)}
+      {individual.map((wallet) => <div key={wallet.id}><div><strong>{wallet.label}</strong><Address value={wallet.address} /></div><button className="secondary" onClick={() => setRestoreTarget({ path: `/api/v1/wallets/${wallet.id}/unarchive`, label: wallet.label, success: '账户已恢复', kind: 'wallet' })}><RotateCcw size={15} />恢复</button></div>)}
+      {!groups.length && !individual.length && <Empty icon={<Archive size={28} />} text="归档为空。" />}
+    </div></Dialog>
+    {restoreTarget && <ArchiveRestoreDialog target={restoreTarget} close={() => setRestoreTarget(null)} run={run} reload={async () => { await load(); await reload() }} />}
+  </>
+}
+
+function ArchiveRestoreDialog({ target, close, run, reload }: {
+  target: { path: string; label: string; success: string; kind: 'group' | 'wallet' }
+} & DialogProps) {
+  const [password, setPassword] = useState('')
+  return <Dialog title={`恢复${target.kind === 'group' ? '钱包' : '账户'}`} close={close}><form onSubmit={(event) => { event.preventDefault(); void run(async () => {
+    await post(target.path, { password }); await reload(); close()
+  }, target.success) }}>
+    <div className="warning-box"><RotateCcw size={16} />恢复“{target.label}”后，它会重新出现在钱包和转账选择器中。</div>
+    <label>主密码<input type="password" minLength={12} required autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+    <DialogActions close={close} submit="验证并恢复" disabled={password.length < 12} />
+  </form></Dialog>
 }
 
 function ReceiveDialog({ wallet, close }: { wallet: WalletRecord; close: () => void }) {
@@ -485,15 +658,10 @@ function ReceiveDialog({ wallet, close }: { wallet: WalletRecord; close: () => v
   </Dialog>
 }
 
-function AccountDetailsDialog({ wallet, close, run, reload, onReceive, onTransfer, onReveal }: {
+function AccountDetailsDialog({ wallet, close, run, reload, onReceive, onHistory, onAlias, onTransfer, onReveal }: {
   wallet: WalletRecord; close: () => void; run: DialogProps['run']; reload: () => Promise<void>
-  onReceive: () => void; onTransfer: () => void; onReveal: () => void
+  onReceive: () => void; onHistory: () => void; onAlias: () => void; onTransfer: () => void; onReveal: () => void
 }) {
-  const rename = () => {
-    const label = window.prompt('账户名称', accountLabel(wallet))
-    if (!label?.trim()) return
-    void run(async () => { await request(`/api/v1/wallets/${wallet.id}`, { method: 'PATCH', body: JSON.stringify({ label }) }); await reload(); close() }, '账户已重命名')
-  }
   const archive = () => {
     if (!window.confirm(`归档 ${accountLabel(wallet)}？归档后它不会出现在转账和收款列表中。`)) return
     void run(async () => { await post(`/api/v1/wallets/${wallet.id}/archive`); await reload(); close() }, '账户已归档')
@@ -513,40 +681,144 @@ function AccountDetailsDialog({ wallet, close, run, reload, onReceive, onTransfe
     <div className="account-detail-primary"><button className="secondary" onClick={onReceive}><QrCode size={16} />收款</button><button className="primary" onClick={onTransfer}><Send size={16} />转账</button></div>
     <div className="account-detail-tools">
       <button onClick={() => void run(async () => { await post(`/api/v1/wallets/${wallet.id}/refresh`); await reload(); close() }, '余额已刷新')}><RefreshCw size={15} />刷新余额</button>
-      <button onClick={rename}><Pencil size={15} />重命名</button>
+      <button onClick={onHistory}><FileClock size={15} />转账日志</button>
+      <button onClick={onAlias}><Pencil size={15} />设置别名</button>
       <button onClick={onReveal}><Eye size={15} />查看私钥</button>
       <button className="danger-text" onClick={archive}><Archive size={15} />归档账户</button>
     </div>
   </Dialog>
 }
 
+function AccountAliasDialog({ wallet, close, run, onUpdated }: {
+  wallet: WalletRecord; close: () => void; run: DialogProps['run']; onUpdated: (wallet: WalletRecord) => void
+}) {
+  const [alias, setAlias] = useState(wallet.label)
+  const normalized = alias.trim()
+  const unchanged = normalized === wallet.label
+  return <Dialog title="设置账户别名" close={close}><form onSubmit={(event) => {
+    event.preventDefault()
+    if (!normalized || unchanged) return
+    void run(async () => {
+      const updated = await request<WalletRecord>(`/api/v1/wallets/${wallet.id}`, { method: 'PATCH', body: JSON.stringify({ label: normalized }) })
+      onUpdated(updated)
+      close()
+    }, '账户别名已保存')
+  }}>
+    <label>账户别名<input autoFocus maxLength={120} value={alias} onChange={(event) => setAlias(event.target.value)} placeholder="例如：日常付款、归集账户" /></label>
+    <div className="detail-list alias-account-summary"><div><span>当前账户</span><strong>{accountLabel(wallet)}</strong></div><div><span>地址</span><Address value={wallet.address} /></div></div>
+    <p className="form-hint">别名只保存在本机，用于钱包列表、转账选择和日志识别，不会改变链上地址。</p>
+    <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>取消</button><button type="submit" className="primary" disabled={!normalized || unchanged}>保存别名</button></div>
+  </form></Dialog>
+}
+
+function AccountHistoryDialog({ wallet, wallets, close }: { wallet: WalletRecord; wallets: WalletRecord[]; close: () => void }) {
+  const pageSize = 50
+  const [direction, setDirection] = useState<'all' | 'in' | 'out'>('all')
+  const [page, setPage] = useState(0)
+  const [result, setResult] = useState<AccountTransferLogPage | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const loadRequest = useRef(0)
+  const load = async () => {
+    const requestId = ++loadRequest.current
+    setLoading(true)
+    setError(null)
+    try {
+      const next = await request<AccountTransferLogPage>(`/api/v1/wallets/${wallet.id}/transfers?direction=${direction}&limit=${pageSize}&offset=${page * pageSize}`)
+      if (requestId === loadRequest.current) setResult(next)
+    } catch (loadError) {
+      if (requestId === loadRequest.current) setError(loadError instanceof Error ? loadError.message : '日志加载失败')
+    } finally {
+      if (requestId === loadRequest.current) setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [wallet.id, direction, page])
+  const counts = result?.counts ?? { all: 0, in: 0, out: 0 }
+  return <Dialog title={`${accountLabel(wallet)} · 转账日志`} close={close} wide>
+    <div className="history-toolbar">
+      <div className="segmented history-filter" role="group" aria-label="日志方向">
+        {([['all', '全部', counts.all], ['out', '转出', counts.out], ['in', '转入', counts.in]] as const).map(([value, label, count]) => <button className={direction === value ? 'active' : ''} aria-pressed={direction === value} key={value} onClick={() => { setDirection(value); setPage(0) }}>{label}<span>{count}</span></button>)}
+      </div>
+      <div className="history-tools"><IconButton title="刷新日志" icon={<RefreshCw className={loading ? 'spin' : ''} size={16} />} onClick={() => void load()} /><a className="secondary small" href={`https://explorer.aptoslabs.com/account/${wallet.address}?network=mainnet`} target="_blank" rel="noreferrer">链上记录<ArrowUpRight size={14} /></a></div>
+    </div>
+    {error && <div className="error-banner"><ShieldAlert size={17} />{error}</div>}
+    {loading && !result ? <div className="history-loading"><RefreshCw className="spin" size={20} />正在读取日志...</div> : result?.items.length === 0 ? <Empty icon={<FileClock size={28} />} text="暂无转账记录。" /> : <div className="account-history-list">
+      {result?.items.map((item) => <AccountHistoryRow key={item.id} item={item} wallets={wallets} />)}
+    </div>}
+    {result && result.total > pageSize && <div className="history-pagination"><span>第 {page + 1} 页 · 共 {result.total} 条</span><div><button className="secondary small" disabled={page === 0 || loading} onClick={() => setPage((current) => current - 1)}>上一页</button><button className="secondary small" disabled={(page + 1) * pageSize >= result.total || loading} onClick={() => setPage((current) => current + 1)}>下一页</button></div></div>}
+  </Dialog>
+}
+
+function AccountHistoryRow({ item, wallets }: { item: AccountTransferLog; wallets: WalletRecord[] }) {
+  const counterparty = item.counterpartyWalletId ? wallets.find((wallet) => wallet.id === item.counterpartyWalletId) : null
+  return <article className={`account-history-row direction-${item.direction}`}>
+    <div className={`history-direction ${item.direction}`}>{item.direction === 'out' ? <ArrowUpRight size={17} /> : <ArrowDownLeft size={17} />}<span>{item.direction === 'out' ? '转出' : '转入'}</span></div>
+    <div className="history-main"><div><strong>{historyAmount(item)}</strong><Status value={item.status} /></div><span>{item.jobName} · 第 {item.position + 1} 笔</span></div>
+    <div className="history-counterparty"><span>{item.direction === 'out' ? '收款方' : '转出方'}</span><strong>{counterparty ? accountLabel(counterparty) : '外部地址'}</strong><Address value={item.counterpartyAddress} /></div>
+    <div className="history-time"><span>{new Date(item.updatedAt).toLocaleString()}</span>{item.txHash ? <a href={`https://explorer.aptoslabs.com/txn/${item.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(item.txHash)}<ArrowUpRight size={12} /></a> : <small>暂无交易哈希</small>}</div>
+    {item.error && <div className="history-error"><ShieldAlert size={13} />{item.error}</div>}
+  </article>
+}
+
 function DerivedPreview({ result }: { result: MnemonicRestorePreview }) {
   return <div className="derived-preview">{result.accounts.map((account) => <div key={account.accountIndex}><strong>账户 {account.accountIndex + 1}</strong><Address value={account.address} /></div>)}</div>
 }
 
-function BulkDialog({ wallets, groups, close, onAdd }: { wallets: WalletRecord[]; groups: WalletGroup[]; close: () => void; onAdd: (steps: TransferStepDraft[]) => void }) {
-  const [sources, setSources] = useState<string[]>(wallets[0] ? [wallets[0].id] : []); const [targets, setTargets] = useState<string[]>([]); const [external, setExternal] = useState(''); const [asset, setAsset] = useState<AssetId>('USDT'); const [mode, setMode] = useState<AmountMode>('random'); const [min, setMin] = useState('1'); const [max, setMax] = useState('5')
-  const toggle = (list: string[], value: string, setter: (values: string[]) => void) => setter(list.includes(value) ? list.filter((item) => item !== value) : [...list, value])
-  const create = () => {
-    const targetValues = [...targets.map((id) => ({ address: wallets.find((wallet) => wallet.id === id)!.address, id })), ...external.split(/[\n,]/).map((value) => value.trim()).filter(Boolean).map((address) => ({ address, id: null }))]
-    const generated = sources.flatMap((sourceWalletId) => targetValues.filter((target) => target.id !== sourceWalletId).map((target) => ({ id: crypto.randomUUID(), sourceWalletId, targetAddress: target.address, targetWalletId: target.id, asset, amountMode: mode, amountMin: mode === 'max' ? null : min, amountMax: mode === 'random' ? max : null })))
-    if (!generated.length) return
-    onAdd(generated)
-  }
-  return <Dialog title="批量生成转账步骤" close={close} wide><div className="bulk-grid"><fieldset><legend>来源钱包</legend><GroupedWalletChecks wallets={wallets} groups={groups} selected={sources} setSelected={setSources} toggle={toggle} /></fieldset><fieldset><legend>内部目标</legend><GroupedWalletChecks wallets={wallets} groups={groups} selected={targets} setSelected={setTargets} toggle={toggle} /></fieldset></div>
-    <label>外部目标地址<textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="每行一个 0x 地址" /></label><div className="form-grid"><label>资产<select value={asset} onChange={(event) => setAsset(event.target.value as AssetId)}><option value="APT">APT</option><option value="USDT">USDt</option></select></label><label>金额方式<select value={mode} onChange={(event) => setMode(event.target.value as AmountMode)}><option value="fixed">固定</option><option value="random">随机范围</option><option value="max">全额</option></select></label>{mode !== 'max' && <label>最小/固定<input value={min} onChange={(event) => setMin(event.target.value)} /></label>}{mode === 'random' && <label>最大<input value={max} onChange={(event) => setMax(event.target.value)} /></label>}</div><DialogActions close={close} submit="生成转账清单" onSubmit={create} /></Dialog>
+function TransferCheckList({ steps, checks, wallets }: { steps: TransferStepDraft[]; checks: JobPreflight['checks']; wallets: WalletRecord[] }) {
+  const rows = steps.map((step, index) => ({ step, index, check: checks.find((item) => item.stepId === step.id) }))
+  const visible = [...rows.filter((row) => row.check && !row.check.valid), ...rows.filter((row) => !row.check || row.check.valid)].slice(0, 100)
+  return <section className="transfer-check-list">
+    <div className="section-head"><div><h2>检查结果</h2><span>{steps.length} 笔转账，手续费按链上模拟估算</span></div></div>
+    {visible.map(({ step, index, check }) => <div className={`step-row transfer-check-row ${check && !check.valid ? 'step-invalid' : ''}`} key={step.id}>
+      <span className="check-position">{index + 1}</span>
+      <div><span>转出</span><strong>{walletLabel(step.sourceWalletId, wallets)}</strong></div>
+      <div><span>收款</span><code>{short(step.targetAddress)}</code></div>
+      <div><span>金额</span><strong>{step.amountMode === 'max' ? '全部余额' : step.amountMode === 'random' ? `${step.amountMin} - ${step.amountMax}` : step.amountMin} {step.asset === 'USDT' ? 'USDt' : 'APT'}</strong></div>
+      <div className={`step-check ${check?.valid ? 'valid' : 'invalid'}`}>{check?.valid ? <Check size={14} /> : <ShieldAlert size={14} />}<span>{check?.error ?? '余额与手续费检查通过'}</span><strong>{check && BigInt(check.estimatedGasBaseUnits) > 0n ? `约 ${formatAmount(check.estimatedGasBaseUnits, 'APT')} APT` : '待估算'}</strong></div>
+    </div>)}
+    {steps.length > visible.length && <div className="list-overflow-note">仅展示前 100 笔，完整清单将在确认页冻结。</div>}
+  </section>
 }
 
-function ConfirmDialog({ job, executionEnabled, close, run, onStarted }: { job: TransferJob; executionEnabled: boolean; close: () => void; run: DialogProps['run']; onStarted: () => void }) {
+function AddressBookDialog({ wallets, groups, selected, setSelected, close }: { wallets: WalletRecord[]; groups: WalletGroup[]; selected: string[]; setSelected: (ids: string[]) => void; close: () => void }) {
+  const [draft, setDraft] = useState(selected)
+  const [search, setSearch] = useState('')
+  const toggle = (id: string) => setDraft((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
+  const selectGroup = (ids: string[]) => setDraft((current) => ids.every((id) => current.includes(id)) ? current.filter((id) => !ids.includes(id)) : [...new Set([...current, ...ids])])
+  return <Dialog title="从我的账户选择" close={close} wide>
+    <label className="selection-search dialog-search"><Search size={15} /><input aria-label="搜索收款账户" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索账户或地址" /></label>
+    <div className="address-book-list"><WalletSelectionList wallets={wallets} groups={groups} selected={draft} search={search} onToggle={toggle} onSelectGroup={selectGroup} /></div>
+    <div className="dialog-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={() => { setSelected(draft); close() }}><Check size={16} />确定选择 {draft.length} 个</button></div>
+  </Dialog>
+}
+
+function ConfirmDialog({ job, wallets, initialPreflight, executionEnabled, close, run, onChanged, onStarted }: {
+  job: TransferJob; wallets: WalletRecord[]; initialPreflight: JobPreflight | null; executionEnabled: boolean; close: () => void
+  run: DialogProps['run']; onChanged: (result: JobPreflight) => void; onStarted: () => void
+}) {
+  const [preview, setPreview] = useState<JobPreflight>(() => initialPreflight ?? { valid: true, job, checks: [], summary: job.summary })
   const [confirmation, setConfirmation] = useState('')
-  const summary = job.summary!
-  return <Dialog title="确认主网转账" close={close} wide><div className="confirm-banner"><ShieldAlert size={20} /><div><strong>Aptos Mainnet</strong><span>金额、顺序和等待时间已经确定，提交后链上交易不可撤销。</span></div></div>
+  const currentJob = preview.job
+  const summary = preview.summary ?? { sourceWalletCount: new Set(currentJob.steps.map((step) => step.sourceWalletId)).size, stepCount: currentJob.steps.length, aptBaseUnits: '0', usdtBaseUnits: '0', maxStepCount: currentJob.steps.filter((step) => step.amountMode === 'max').length, estimatedGasBaseUnits: '0', warnings: [] }
+  const checks = new Map(preview.checks.map((check) => [check.stepId, check]))
+  const shuffle = () => void run(async () => {
+    if (!preview.valid || currentJob.steps.length < 2) return
+    const ids = secureShuffle(currentJob.steps.map((step) => step.id))
+    const result = await post<JobPreflight>(`/api/v1/jobs/${currentJob.id}/reorder`, { stepIds: ids })
+    setPreview(result)
+    setConfirmation('')
+    onChanged(result)
+  }, '已重新生成转账顺序')
+  return <Dialog title="转账预览" close={close} wide><div className="transfer-preview-dialog">
+    <div className={`confirm-banner ${preview.valid ? 'valid' : ''}`}><ShieldAlert size={20} /><div><strong>{preview.valid ? '预览已生成' : '预览未通过检查'}</strong><span>{preview.valid ? '下面显示本次将要执行的全部转账。发送前仍需输入完整确认短语。' : '所有转账条目仍保留在下方；修正余额、手续费或顺序问题后返回编辑。'}</span></div></div>
     <div className="confirm-metrics"><Metric label="来源钱包" value={summary.sourceWalletCount.toString()} /><Metric label="转账笔数" value={summary.stepCount.toString()} /><Metric label="APT 总额" value={formatAmount(summary.aptBaseUnits, 'APT')} /><Metric label="USDt 总额" value={formatAmount(summary.usdtBaseUnits, 'USDT')} /><Metric label="预计手续费" value={`${formatAmount(summary.estimatedGasBaseUnits, 'APT')} APT`} /></div>
     {summary.warnings.map((warning) => <div className="warning-line" key={warning}>{warning}</div>)}
-    <div className="preview-list">{job.steps.map((step) => <div key={step.id}><span>{step.position + 1}</span><code>{short(step.targetAddress)}</code><strong>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay} {step.asset === 'USDT' ? 'USDt' : 'APT'}</strong><small>之后等待 {step.waitAfterSeconds}s</small></div>)}</div>
-    <label>输入完整确认短语<code className="phrase">{job.confirmationPhrase}</code><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+    <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2} onClick={shuffle}><Shuffle size={16} />随机打乱条目</button></div>
+    <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><strong>{walletLabel(step.sourceWalletId, wallets)}</strong></div><div className="preview-step-target"><small>收款</small><code>{short(step.targetAddress)}</code></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${step.waitAfterSeconds} 秒` : '最后一笔，无需等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
+    {preview.valid && <label>输入完整确认短语<code className="phrase">{currentJob.confirmationPhrase}</code><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>}
     {!executionEnabled && <div className="error-banner"><Lock size={17} />当前为仅预览模式。启动服务前设置 `APTOS_MAINNET_EXECUTION_ENABLED=true` 才能提交。</div>}
-    <div className="dialog-actions"><button className="secondary" onClick={close}>返回编辑</button><button className="danger-primary" disabled={!executionEnabled || confirmation !== job.confirmationPhrase} onClick={() => void run(async () => { await post(`/api/v1/jobs/${job.id}/confirm`, { confirmation }); onStarted() }, '任务已开始')}>确认并执行主网转账</button></div></Dialog>
+    <div className="dialog-actions transfer-preview-actions"><button className="secondary" onClick={close}>返回编辑</button><button className="danger-primary" disabled={!executionEnabled || !preview.valid || confirmation !== currentJob.confirmationPhrase} onClick={() => void run(async () => { await post(`/api/v1/jobs/${currentJob.id}/confirm`, { confirmation }); onStarted() }, '任务已开始')}>{preview.valid ? '发送并执行' : '修正后再发送'}</button></div>
+  </div></Dialog>
 }
 
 function SecretDialog({ title, secret, close }: { title: string; secret: string; close: () => void }) {
@@ -575,17 +847,28 @@ function WalletOptions({ wallets, groups }: { wallets: WalletRecord[]; groups: W
   return <>{groups.map((group) => <optgroup key={group.id} label={group.label}>{group.accounts.map((wallet) => <option key={wallet.id} value={wallet.id}>{accountLabel(wallet)} · {short(wallet.address)}</option>)}</optgroup>)}{standalone.length > 0 && <optgroup label="导入的账户">{standalone.map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.label}</option>)}</optgroup>}</>
 }
 
-function GroupedWalletChecks({ wallets, groups, selected, setSelected, toggle }: {
-  wallets: WalletRecord[]; groups: WalletGroup[]; selected: string[]; setSelected: (values: string[]) => void
-  toggle: (list: string[], value: string, setter: (values: string[]) => void) => void
+function WalletSelectionList({ wallets, groups, selected, search, onToggle, onSelectGroup }: {
+  wallets: WalletRecord[]; groups: WalletGroup[]; selected: string[]; search: string
+  onToggle: (id: string) => void; onSelectGroup: (ids: string[]) => void
 }) {
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set())
+  const term = search.trim().toLowerCase()
+  const matches = (wallet: WalletRecord, groupLabel = '') => !term || `${accountLabel(wallet)} ${wallet.label} ${wallet.address} ${groupLabel}`.toLowerCase().includes(term)
   const standalone = wallets.filter((wallet) => !wallet.groupId)
-  const toggleGroup = (ids: string[]) => setSelected(ids.every((id) => selected.includes(id)) ? selected.filter((id) => !ids.includes(id)) : [...new Set([...selected, ...ids])])
-  return <>{groups.map((group) => { const ids = group.accounts.map((wallet) => wallet.id); return <div className="check-group" key={group.id}><label className="check-row check-group-title"><input type="checkbox" checked={ids.length > 0 && ids.every((id) => selected.includes(id))} onChange={() => toggleGroup(ids)} />{group.label}<span>{ids.length} 个账户</span></label>{group.accounts.map((wallet) => <label className="check-row check-child" key={wallet.id}><input type="checkbox" checked={selected.includes(wallet.id)} onChange={() => toggle(selected, wallet.id, setSelected)} />{accountLabel(wallet)}<span>{short(wallet.address)}</span></label>)}</div> })}{standalone.length > 0 && <div className="check-group"><div className="check-section-label">导入的账户</div>{standalone.map((wallet) => <label className="check-row" key={wallet.id}><input type="checkbox" checked={selected.includes(wallet.id)} onChange={() => toggle(selected, wallet.id, setSelected)} />{wallet.label}<span>{short(wallet.address)}</span></label>)}</div>}</>
+  const visibleGroups = groups.map((group) => ({ group, accounts: wallets.filter((wallet) => wallet.groupId === group.id && matches(wallet, group.label)) })).filter(({ accounts }) => accounts.length)
+  const visibleStandalone = standalone.filter((wallet) => matches(wallet, '导入的账户'))
+  if (!visibleGroups.length && !visibleStandalone.length) return <div className="selection-empty">没有匹配的账户</div>
+  return <div className="selection-list">{visibleGroups.map(({ group, accounts }) => { const ids = accounts.map((wallet) => wallet.id); const collapsed = collapsedGroupIds.has(group.id); const selectedCount = ids.filter((id) => selected.includes(id)).length; return <div className="selection-group" key={group.id}>
+    <div className="selection-group-title">
+      <button type="button" className="selection-group-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? '展开' : '折叠'} ${group.label}`} onClick={() => setCollapsedGroupIds((current) => { const next = new Set(current); collapsed ? next.delete(group.id) : next.add(group.id); return next })}><ChevronRight size={15} /><strong>{group.label}</strong></button>
+      <label className="selection-group-check"><input type="checkbox" aria-label={`选择 ${group.label} 全部账户`} checked={selectedCount === ids.length} onChange={() => onSelectGroup(ids)} /><span>{selectedCount ? `${selectedCount} / ${accounts.length} 已选` : `${accounts.length} 个账户`}</span></label>
+    </div>
+    {!collapsed && accounts.map((wallet) => <label className={`selection-row ${selected.includes(wallet.id) ? 'selected' : ''}`} key={wallet.id}><input type="checkbox" checked={selected.includes(wallet.id)} onChange={() => onToggle(wallet.id)} /><div><strong>{accountLabel(wallet)}</strong><code>{short(wallet.address)}</code></div><div className="selection-balances"><span>{wallet.balances.find((balance) => balance.asset === 'USDT')?.display ?? '-'} USDt</span><span>{wallet.balances.find((balance) => balance.asset === 'APT')?.display ?? '-'} APT</span></div></label>)}
+  </div> })}{visibleStandalone.length > 0 && <div className="selection-group"><div className="selection-section-label">导入的账户</div>{visibleStandalone.map((wallet) => <label className={`selection-row ${selected.includes(wallet.id) ? 'selected' : ''}`} key={wallet.id}><input type="checkbox" checked={selected.includes(wallet.id)} onChange={() => onToggle(wallet.id)} /><div><strong>{wallet.label}</strong><code>{short(wallet.address)}</code></div><div className="selection-balances"><span>{wallet.balances.find((balance) => balance.asset === 'USDT')?.display ?? '-'} USDt</span><span>{wallet.balances.find((balance) => balance.asset === 'APT')?.display ?? '-'} APT</span></div></label>)}</div>}</div>
 }
 
 function Dialog({ title, close, children, wide = false }: { title: string; close: () => void; children: React.ReactNode; wide?: boolean }) { return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className={`dialog ${wide ? 'wide-dialog' : ''}`} role="dialog" aria-modal="true" aria-label={title}><div className="dialog-head"><h2>{title}</h2><IconButton title="关闭" icon={<X size={18} />} onClick={close} /></div>{children}</div></div> }
-function DialogActions({ close, submit, onSubmit }: { close: () => void; submit: string; onSubmit?: () => void }) { return <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>取消</button><button type={onSubmit ? 'button' : 'submit'} className="primary" onClick={onSubmit}>{submit}</button></div> }
+function DialogActions({ close, submit, onSubmit, disabled = false }: { close: () => void; submit: string; onSubmit?: () => void; disabled?: boolean }) { return <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>取消</button><button type={onSubmit ? 'button' : 'submit'} className="primary" onClick={onSubmit} disabled={disabled}>{submit}</button></div> }
 interface DialogProps { close: () => void; run: (action: () => Promise<void>, success?: string) => Promise<void>; reload: () => Promise<void> }
 
 function PageHeader({ title, subtitle, actions }: { title: string; subtitle: string; actions?: React.ReactNode }) { return <header className="page-header"><div><h1>{title}</h1><p>{subtitle}</p></div>{actions && <div className="header-actions">{actions}</div>}</header> }
@@ -596,9 +879,25 @@ function Empty({ icon, text }: { icon: React.ReactNode; text: string }) { return
 function Address({ value }: { value: string }) { return <button className="address" title={value} onClick={() => void navigator.clipboard.writeText(value)}><code>{short(value)}</code><Copy size={13} /></button> }
 function Status({ value }: { value: string }) { return <span className={`status status-${value}`}>{statusLabels[value] ?? value}</span> }
 function short(value: string) { return value.length > 18 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value }
+function secureShuffle<T>(values: T[]): T[] {
+  const copy = [...values]
+  const random = new Uint32Array(1)
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    crypto.getRandomValues(random)
+    const selected = random[0] % (index + 1)
+    ;[copy[index], copy[selected]] = [copy[selected], copy[index]]
+  }
+  return copy
+}
 function walletOptionLabel(wallet: WalletRecord, groups: WalletGroup[]) { const group = groups.find((item) => item.id === wallet.groupId); return group ? `${group.label} · ${accountLabel(wallet)}` : wallet.label }
 function walletLabel(id: string, wallets: WalletRecord[]) { const wallet = wallets.find((item) => item.id === id); return wallet ? accountLabel(wallet) : id }
 function accountLabel(wallet: WalletRecord) {
   return wallet.accountIndex !== null && wallet.label === `账户 #${wallet.accountIndex}` ? `账户 ${wallet.accountIndex + 1}` : wallet.label
 }
-function blankStep(sourceWalletId: string): TransferStepDraft { return { id: crypto.randomUUID(), sourceWalletId, targetAddress: '', targetWalletId: null, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null } }
+function historyAmount(item: AccountTransferLog) {
+  const symbol = item.asset === 'USDT' ? 'USDt' : 'APT'
+  if (item.frozenAmountDisplay) return `${item.frozenAmountDisplay} ${symbol}`
+  if (item.amountMode === 'max') return `全部余额 ${symbol}`
+  if (item.amountMode === 'random') return `${item.amountMin ?? '-'} - ${item.amountMax ?? '-'} ${symbol}`
+  return `${item.amountMin ?? '-'} ${symbol}`
+}

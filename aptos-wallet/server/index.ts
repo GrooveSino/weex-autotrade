@@ -1,6 +1,8 @@
 import { createApp } from './app.js'
 import { loadConfig } from './config.js'
 
+process.umask(0o077)
+
 const config = loadConfig()
 const app = await createApp(config)
 
