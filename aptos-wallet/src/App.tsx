@@ -41,6 +41,22 @@ export function App() {
   const [transferSourceWalletId, setTransferSourceWalletId] = useState<string | null>(null)
   const previousJobStatuses = useRef(new Map<string, string>())
 
+  useEffect(() => {
+    const closeActionMenus = (event?: Event) => {
+      const target = event?.target
+      if (target instanceof Node && (target as Element).closest('details.action-menu')) return
+      document.querySelectorAll<HTMLDetailsElement>('details.action-menu[open]').forEach((menu) => menu.removeAttribute('open'))
+    }
+    const handlePointerDown = (event: PointerEvent) => closeActionMenus(event)
+    const handleKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') closeActionMenus() }
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [])
+
   const refreshStatus = async () => setStatus(await getStatus())
   const reload = async () => {
     const snapshot = await loadWorkspace()
