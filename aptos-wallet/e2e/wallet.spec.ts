@@ -70,6 +70,7 @@ test('wallet accounts and transfer builder remain usable', async ({ page }, test
   await page.getByRole('button', { name: '进入转账预览' }).click()
   await expect(page.getByRole('dialog', { name: '转账预览' })).toBeVisible()
   await expect(page.getByText('当前页面记录的是仅预览状态')).toBeVisible()
+  await expect(page.getByRole('button', { name: '复制确认短语' })).toBeVisible()
   await page.screenshot({ path: `artifacts/preview-${testInfo.project.name}.png`, fullPage: true })
 })
 
