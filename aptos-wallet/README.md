@@ -49,6 +49,13 @@ export APTOS_MAINNET_EXECUTION_ENABLED=true
 pnpm dev
 ```
 
+使用本机 LaunchAgent 时，必须显式带上启用参数：
+
+```bash
+pnpm build
+./scripts/install-launch-agent.sh --enable-mainnet
+```
+
 每个任务仍必须完成余额预检、交易模拟、保险库解锁，并输入页面生成的完整确认短语。交易提交不会自动重试；传输异常会按预计算交易哈希查询链上，无法确认时任务进入 `uncertain`。
 
 ## 密钥与备份

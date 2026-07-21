@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LABEL="com.groove.aptos-wallet"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$LABEL.plist"
+EXECUTION_ENABLED="false"
+
+if [[ "${1:-}" == "--enable-mainnet" ]]; then
+  EXECUTION_ENABLED="true"
+elif [[ -n "${1:-}" ]]; then
+  print -u2 "用法: $0 [--enable-mainnet]"
+  exit 2
+fi
 
 NODE_BIN=""
 for candidate in \
@@ -47,7 +55,7 @@ print -r -- '    <key>NODE_ENV</key><string>production</string>' >> "$PLIST"
 print -r -- '    <key>APTOS_WALLET_HOST</key><string>127.0.0.1</string>' >> "$PLIST"
 print -r -- '    <key>APTOS_WALLET_API_PORT</key><string>48271</string>' >> "$PLIST"
 print -r -- '    <key>APTOS_WALLET_WEB_ORIGIN</key><string>http://127.0.0.1:48272</string>' >> "$PLIST"
-print -r -- '    <key>APTOS_MAINNET_EXECUTION_ENABLED</key><string>false</string>' >> "$PLIST"
+print -r -- "    <key>APTOS_MAINNET_EXECUTION_ENABLED</key><string>${EXECUTION_ENABLED}</string>" >> "$PLIST"
 print -r -- '  </dict>' >> "$PLIST"
 print -r -- '  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' >> "$PLIST"
 print -r -- '  <key>ThrottleInterval</key><integer>10</integer><key>ProcessType</key><string>Background</string>' >> "$PLIST"
@@ -80,5 +88,10 @@ launchctl kickstart -k "$DOMAIN/$LABEL"
 
 print "已安装并启动 $LABEL"
 print "服务地址: http://127.0.0.1:48271"
+if [[ "$EXECUTION_ENABLED" == true ]]; then
+  print "主网真实转账: 已开启（仍需保险库解锁和完整确认短语）"
+else
+  print "主网真实转账: 已关闭（安全预览模式）"
+fi
 print "状态查看: launchctl print $DOMAIN/$LABEL"
 print "日志: /tmp/aptos-wallet-launchd.log"
