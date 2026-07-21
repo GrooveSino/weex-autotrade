@@ -14,10 +14,109 @@ import { ASSETS, type AssetBalance, type AssetId } from '../shared/types.js'
 import { formatAmount } from '../shared/amounts.js'
 import type { AppConfig } from './config.js'
 
+const MAINNET_READ_MAX_CONCURRENCY = 2
+const MAINNET_READ_MIN_INTERVAL_MS = 200
+const MAINNET_READ_WINDOW_MS = 60_000
+const MAINNET_READ_WINDOW_LIMIT = 600
+const MAINNET_RATE_LIMIT_COOLDOWN_MS = 2_000
+const ACCOUNT_EXISTS_CACHE_TTL_MS = 5 * 60_000
+
 interface FungibleMetadata {
   name: string
   symbol: string
   decimals: number
+}
+
+interface QueuedRead<T> {
+  action: () => Promise<T>
+  resolve: (value: T) => void
+  reject: (error: unknown) => void
+}
+
+/** Keeps all fullnode/indexer calls under one conservative per-process budget. */
+class MainnetReadLimiter {
+  private readonly queue: Array<QueuedRead<unknown>> = []
+  private readonly starts: number[] = []
+  private readonly rateLimitEvents: number[] = []
+  private active = 0
+  private lastStartAt = 0
+  private cooldownUntil = 0
+  private pumping = false
+
+  run<T>(action: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push({ action, resolve: resolve as (value: unknown) => void, reject })
+      void this.pump()
+    })
+  }
+
+  private async pump(): Promise<void> {
+    if (this.pumping) return
+    this.pumping = true
+    try {
+      while (this.queue.length && this.active < MAINNET_READ_MAX_CONCURRENCY) {
+        const delay = this.nextDelay()
+        if (delay > 0) {
+          await sleep(delay)
+          continue
+        }
+        const task = this.queue.shift()!
+        const now = Date.now()
+        this.starts.push(now)
+        this.lastStartAt = now
+        this.active += 1
+        void task.action()
+          .then((value) => task.resolve(value))
+          .catch((error) => {
+            if (isRateLimited(error)) this.noteRateLimit(error)
+            task.reject(error)
+          })
+          .finally(() => {
+            this.active -= 1
+            void this.pump()
+          })
+      }
+    } finally {
+      this.pumping = false
+    }
+  }
+
+  private noteRateLimit(error: unknown): void {
+    const now = Date.now()
+    while (this.rateLimitEvents[0] !== undefined && this.rateLimitEvents[0] <= now - MAINNET_READ_WINDOW_MS) this.rateLimitEvents.shift()
+    this.rateLimitEvents.push(now)
+    const localBackoff = Math.min(60_000, MAINNET_RATE_LIMIT_COOLDOWN_MS * (2 ** Math.min(5, this.rateLimitEvents.length - 1)))
+    const serverBackoff = getRetryAfterMs(error, 0)
+    this.cooldownUntil = Math.max(this.cooldownUntil, now + Math.max(localBackoff, serverBackoff))
+  }
+
+  private nextDelay(): number {
+    const now = Date.now()
+    while (this.starts[0] !== undefined && this.starts[0] <= now - MAINNET_READ_WINDOW_MS) this.starts.shift()
+    if (this.cooldownUntil > now) return this.cooldownUntil - now
+    if (this.starts.length >= MAINNET_READ_WINDOW_LIMIT) return this.starts[0] + MAINNET_READ_WINDOW_MS - now
+    return Math.max(0, this.lastStartAt + MAINNET_READ_MIN_INTERVAL_MS - now)
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+interface AptBalanceRead {
+  balance: bigint
+  accountExists: boolean
+}
+
+class RateLimitedHttpError extends Error {
+  readonly status = 429
+  readonly retryAfterMs: number | undefined
+
+  constructor(retryAfterMs: number | undefined) {
+    super('Aptos 主网公共节点当前限流（HTTP 429）')
+    this.name = 'RateLimitedHttpError'
+    this.retryAfterMs = retryAfterMs
+  }
 }
 
 export interface TransferRequest {
@@ -49,6 +148,8 @@ export interface ChainGateway {
 
 export class AptosMainnetGateway implements ChainGateway {
   readonly aptos: Aptos
+  private readonly readLimiter = new MainnetReadLimiter()
+  private readonly accountExistsCache = new Map<string, { value: boolean; expiresAt: number }>()
 
   constructor(config: AppConfig) {
     this.aptos = new Aptos(new AptosConfig({
@@ -59,25 +160,33 @@ export class AptosMainnetGateway implements ChainGateway {
   }
 
   async getBalances(address: string): Promise<AssetBalance[]> {
-    const [apt, usdt] = await Promise.all([this.getBalance(address, 'APT'), this.getBalance(address, 'USDT')])
-    return [
-      { asset: 'APT', baseUnits: apt.toString(), display: formatAmount(apt, 'APT') },
-      { asset: 'USDT', baseUnits: usdt.toString(), display: formatAmount(usdt, 'USDT') },
-    ]
+    try {
+      const aptRead = await retryRead(() => this.readLimiter.run(() => this.getUnifiedAptBalance(address)))
+      if (aptRead.accountExists) this.accountExistsCache.set(address, { value: true, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
+      const usdt = await this.getBalance(address, 'USDT')
+      return [
+        { asset: 'APT', baseUnits: aptRead.balance.toString(), display: formatAmount(aptRead.balance, 'APT') },
+        { asset: 'USDT', baseUnits: usdt.toString(), display: formatAmount(usdt, 'USDT') },
+      ]
+    } catch (error) {
+      throw redactChainError(error)
+    }
   }
 
   async getBalance(address: string, asset: AssetId): Promise<bigint> {
     try {
       if (asset === 'APT') {
-        return await retryRead(() => this.getUnifiedAptBalance(address))
+        const result = await retryRead(() => this.readLimiter.run(() => this.getUnifiedAptBalance(address)))
+        if (result.accountExists) this.accountExistsCache.set(address, { value: true, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
+        return result.balance
       }
-      const [balance] = await retryRead(() => this.aptos.view<[string]>({
+      const [balance] = await retryRead(() => this.readLimiter.run(() => this.aptos.view<[string]>({
         payload: {
           function: '0x1::primary_fungible_store::balance',
           typeArguments: ['0x1::object::ObjectCore'],
           functionArguments: [address, ASSETS.USDT.metadataAddress],
         },
-      }))
+      })))
       return BigInt(balance ?? '0')
     } catch (error) {
       if (isNotFound(error)) return 0n
@@ -85,35 +194,42 @@ export class AptosMainnetGateway implements ChainGateway {
     }
   }
 
-  private async getUnifiedAptBalance(address: string): Promise<bigint> {
+  private async getUnifiedAptBalance(address: string): Promise<AptBalanceRead> {
     const fullnode = this.aptos.config.getRequestUrl(AptosApiType.FULLNODE).replace(/\/$/, '')
     const asset = encodeURIComponent('0x1::aptos_coin::AptosCoin')
     const response = await fetch(`${fullnode}/accounts/${encodeURIComponent(address)}/balance/${asset}`, {
       headers: { accept: 'application/json' },
     })
-    if (response.status === 404) return 0n
+    if (response.status === 404) return { balance: 0n, accountExists: false }
+    if (response.status === 429) throw new RateLimitedHttpError(parseRetryAfter(response.headers.get('retry-after')))
     if (!response.ok) throw new Error(`APT 余额查询失败 (HTTP ${response.status})`)
     const raw = (await response.text()).trim()
     const match = /^"?(0|[1-9]\d*)"?$/.exec(raw)
     if (!match) throw new Error('APT 余额响应格式无效')
-    return BigInt(match[1])
+    return { balance: BigInt(match[1]), accountExists: true }
   }
 
   async accountExists(address: string): Promise<boolean> {
+    const cached = this.accountExistsCache.get(address)
+    if (cached && cached.expiresAt > Date.now()) return cached.value
     try {
-      await retryRead(() => this.aptos.getAccountInfo({ accountAddress: address }))
+      await retryRead(() => this.readLimiter.run(() => this.aptos.getAccountInfo({ accountAddress: address })))
+      this.accountExistsCache.set(address, { value: true, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
       return true
     } catch (error) {
-      if (isNotFound(error)) return false
+      if (isNotFound(error)) {
+        this.accountExistsCache.set(address, { value: false, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
+        return false
+      }
       throw redactChainError(error)
     }
   }
 
   async validateUsdt(): Promise<void> {
-    const metadata = await this.aptos.getAccountResource<FungibleMetadata>({
+    const metadata = await this.readLimiter.run(() => this.aptos.getAccountResource<FungibleMetadata>({
       accountAddress: ASSETS.USDT.metadataAddress,
       resourceType: '0x1::fungible_asset::Metadata',
-    })
+    }))
     if (metadata.name !== 'Tether USD' || metadata.symbol !== 'USDt' || Number(metadata.decimals) !== 6) {
       throw new Error('原生 USDt 元数据校验失败，已停止执行')
     }
@@ -180,7 +296,7 @@ export class AptosMainnetGateway implements ChainGateway {
 
   async findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string }> {
     try {
-      const response = await this.aptos.getTransactionByHash({ transactionHash: hash })
+      const response = await this.readLimiter.run(() => this.aptos.getTransactionByHash({ transactionHash: hash }))
       if (response.type === 'pending_transaction') return { found: true }
       return { found: true, success: response.success, vmStatus: response.vm_status }
     } catch (error) {
@@ -191,12 +307,12 @@ export class AptosMainnetGateway implements ChainGateway {
 
   private async buildAndSimulate(request: TransferRequest): Promise<{ transaction: SimpleTransaction; simulation: UserTransactionResponse }> {
     const transaction = await this.build(request)
-    const [simulation] = await this.aptos.transaction.simulate.simple({
+    const [simulation] = await this.readLimiter.run(() => this.aptos.transaction.simulate.simple({
       signerPublicKey: request.sender.publicKey,
       feePayerPublicKey: request.feePayer?.publicKey,
       transaction,
       options: { estimateGasUnitPrice: true, estimateMaxGasAmount: true },
-    })
+    }))
     return { transaction, simulation }
   }
 
@@ -231,11 +347,12 @@ export class AptosMainnetGateway implements ChainGateway {
 }
 
 function isNotFound(error: unknown): boolean {
-  const candidate = error as { status?: number; response?: { status?: number }; message?: string }
-  return candidate?.status === 404 || candidate?.response?.status === 404 || candidate?.message?.includes('404') === true
+  const candidate = error as { status?: number; statusCode?: number; response?: { status?: number }; message?: string }
+  return candidate?.status === 404 || candidate?.statusCode === 404 || candidate?.response?.status === 404 || candidate?.message?.includes('404') === true
 }
 
 function redactChainError(error: unknown): Error {
+  if (isRateLimited(error)) return new Error('主网公共节点暂时限流，程序已自动降速并退避，请稍后重试')
   const message = error instanceof Error ? error.message : String(error)
   return new Error(message
     .replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]')
@@ -251,15 +368,30 @@ async function retryRead<T>(action: () => Promise<T>, maxAttempts = 4): Promise<
     } catch (error) {
       lastError = error
       if (!isRateLimited(error) || attempt === maxAttempts) throw error
-      await new Promise((resolve) => setTimeout(resolve, attempt * 250))
+      await sleep(Math.max(getRetryAfterMs(error, 1_000), Math.min(10_000, attempt * 1_000) + Math.floor(Math.random() * 250)))
     }
   }
   throw lastError
 }
 
 function isRateLimited(error: unknown): boolean {
-  const candidate = error as { status?: number; response?: { status?: number }; message?: string }
-  return candidate?.status === 429 || candidate?.response?.status === 429 || /(?:HTTP 429|Too Many Requests)/i.test(candidate?.message ?? '')
+  const candidate = error as { status?: number; statusCode?: number; response?: { status?: number }; message?: string }
+  return candidate?.status === 429 || candidate?.statusCode === 429 || candidate?.response?.status === 429 || /(?:HTTP 429|Too Many Requests)/i.test(candidate?.message ?? '')
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000
+  const date = Date.parse(value)
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined
+}
+
+function getRetryAfterMs(error: unknown, fallbackMs: number): number {
+  const candidate = error as { retryAfterMs?: number; response?: { headers?: Headers } }
+  if (typeof candidate?.retryAfterMs === 'number' && Number.isFinite(candidate.retryAfterMs)) return Math.max(0, candidate.retryAfterMs)
+  const header = candidate?.response?.headers?.get?.('retry-after')
+  return parseRetryAfter(header ?? null) ?? fallbackMs
 }
 
 export type { AccountAuthenticator }

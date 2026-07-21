@@ -44,6 +44,40 @@ describe('Aptos mainnet balance reader', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('reuses account existence learned from a successful APT balance response', async () => {
+    const gateway = new AptosMainnetGateway(config)
+    const address = `0x${'5'.repeat(64)}`
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('0', { status: 200 })))
+    vi.spyOn(gateway.aptos, 'view').mockResolvedValue(['0'] as never)
+    const accountInfo = vi.spyOn(gateway.aptos, 'getAccountInfo')
+
+    await gateway.getBalances(address)
+    await expect(gateway.accountExists(address)).resolves.toBe(true)
+    expect(accountInfo).not.toHaveBeenCalled()
+  })
+
+  it('keeps concurrent fullnode requests at the process-wide limit', async () => {
+    const gateway = new AptosMainnetGateway(config)
+    let active = 0
+    let peak = 0
+    const delayedResponse = async () => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      active -= 1
+      return new Response('0', { status: 200 })
+    }
+    vi.stubGlobal('fetch', vi.fn(delayedResponse))
+    vi.spyOn(gateway.aptos, 'view').mockImplementation((async () => {
+      const response = await delayedResponse()
+      await response.text()
+      return ['0']
+    }) as never)
+
+    await Promise.all(Array.from({ length: 4 }, (_, index) => gateway.getBalances(`0x${(index + 6).toString(16).padStart(64, '0')}`)))
+    expect(peak).toBeLessThanOrEqual(2)
+  })
+
   it('clears signing keys when transaction construction fails', async () => {
     const gateway = new AptosMainnetGateway(config)
     const sender = Account.generate()
