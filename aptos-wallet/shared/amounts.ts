@@ -27,6 +27,23 @@ export function formatAmount(value: bigint | string, asset: AssetId): string {
   return fraction ? `${whole}.${fraction}` : whole.toString()
 }
 
+export function formatAmountWithMaxDecimals(value: bigint | string, asset: AssetId, maxDecimals: number): string {
+  if (!Number.isInteger(maxDecimals) || maxDecimals < 0) throw new Error('最大小数位数无效')
+  const amount = typeof value === 'bigint' ? value : BigInt(value)
+  const decimals = ASSETS[asset].decimals
+  if (maxDecimals >= decimals) return formatAmount(amount, asset)
+  const negative = amount < 0n
+  const absolute = negative ? -amount : amount
+  const divisor = 10n ** BigInt(decimals - maxDecimals)
+  const rounded = (absolute + divisor / 2n) / divisor
+  if (absolute > 0n && rounded === 0n) return `<${maxDecimals === 0 ? '1' : `0.${'0'.repeat(maxDecimals - 1)}1`}`
+  const scale = 10n ** BigInt(maxDecimals)
+  const whole = rounded / scale
+  const fraction = maxDecimals === 0 ? '' : (rounded % scale).toString().padStart(maxDecimals, '0').replace(/0+$/, '')
+  const formatted = fraction ? `${whole}.${fraction}` : whole.toString()
+  return negative ? `-${formatted}` : formatted
+}
+
 export function randomBigIntInclusive(min: bigint, max: bigint): bigint {
   if (min > max) throw new Error('随机金额最小值不能大于最大值')
   const range = max - min + 1n

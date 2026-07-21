@@ -6,6 +6,7 @@ import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
 import { z } from 'zod'
 import type { JobDraftInput } from '../shared/types.js'
+import { AddressBookService } from './address-book.js'
 import { AptosMainnetGateway, type ChainGateway } from './aptos-gateway.js'
 import { BackupService, type VaultBackup } from './backup.js'
 import { assertLocalOnlyConfig, type AppConfig } from './config.js'
@@ -18,6 +19,11 @@ const passwordSchema = z.object({ password: z.string().min(12).max(1024) })
 const walletIdParams = z.object({ id: z.string().uuid() })
 const walletGroupIdParams = z.object({ id: z.string().uuid() })
 const jobIdParams = z.object({ id: z.string().uuid() })
+const addressBookIdParams = z.object({ id: z.string().uuid() })
+const addressBookEntrySchema = z.object({
+  label: z.string().min(1).max(120),
+  address: z.string().min(1).max(128),
+})
 const transferLogQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(100),
   offset: z.coerce.number().int().min(0).default(0),
@@ -59,12 +65,14 @@ const stepSchema = z.object({
   amountMin: z.string().nullable().default(null),
   amountMax: z.string().nullable().default(null),
 })
+const intervalSecondsSchema = z.number().min(0).max(604800)
+  .refine((value) => Math.abs(value * 10 - Math.round(value * 10)) < 1e-9, '随机间隔最多保留 1 位小数')
 const jobDraftSchema = z.object({
   name: z.string().min(1).max(120),
   steps: z.array(stepSchema).min(1).max(1000),
   gasPayerWalletId: z.string().uuid().nullable().default(null),
-  intervalMinSeconds: z.number().int().min(0).max(604800),
-  intervalMaxSeconds: z.number().int().min(0).max(604800),
+  intervalMinSeconds: intervalSecondsSchema,
+  intervalMaxSeconds: intervalSecondsSchema,
   shuffle: z.boolean(),
 })
 
@@ -74,6 +82,7 @@ export interface AppServices {
   wallets: WalletService
   jobs: JobService
   backup: BackupService
+  addressBook: AddressBookService
   gateway: ChainGateway
 }
 
@@ -85,6 +94,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   const wallets = overrides.wallets ?? new WalletService(db, vault, gateway)
   const jobs = overrides.jobs ?? new JobService(db, wallets, gateway, config.executionEnabled)
   const backup = overrides.backup ?? new BackupService(db)
+  const addressBook = overrides.addressBook ?? new AddressBookService(db)
   const csrfToken = randomBytes(24).toString('base64url')
   let sessionToken: string | null = null
   let sessionLastSeenAt = 0
@@ -97,7 +107,8 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   const allowedOrigins = new Set([config.webOrigin, `http://${config.host}:${config.port}`])
   app.addHook('onSend', async (request, reply, payload) => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value)
-    if (request.url.startsWith('/api/') || request.url === '/' || request.url.endsWith('.html')) {
+    const contentType = String(reply.getHeader('content-type') ?? '')
+    if (request.url.startsWith('/api/') || request.url === '/' || request.url.endsWith('.html') || contentType.startsWith('text/html')) {
       reply.header('Cache-Control', 'no-store').header('Pragma', 'no-cache')
     }
     return payload
@@ -179,7 +190,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     return valid
   }
   const broadcast = () => {
-    const payload = `event: snapshot\ndata: ${JSON.stringify({ wallets: vault.unlocked ? wallets.list() : [], groups: vault.unlocked ? wallets.listGroups() : [], jobs: vault.unlocked ? jobs.list() : [] })}\n\n`
+    const payload = `event: snapshot\ndata: ${JSON.stringify({ wallets: vault.unlocked ? wallets.list() : [], groups: vault.unlocked ? wallets.listGroups() : [], jobs: vault.unlocked ? jobs.list() : [], addressBook: vault.unlocked ? addressBook.list() : [] })}\n\n`
     for (const client of sseClients) client.write(payload)
   }
   jobs.on('change', broadcast)
@@ -365,7 +376,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   app.get('/api/v1/wallets/:id/transfers', { preHandler: requireSession }, async (request) => {
     const { id } = walletIdParams.parse(request.params)
     const { limit, offset, direction } = transferLogQuery.parse(request.query)
-    return jobs.accountTransfers(id, limit, offset, direction)
+    return jobs.accountTransfersWithGasBackfill(id, limit, offset, direction)
   })
   app.post('/api/v1/wallets/:id/reveal', { preHandler: requireSession }, async (request) => {
     const { id } = walletIdParams.parse(request.params)
@@ -383,8 +394,28 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     return wallets.addressCsv()
   })
 
+  app.get('/api/v1/address-book', { preHandler: requireSession }, async () => addressBook.list())
+  app.post('/api/v1/address-book', { preHandler: requireSession }, async (request) => {
+    const body = addressBookEntrySchema.parse(request.body)
+    const result = addressBook.create(body.label, body.address)
+    broadcast()
+    return result
+  })
+  app.patch('/api/v1/address-book/:id', { preHandler: requireSession }, async (request) => {
+    const { id } = addressBookIdParams.parse(request.params)
+    const body = addressBookEntrySchema.parse(request.body)
+    const result = addressBook.update(id, body.label, body.address)
+    broadcast()
+    return result
+  })
+  app.delete('/api/v1/address-book/:id', { preHandler: requireSession }, async (request) => {
+    addressBook.remove(addressBookIdParams.parse(request.params).id)
+    broadcast()
+    return { ok: true }
+  })
+
   app.get('/api/v1/jobs', { preHandler: requireSession }, async () => jobs.list())
-  app.get('/api/v1/jobs/:id', { preHandler: requireSession }, async (request) => jobs.get(jobIdParams.parse(request.params).id))
+  app.get('/api/v1/jobs/:id', { preHandler: requireSession }, async (request) => jobs.getWithGasBackfill(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs', { preHandler: requireSession }, async (request) => jobs.createDraft(jobDraftSchema.parse(request.body) as JobDraftInput))
   app.put('/api/v1/jobs/:id', { preHandler: requireSession }, async (request) => jobs.updateDraft(jobIdParams.parse(request.params).id, jobDraftSchema.parse(request.body) as JobDraftInput))
   app.post('/api/v1/jobs/:id/check', { preHandler: requireSession }, async (request) => jobs.checkAndPreview(jobIdParams.parse(request.params).id))
@@ -411,7 +442,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
       Connection: 'keep-alive',
     })
     sseClients.add(reply.raw)
-    reply.raw.write(`event: snapshot\ndata: ${JSON.stringify({ wallets: wallets.list(), groups: wallets.listGroups(), jobs: jobs.list() })}\n\n`)
+    reply.raw.write(`event: snapshot\ndata: ${JSON.stringify({ wallets: wallets.list(), groups: wallets.listGroups(), jobs: jobs.list(), addressBook: addressBook.list() })}\n\n`)
     const heartbeat = setInterval(() => reply.raw.write(': heartbeat\n\n'), 15_000)
     request.raw.on('close', () => {
       clearInterval(heartbeat)
@@ -419,10 +450,16 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     })
   })
 
-  const webDist = resolve(process.cwd(), 'dist')
+  const webDist = resolve(config.webDistPath ?? resolve(process.cwd(), 'dist'))
   if (existsSync(webDist)) {
-    await app.register(fastifyStatic, { root: webDist, wildcard: false })
-    app.get('/*', async (_request, reply) => reply.sendFile('index.html'))
+    await app.register(fastifyStatic, { root: webDist, wildcard: true })
+    app.setNotFoundHandler(async (request, reply) => {
+      if (request.url.startsWith('/api/')) return reply.code(404).send({ error: '接口不存在' })
+      if (!['GET', 'HEAD'].includes(request.method) || request.url.startsWith('/assets/')) {
+        return reply.code(404).type('text/plain').send('Not Found')
+      }
+      return reply.header('Cache-Control', 'no-store').header('Pragma', 'no-cache').sendFile('index.html')
+    })
   }
 
   app.addHook('onClose', async () => {
@@ -431,7 +468,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     vault.lock()
     db.close()
   })
-  return Object.assign(app, { services: { db, vault, wallets, jobs, backup, gateway } })
+  return Object.assign(app, { services: { db, vault, wallets, jobs, backup, addressBook, gateway } })
 }
 
 function safeMessage(error: Error): string {

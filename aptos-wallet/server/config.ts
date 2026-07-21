@@ -5,6 +5,7 @@ export interface AppConfig {
   port: number
   webOrigin: string
   databasePath: string
+  webDistPath?: string
   executionEnabled: boolean
   fullnodeUrl?: string
   indexerUrl?: string

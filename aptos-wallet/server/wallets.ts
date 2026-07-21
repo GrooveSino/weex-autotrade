@@ -24,11 +24,15 @@ import type {
   WalletSource,
 } from '../shared/types.js'
 import type { SqliteDatabase } from './database.js'
+import type { ReadPriority } from './aptos-gateway.js'
 import { EncryptedVault, type WalletSecret } from './vault.js'
 
 export const MAX_ACCOUNT_INDEX = 0x7fffffff
 export const MAX_ACCOUNT_BATCH = 200
-export const BALANCE_REFRESH_CONCURRENCY = 10
+// Keep wallet refreshes below the public fullnode's anonymous request budget.
+// The gateway has a second global limiter; matching it here avoids building a
+// large burst of queued account reads during a full refresh.
+export const BALANCE_REFRESH_CONCURRENCY = 2
 export const BALANCE_REFRESH_MAX_ATTEMPTS = 3
 export const BALANCE_REFRESH_RETRY_DELAY_MS = 250
 export const APTOS_HD_PATH = (index: number) => `m/44'/637'/${index}'/0'/0'`
@@ -67,8 +71,8 @@ interface WalletGroupRow {
 }
 
 export interface BalanceReader {
-  getBalances(address: string): Promise<AssetBalance[]>
-  accountExists(address: string): Promise<boolean>
+  getBalances(address: string, priority?: ReadPriority): Promise<AssetBalance[]>
+  accountExists(address: string, priority?: ReadPriority): Promise<boolean>
 }
 
 function normalizeAddress(address: string): string {
@@ -315,10 +319,10 @@ export class WalletService {
     return this.getGroup(id)
   }
 
-  async refresh(id: string): Promise<WalletRecord> {
+  async refresh(id: string, priority: ReadPriority = 'normal'): Promise<WalletRecord> {
     const active = this.activeRefreshes.get(id)
     if (active) return active
-    const operation = this.refreshOnce(id)
+    const operation = this.refreshOnce(id, priority)
     this.activeRefreshes.set(id, operation)
     try {
       return await operation
@@ -327,11 +331,11 @@ export class WalletService {
     }
   }
 
-  private async refreshOnce(id: string): Promise<WalletRecord> {
+  private async refreshOnce(id: string, priority: ReadPriority): Promise<WalletRecord> {
     const wallet = this.get(id)
     try {
-      const balances = await retryBalanceRead(() => this.balanceReader.getBalances(wallet.address))
-      const exists = wallet.groupId ? (isFunded(balances) || await this.balanceReader.accountExists(wallet.address)) : true
+      const balances = await retryBalanceRead(() => this.balanceReader.getBalances(wallet.address, priority))
+      const exists = wallet.groupId ? (isFunded(balances) || await this.balanceReader.accountExists(wallet.address, priority)) : true
       const now = new Date().toISOString()
       const status: WalletAccountStatus = wallet.groupId ? (isFunded(balances) ? 'funded' : exists ? 'used' : 'unused') : 'standalone'
       this.db.prepare(`UPDATE wallets SET balances_json = ?, account_status = ?, balance_error = NULL, balance_updated_at = ?, updated_at = ? WHERE id = ?`)

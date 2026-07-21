@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Account } from '@aptos-labs/ts-sdk'
+import { Account, AccountAddress, type SimpleTransaction } from '@aptos-labs/ts-sdk'
 import { AptosMainnetGateway } from '../server/aptos-gateway.js'
 import type { AppConfig } from '../server/config.js'
 
@@ -91,6 +91,41 @@ describe('Aptos mainnet balance reader', () => {
       asset: 'APT',
       amount: 1n,
     })).rejects.toThrow('build failed')
+    expect(sender.privateKey.isCleared()).toBe(true)
+    expect(feePayer.privateKey.isCleared()).toBe(true)
+  })
+
+  it('binds the real fee payer before simulating when the recipient pays the gas', async () => {
+    const gateway = new AptosMainnetGateway(config)
+    const sender = Account.generate()
+    const feePayer = Account.generate()
+    vi.spyOn(gateway, 'getBalance').mockResolvedValue(27_793_300n)
+    const build = vi.spyOn(gateway.aptos.transaction.build, 'simple').mockImplementation(async (args) => ({
+      rawTransaction: {
+        sequence_number: args.options?.accountSequenceNumber ?? 0n,
+        gas_unit_price: BigInt(args.options?.gasUnitPrice ?? 100),
+        max_gas_amount: BigInt(args.options?.maxGasAmount ?? 2_000_000),
+      },
+      feePayerAddress: AccountAddress.ZERO,
+    }) as unknown as SimpleTransaction)
+    const simulate = vi.spyOn(gateway.aptos.transaction.simulate, 'simple').mockImplementation(async (args) => {
+      expect(args.transaction.feePayerAddress?.toString()).toBe(feePayer.accountAddress.toString())
+      expect(args.feePayerPublicKey).toBe(feePayer.publicKey)
+      expect(args.transaction.rawTransaction.max_gas_amount).toBe(277_933n)
+      expect(args.options?.estimateMaxGasAmount).toBe(false)
+      return [{ success: true, gas_used: '5070', gas_unit_price: '100' }] as never
+    })
+
+    await expect(gateway.estimateGas({
+      sender,
+      feePayer,
+      recipient: feePayer.accountAddress.toString(),
+      asset: 'USDT',
+      amount: 1_000_000n,
+    })).resolves.toEqual({ gasUnitPrice: 100n, maxGasAmount: 6_338n })
+    expect(build).toHaveBeenCalledTimes(2)
+    expect(build.mock.calls[1][0].options).toMatchObject({ gasUnitPrice: 100, maxGasAmount: 277_933 })
+    expect(simulate).toHaveBeenCalledOnce()
     expect(sender.privateKey.isCleared()).toBe(true)
     expect(feePayer.privateKey.isCleared()).toBe(true)
   })

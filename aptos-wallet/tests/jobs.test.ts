@@ -39,11 +39,18 @@ describe('transfer jobs', () => {
     expect(() => jobs.confirm(draft.id, 'wrong')).toThrow('确认短语不匹配')
     jobs.confirm(draft.id, preview.confirmationPhrase!)
     await waitFor(() => jobs.get(draft.id).status === 'completed')
-    expect(jobs.get(draft.id).steps[0].status).toBe('confirmed')
+    expect(jobs.get(draft.id).steps[0]).toMatchObject({ status: 'confirmed', gasFeeBaseUnits: '10' })
+    expect(jobs.attempts(draft.id)[0]).toMatchObject({ state: 'confirmed', gas_fee_base_units: '10' })
   })
 
   it('uses a fee payer and permits a full USDt transfer', async () => {
-    const { jobs, gateway, source, target, payer } = await setup()
+    const { jobs, gateway, wallets, source, target, payer } = await setup()
+    const refreshes: Array<{ id: string; priority: string | undefined }> = []
+    const refresh = wallets.refresh.bind(wallets)
+    wallets.refresh = async (id, priority) => {
+      refreshes.push({ id, priority })
+      return refresh(id, priority)
+    }
     const draft = jobs.createDraft({ name: 'max', gasPayerWalletId: payer.id, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'max', amountMin: null, amountMax: null }] })
     const preview = await jobs.preview(draft.id)
@@ -51,6 +58,12 @@ describe('transfer jobs', () => {
     await waitFor(() => jobs.get(draft.id).status === 'completed')
     expect(await gateway.getBalance(source.address, 'USDT')).toBe(0n)
     expect(await gateway.getBalance(target.address, 'USDT')).toBe(5_000_000n)
+    expect(refreshes).toEqual(expect.arrayContaining([
+      { id: source.id, priority: 'high' },
+      { id: target.id, priority: 'high' },
+      { id: payer.id, priority: 'high' },
+    ]))
+    expect(refreshes).toHaveLength(3)
   })
 
   it('shows the same internal transfer as outgoing and incoming account history', async () => {
@@ -63,13 +76,49 @@ describe('transfer jobs', () => {
 
     const outgoing = jobs.accountTransfers(source.id, 50, 0, 'out')
     expect(outgoing.counts).toEqual({ all: 1, in: 0, out: 1 })
-    expect(outgoing.items[0]).toMatchObject({ direction: 'out', counterpartyWalletId: target.id, counterpartyAddress: target.address, frozenAmountDisplay: '1', status: 'confirmed' })
+    expect(outgoing.items[0]).toMatchObject({ direction: 'out', counterpartyWalletId: target.id, counterpartyAddress: target.address, frozenAmountDisplay: '1', status: 'confirmed', gasFeeBaseUnits: '10' })
     expect(outgoing.items[0].txHash).toMatch(/^0x/)
 
     const incoming = jobs.accountTransfers(target.id, 50, 0, 'in')
     expect(incoming.counts).toEqual({ all: 1, in: 1, out: 0 })
-    expect(incoming.items[0]).toMatchObject({ direction: 'in', counterpartyWalletId: source.id, counterpartyAddress: source.address, status: 'confirmed' })
+    expect(incoming.items[0]).toMatchObject({ direction: 'in', counterpartyWalletId: source.id, counterpartyAddress: source.address, status: 'confirmed', gasFeeBaseUnits: '10' })
     expect(jobs.accountTransfers(payer.id).items).toEqual([])
+  })
+
+  it('backfills a missing historical gas fee when its job is inspected', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'legacy gas', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    db!.prepare('UPDATE transaction_attempts SET gas_fee_base_units = NULL WHERE job_id = ?').run(draft.id)
+
+    expect(jobs.get(draft.id).steps[0].gasFeeBaseUnits).toBeNull()
+    expect((await jobs.getWithGasBackfill(draft.id)).steps[0].gasFeeBaseUnits).toBe('10')
+    expect(gateway.findTransactionCalls).toBe(1)
+    expect(db!.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE entity_id = ? AND kind = 'transaction.gas_fee_backfilled'").get(draft.id)).toEqual({ count: 1 })
+  })
+
+  it('backfills account history gas fees and cools down unresolved hashes', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'account legacy gas', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    db!.prepare('UPDATE transaction_attempts SET gas_fee_base_units = NULL WHERE job_id = ?').run(draft.id)
+
+    expect((await jobs.accountTransfersWithGasBackfill(source.id)).items[0].gasFeeBaseUnits).toBe('10')
+    const now = new Date().toISOString()
+    db!.prepare(`
+      INSERT INTO transaction_attempts(id, job_id, step_id, sender_address, sequence_number, tx_hash, state, created_at, updated_at)
+      VALUES (?, ?, ?, ?, '1', ?, 'failed', ?, ?)
+    `).run(crypto.randomUUID(), draft.id, preview.steps[0].id, source.address, `0x${'f'.repeat(64)}`, now, now)
+    const callsBeforeMissing = gateway.findTransactionCalls
+    await jobs.accountTransfersWithGasBackfill(source.id)
+    await jobs.accountTransfersWithGasBackfill(source.id)
+    expect(gateway.findTransactionCalls - callsBeforeMissing).toBe(1)
   })
 
   it('does not expose draft or preview-only steps as account transfer records', async () => {
@@ -170,9 +219,21 @@ describe('transfer jobs', () => {
     expect(result.summary?.estimatedGasBaseUnits).toBe('10')
   })
 
+  it('names the selected fee payer when its APT cannot cover the transaction', async () => {
+    const { jobs, gateway, source, target, payer } = await setup()
+    gateway.estimateError = '交易模拟失败：INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE'
+    const draft = jobs.createDraft({ name: 'sponsor lacks gas', gasPayerWalletId: payer.id, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+
+    const result = await jobs.checkAndPreview(draft.id)
+
+    expect(result.valid).toBe(false)
+    expect(result.checks[0].error).toBe(`手续费账户“${payer.label}”的 APT 余额不足，请充值或改用其他手续费账户。`)
+  })
+
   it('reorders frozen preview steps as whole records and invalidates the old phrase', async () => {
-    const { jobs, source, target, payer } = await setup()
-    const draft = jobs.createDraft({ name: 'reorder', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+    const { jobs, gateway, source, target, payer } = await setup()
+    const draft = jobs.createDraft({ name: 'reorder', gasPayerWalletId: null, intervalMinSeconds: 1.1, intervalMaxSeconds: 1.9, shuffle: false,
       steps: [
         { id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null },
         { id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: payer.address, targetWalletId: payer.id, asset: 'USDT', amountMode: 'fixed', amountMin: '2', amountMax: null },
@@ -180,12 +241,24 @@ describe('transfer jobs', () => {
     const first = await jobs.preview(draft.id)
     const oldPhrase = first.confirmationPhrase
     const original = first.steps.map((step) => ({ id: step.id, amount: step.frozenAmountDisplay }))
+    gateway.getBalance = async () => { throw new Error('reorder must not read Mainnet balances') }
+    gateway.estimateGas = async () => { throw new Error('reorder must not simulate transactions') }
     const reordered = await jobs.reorderPreview(draft.id, [...first.steps].reverse().map((step) => step.id))
     expect(reordered.valid).toBe(true)
     expect(reordered.job.status).toBe('previewed')
     expect(reordered.job.confirmationPhrase).not.toBe(oldPhrase)
     expect(reordered.job.steps.map((step) => ({ id: step.id, amount: step.frozenAmountDisplay }))).toEqual(original.reverse())
+    expect(reordered.job.steps[0].waitAfterSeconds).toBeGreaterThanOrEqual(1.1)
+    expect(reordered.job.steps[0].waitAfterSeconds).toBeLessThanOrEqual(1.9)
+    expect(Number.isInteger(reordered.job.steps[0].waitAfterSeconds * 10)).toBe(true)
+    expect(reordered.job.steps[1].waitAfterSeconds).toBe(0)
     expect(() => jobs.confirm(draft.id, oldPhrase!)).toThrow('确认短语不匹配')
+  })
+
+  it('rejects transfer interval precision beyond one decimal place', async () => {
+    const { jobs, source, target } = await setup()
+    expect(() => jobs.createDraft({ name: 'interval precision', gasPayerWalletId: null, intervalMinSeconds: 1.11, intervalMaxSeconds: 2, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })).toThrow('最多保留 1 位小数')
   })
 
   it('keeps the configured APT gas reserve for a self-paid full transfer', async () => {

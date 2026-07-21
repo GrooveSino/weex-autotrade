@@ -1,12 +1,23 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 const now = new Date().toISOString()
 const walletA = { id: '11111111-1111-4111-8111-111111111111', label: '资金账户', address: `0x${'1'.repeat(64)}`, source: 'private_key', groupId: null, accountIndex: null, accountStatus: 'standalone', derivationPath: null, createdAt: now, archivedAt: null, balances: [{ asset: 'APT', baseUnits: '125000000', display: '1.25' }, { asset: 'USDT', baseUnits: '50000000', display: '50' }], balanceError: null, balanceUpdatedAt: now }
 const walletB = { ...walletA, id: '22222222-2222-4222-8222-222222222222', label: '账户 1', address: `0x${'2'.repeat(64)}`, source: 'mnemonic', groupId: '55555555-5555-4555-8555-555555555555', accountIndex: 0, accountStatus: 'funded', derivationPath: "m/44'/637'/0'/0'/0'", balances: [{ asset: 'APT', baseUnits: '25000000', display: '0.25' }, { asset: 'USDT', baseUnits: '1000000', display: '1' }] }
 const walletGroup = { id: walletB.groupId, label: '日常钱包', source: 'mnemonic', derivationProfile: 'aptos_hd', nextAccountIndex: 1, activeAccountCount: 1, totalAccountCount: 1, archivedAt: null, accounts: [walletB], balances: walletB.balances, createdAt: now, updatedAt: now }
+const addressBookEntry = { id: '99999999-9999-4999-8999-999999999999', label: '交易所充值', address: `0x${'3'.repeat(64)}`, createdAt: now, updatedAt: now }
+
+async function addExternalTargets(page: Page, value: string) {
+  await page.getByRole('button', { name: '添加外部地址' }).click()
+  const dialog = page.getByRole('dialog', { name: '添加外部收款地址' })
+  await dialog.getByLabel('外部 Aptos 地址').fill(value)
+  await dialog.getByRole('button', { name: '添加地址' }).click()
+}
 
 test.beforeEach(async ({ page }) => {
   let lastDraftSteps: Array<Record<string, unknown>> = []
+  let lastIntervalMinSeconds = 5
+  let lastIntervalMaxSeconds = 30
+  let addressBook = [addressBookEntry]
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -14,11 +25,30 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/v1/wallets') return route.fulfill({ json: [walletA, walletB] })
     if (path === '/api/v1/wallets/groups' && route.request().method() === 'GET') return route.fulfill({ json: [walletGroup] })
     if (path === '/api/v1/jobs' && route.request().method() === 'GET') return route.fulfill({ json: [] })
+    if (/^\/api\/v1\/jobs\/[^/]+$/.test(path) && route.request().method() === 'GET') return route.fulfill({ json: {} })
+    if (path === '/api/v1/address-book' && route.request().method() === 'GET') return route.fulfill({ json: addressBook })
+    if (path === '/api/v1/address-book' && route.request().method() === 'POST') {
+      const body = route.request().postDataJSON()
+      const created = { id: crypto.randomUUID(), ...body, createdAt: now, updatedAt: now }
+      addressBook = [...addressBook, created]
+      return route.fulfill({ json: created })
+    }
+    if (path.startsWith('/api/v1/address-book/') && route.request().method() === 'PATCH') {
+      const id = path.split('/').at(-1)
+      const body = route.request().postDataJSON()
+      addressBook = addressBook.map((entry) => entry.id === id ? { ...entry, ...body, updatedAt: now } : entry)
+      return route.fulfill({ json: addressBook.find((entry) => entry.id === id) })
+    }
+    if (path.startsWith('/api/v1/address-book/') && route.request().method() === 'DELETE') {
+      const id = path.split('/').at(-1)
+      addressBook = addressBook.filter((entry) => entry.id !== id)
+      return route.fulfill({ json: { ok: true } })
+    }
     if (path === '/api/v1/events') return route.fulfill({ status: 204 })
     if (path === `/api/v1/wallets/${walletB.id}/transfers`) {
       const logs = [
-        { id: '66666666-6666-4666-8666-666666666666', jobId: '33333333-3333-4333-8333-333333333333', jobName: '内部归集', jobStatus: 'completed', position: 0, direction: 'in', counterpartyAddress: walletA.address, counterpartyWalletId: walletA.id, asset: 'USDT', amountMode: 'fixed', amountMin: '2', amountMax: null, frozenAmountDisplay: '2', status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, error: null, createdAt: now, updatedAt: now },
-        { id: '77777777-7777-4777-8777-777777777777', jobId: '44444444-4444-4444-8444-444444444444', jobName: '外部付款', jobStatus: 'paused', position: 0, direction: 'out', counterpartyAddress: `0x${'3'.repeat(64)}`, counterpartyWalletId: null, asset: 'USDT', amountMode: 'fixed', amountMin: '0.5', amountMax: null, frozenAmountDisplay: '0.5', status: 'failed', txHash: null, error: 'APT 手续费不足', createdAt: now, updatedAt: now },
+        { id: '66666666-6666-4666-8666-666666666666', jobId: '33333333-3333-4333-8333-333333333333', jobName: '内部归集', jobStatus: 'completed', position: 0, direction: 'in', counterpartyAddress: walletA.address, counterpartyWalletId: walletA.id, asset: 'USDT', amountMode: 'fixed', amountMin: '2', amountMax: null, frozenAmountDisplay: '2', status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, gasFeeBaseUnits: '507000', error: null, createdAt: now, updatedAt: now },
+        { id: '77777777-7777-4777-8777-777777777777', jobId: '44444444-4444-4444-8444-444444444444', jobName: '外部付款', jobStatus: 'paused', position: 0, direction: 'out', counterpartyAddress: `0x${'3'.repeat(64)}`, counterpartyWalletId: null, asset: 'USDT', amountMode: 'fixed', amountMin: '0.5', amountMax: null, frozenAmountDisplay: '0.5', status: 'failed', txHash: null, gasFeeBaseUnits: null, error: 'APT 手续费不足', createdAt: now, updatedAt: now },
       ]
       const direction = url.searchParams.get('direction') ?? 'all'
       const items = direction === 'all' ? logs : logs.filter((item) => item.direction === direction)
@@ -27,13 +57,16 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/v1/wallets/groups/create') return route.fulfill({ json: walletGroup })
     if (path.endsWith('/accounts')) return route.fulfill({ json: { ...walletGroup, nextAccountIndex: 3 } })
     if (path === '/api/v1/jobs' && route.request().method() === 'POST') {
-      lastDraftSteps = route.request().postDataJSON().steps
+      const body = route.request().postDataJSON()
+      lastDraftSteps = body.steps
+      lastIntervalMinSeconds = body.intervalMinSeconds
+      lastIntervalMaxSeconds = body.intervalMaxSeconds
       return route.fulfill({ json: { id: '33333333-3333-4333-8333-333333333333' } })
     }
     if (path.endsWith('/check')) {
-      const frozenSteps = lastDraftSteps.map((step, position) => ({ ...step, position, frozenAmountBaseUnits: '1000000', frozenAmountDisplay: '1', waitAfterSeconds: position === 0 ? 0 : 5, status: 'pending', txHash: null, error: null }))
+      const frozenSteps = lastDraftSteps.map((step, position) => ({ ...step, position, frozenAmountBaseUnits: '1000000', frozenAmountDisplay: '1', waitAfterSeconds: position === lastDraftSteps.length - 1 || lastIntervalMaxSeconds === 0 ? 0 : 5.4, status: 'pending', txHash: null, error: null }))
       const summary = { sourceWalletCount: new Set(lastDraftSteps.map((step) => step.sourceWalletId)).size, stepCount: frozenSteps.length, aptBaseUnits: '0', usdtBaseUnits: String(frozenSteps.length * 1000000), maxStepCount: 0, estimatedGasBaseUnits: String(frozenSteps.length * 10), warnings: [] }
-      const job = { id: '33333333-3333-4333-8333-333333333333', name: '转账计划', status: 'previewed', gasPayerWalletId: null, intervalMinSeconds: 5, intervalMaxSeconds: 30, shuffle: false, confirmationPhrase: `执行 333 APTOS MAINNET ${frozenSteps.length} 笔`, createdAt: now, updatedAt: now, error: null, summary, steps: frozenSteps }
+      const job = { id: '33333333-3333-4333-8333-333333333333', name: '转账计划', status: 'previewed', gasPayerWalletId: null, intervalMinSeconds: lastIntervalMinSeconds, intervalMaxSeconds: lastIntervalMaxSeconds, shuffle: false, confirmationPhrase: `执行 333 APTOS MAINNET ${frozenSteps.length} 笔`, createdAt: now, updatedAt: now, error: null, summary, steps: frozenSteps }
       return route.fulfill({ json: { valid: true, job, summary, checks: frozenSteps.map((step, position) => ({ stepId: step.id, position, valid: true, error: null, estimatedGasBaseUnits: '10', gasWalletId: step.sourceWalletId, gasBalanceBaseUnits: '25000000' })) } })
     }
     return route.fulfill({ json: {} })
@@ -63,8 +96,9 @@ test('wallet accounts and transfer builder remain usable', async ({ page }, test
 
   await page.locator('.account-row').filter({ hasText: '账户 1' }).getByRole('button', { name: '转账' }).click()
   await expect(page.getByText('已选择 日常钱包 · 账户 1')).toBeVisible()
-  await expect(page.locator('.source-panel .selection-row').filter({ hasText: '账户 1' }).locator('input')).toBeChecked()
-  await page.getByLabel('外部 Aptos 地址').fill(walletA.address)
+  await expect(page.getByLabel('计划名称')).toHaveValue(/^\d{4}年\d{2}月\d{2}日 \d{2}时\d{2}分$/)
+  await expect(page.locator('.source-panel .selected-source').filter({ hasText: '账户 1' })).toBeVisible()
+  await addExternalTargets(page, walletA.address)
   await expect(page.getByRole('radio', { name: 'USDt' })).toBeChecked()
   await expect(page.getByRole('radio', { name: '随机范围' })).toBeChecked()
   await page.getByRole('button', { name: '进入转账预览' }).click()
@@ -74,10 +108,105 @@ test('wallet accounts and transfer builder remain usable', async ({ page }, test
   await page.screenshot({ path: `artifacts/preview-${testInfo.project.name}.png`, fullPage: true })
 })
 
+test('transfer interval can be disabled for continuous execution', async ({ page }) => {
+  let submitted: Record<string, unknown> | null = null
+  await page.route('**/api/v1/jobs', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    submitted = route.request().postDataJSON()
+    return route.fallback()
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /日常钱包/ }).click()
+  await page.locator('.account-row').filter({ hasText: '账户 1' }).getByRole('button', { name: '转账' }).click()
+  await page.getByRole('checkbox', { name: '启用转账间隔' }).uncheck()
+  await expect(page.getByText('不额外等待')).toBeVisible()
+  await addExternalTargets(page, `${walletA.address}\n0x${'4'.repeat(64)}`)
+  await page.getByRole('button', { name: '进入转账预览' }).click()
+
+  expect(submitted).toMatchObject({ intervalMinSeconds: 0, intervalMaxSeconds: 0 })
+  const preview = page.getByRole('dialog', { name: '转账预览' })
+  await expect(preview.locator('.preview-step-wait').first()).toContainText('连续执行，无额外等待')
+})
+
+test('starting a transfer focuses its current execution record', async ({ page }) => {
+  const oldJob = {
+    id: '81111111-1111-4111-8111-111111111111', name: '上一条已完成计划', status: 'completed', gasPayerWalletId: null,
+    intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false, confirmationPhrase: null, createdAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: now, error: null, summary: null,
+    steps: [{ id: '82222222-2222-4222-8222-222222222222', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null, position: 0, frozenAmountBaseUnits: '1000000', frozenAmountDisplay: '1', waitAfterSeconds: 0, status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, gasFeeBaseUnits: '10', error: null, updatedAt: now }],
+  }
+  const startedId = '33333333-3333-4333-8333-333333333333'
+  let startedJob: typeof oldJob | null = null
+  await page.route('**/api/v1/status', async (route) => route.fulfill({ json: { initialized: true, unlocked: true, executionEnabled: true, network: 'mainnet', csrfToken: 'test' } }))
+  await page.route('**/api/v1/jobs', async (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [oldJob] })
+    return route.fallback()
+  })
+  await page.route(`**/api/v1/jobs/${startedId}`, async (route) => route.fulfill({ json: startedJob ?? oldJob }))
+  await page.route(`**/api/v1/jobs/${startedId}/confirm`, async (route) => {
+    startedJob = { ...oldJob, id: startedId, name: '当前执行计划', status: 'running', createdAt: now, steps: oldJob.steps.map((step) => ({ ...step, id: '83333333-3333-4333-8333-333333333333', status: 'preparing', txHash: null, gasFeeBaseUnits: null })) }
+    return route.fulfill({ json: startedJob })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: /日常钱包/ }).click()
+  await page.locator('.account-row').filter({ hasText: '账户 1' }).getByRole('button', { name: '转账' }).click()
+  await addExternalTargets(page, walletA.address)
+  await page.getByRole('button', { name: '进入转账预览' }).click()
+  const preview = page.getByRole('dialog', { name: '转账预览' })
+  const phrase = await preview.locator('.phrase').textContent()
+  await preview.locator('label').filter({ hasText: '输入完整确认短语' }).locator('input').fill(phrase ?? '')
+  await preview.getByRole('button', { name: '发送并执行' }).click()
+
+  await expect(page.getByRole('heading', { name: '执行记录' })).toBeVisible()
+  await expect(page.locator('.job-item.selected')).toContainText('当前执行计划')
+  await expect(page.locator('.job-detail').getByRole('heading', { name: '当前执行计划' })).toBeVisible()
+  await expect(page.getByText('上一条已完成计划')).toBeVisible()
+})
+
+test('address book entries can be managed and selected with aliases carried into preview', async ({ page }, testInfo) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '地址簿', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '地址簿' })).toBeVisible()
+  await expect(page.locator('.address-book-row').filter({ hasText: '交易所充值' })).toBeVisible()
+  const searchInput = page.getByLabel('搜索地址簿')
+  const searchIcon = page.locator('.address-book-toolbar .selection-search svg')
+  const [inputBox, iconBox, inputPaddingLeft] = await Promise.all([
+    searchInput.boundingBox(),
+    searchIcon.boundingBox(),
+    searchInput.evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingLeft)),
+  ])
+  expect(inputBox).not.toBeNull()
+  expect(iconBox).not.toBeNull()
+  expect(inputBox!.x + inputPaddingLeft - (iconBox!.x + iconBox!.width)).toBeGreaterThanOrEqual(6)
+
+  await page.getByRole('button', { name: '添加地址' }).click()
+  const addDialog = page.getByRole('dialog', { name: '添加常用地址' })
+  await addDialog.getByLabel('地址别名').fill('合作方收款')
+  await addDialog.getByLabel('地址簿 Aptos 地址').fill(`0x${'4'.repeat(64)}`)
+  await addDialog.getByRole('button', { name: '添加地址' }).click()
+  await expect(page.locator('.address-book-row').filter({ hasText: '合作方收款' })).toBeVisible()
+  await page.screenshot({ path: `artifacts/address-book-${testInfo.project.name}.png`, fullPage: true })
+
+  await page.getByRole('button', { name: '钱包', exact: true }).click()
+  await page.getByRole('button', { name: /日常钱包/ }).click()
+  await page.locator('.account-row').filter({ hasText: '账户 1' }).getByRole('button', { name: '转账' }).click()
+  await page.locator('.target-panel').getByRole('button', { name: '地址簿', exact: true }).click()
+  const picker = page.getByRole('dialog', { name: '从地址簿选择' })
+  await picker.getByText('交易所充值', { exact: true }).click()
+  await picker.getByRole('button', { name: /确定选择 1 个/ }).click()
+  const selected = page.locator('.selected-target').filter({ hasText: '交易所充值' })
+  await expect(selected).toContainText('地址簿')
+  await page.getByRole('button', { name: '进入转账预览' }).click()
+  const preview = page.getByRole('dialog', { name: '转账预览' })
+  await expect(preview.locator('.preview-step-target')).toContainText('交易所充值')
+  await expect(preview.locator('.preview-step-target')).toContainText('地址簿')
+  await page.screenshot({ path: `artifacts/address-book-preview-${testInfo.project.name}.png`, fullPage: true })
+})
+
 test('running transfer shows the current step and a live wait countdown', async ({ page }, testInfo) => {
   const waitStartedAt = new Date(Date.now() - 2_000).toISOString()
   const steps = [
-    { id: '81111111-1111-4111-8111-111111111111', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null, position: 0, frozenAmountBaseUnits: '1000000', frozenAmountDisplay: '1', waitAfterSeconds: 10, status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, error: null, updatedAt: now },
+    { id: '81111111-1111-4111-8111-111111111111', sourceWalletId: walletA.id, targetAddress: addressBookEntry.address, targetWalletId: null, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null, position: 0, frozenAmountBaseUnits: '1000000', frozenAmountDisplay: '1', waitAfterSeconds: 10, status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, gasFeeBaseUnits: '507000', error: null, updatedAt: now },
     { id: '82222222-2222-4222-8222-222222222222', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1.2', amountMax: null, position: 1, frozenAmountBaseUnits: '1200000', frozenAmountDisplay: '1.2', waitAfterSeconds: 10, status: 'waiting', txHash: null, error: null, updatedAt: waitStartedAt },
     { id: '83333333-3333-4333-8333-333333333333', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1.5', amountMax: null, position: 2, frozenAmountBaseUnits: '1500000', frozenAmountDisplay: '1.5', waitAfterSeconds: 0, status: 'pending', txHash: null, error: null, updatedAt: now },
   ]
@@ -86,9 +215,15 @@ test('running transfer shows the current step and a live wait countdown', async 
     if (route.request().method() === 'GET') return route.fulfill({ json: [job] })
     return route.fallback()
   })
+  await page.route(`**/api/v1/jobs/${job.id}`, async (route) => route.fulfill({ json: job }))
 
   await page.goto('/')
-  await page.getByRole('button', { name: /执行记录/ }).click()
+  await expect(page.getByRole('heading', { name: '执行记录' })).toBeVisible()
+  await expect(page.locator('.job-detail').getByText('实际手续费 0.0051 APT')).toBeVisible()
+  await expect(page.locator('.job-detail tbody tr').first().locator('.gas-fee')).toHaveText('0.0051 APT')
+  await expect(page.locator('.job-detail tbody tr').first()).toContainText('交易所充值')
+  await expect(page.locator('.job-detail tbody tr').first()).toContainText('地址簿')
+  await expect(page.locator('.job-step-waiting .gas-fee')).toHaveText('-')
   const activity = page.locator('.job-activity')
   await expect(activity).toContainText('正在等待第 2 笔')
   await expect(page.locator('.job-step-waiting')).toHaveCount(1)
@@ -120,7 +255,7 @@ test('insufficient APT marks the transfer row and blocks confirmation', async ({
   await page.goto('/')
   await page.getByRole('button', { name: /日常钱包/ }).click()
   await page.locator('.account-row').filter({ hasText: '账户 1' }).getByRole('button', { name: '转账' }).click()
-  await page.getByLabel('外部 Aptos 地址').fill(walletA.address)
+  await addExternalTargets(page, walletA.address)
   await page.getByRole('button', { name: '进入转账预览' }).click()
   const preview = page.getByRole('dialog', { name: '转账预览' })
   await expect(preview).toBeVisible()
@@ -139,15 +274,20 @@ test('multi-source transfers pair equal target counts one-to-one in display orde
   })
   await page.goto('/')
   await page.getByRole('button', { name: '转账计划' }).click()
-  await page.locator('.source-panel .selection-row').filter({ hasText: '资金账户' }).locator('input').check()
-  await page.locator('.source-panel .selection-row').filter({ hasText: '账户 1' }).locator('input').check()
+  await expect(page.locator('.source-panel .selection-row')).toHaveCount(0)
+  await page.getByRole('button', { name: '添加转出账户' }).click()
+  const sourcePicker = page.getByRole('dialog', { name: '选择转出账户' })
+  await sourcePicker.locator('.selection-row').filter({ hasText: '资金账户' }).locator('input').check()
+  await sourcePicker.locator('.selection-row').filter({ hasText: '账户 1' }).locator('input').check()
+  await sourcePicker.getByRole('button', { name: '确定选择 2 个' }).click()
+  await expect(page.locator('.source-panel .selected-source')).toHaveCount(2)
   const targetA = `0x${'3'.repeat(64)}`
   const targetB = `0x${'4'.repeat(64)}`
-  await page.getByLabel('外部 Aptos 地址').fill(`${targetA}\n${targetB}\n0x${'5'.repeat(64)}`)
+  await addExternalTargets(page, `${targetA}\n${targetB}\n0x${'5'.repeat(64)}`)
   await expect(page.getByText(/多对多转账必须一一对应/)).toBeVisible()
   await expect(page.getByRole('button', { name: '进入转账预览' })).toBeDisabled()
 
-  await page.getByLabel('外部 Aptos 地址').fill(`${targetA}\n${targetB}`)
+  await page.locator('.selected-target').last().getByRole('button').click()
   await expect(page.getByText('2 个转出账户 → 2 个收款地址')).toBeVisible()
   await expect(page.getByText('按顺序一一对应，共生成 2 笔转账')).toBeVisible()
   await expect(page.getByRole('region', { name: '一一配对预览' }).locator('.pairing-preview-row')).toHaveCount(2)
@@ -164,18 +304,21 @@ test('multi-source transfers pair equal target counts one-to-one in display orde
 test('wallet account selectors can collapse groups without losing selection', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: '转账计划' }).click()
-  const sourcePanel = page.locator('.source-panel')
-  const account = sourcePanel.locator('.selection-row').filter({ hasText: '账户 1' })
+  await page.getByRole('button', { name: '添加转出账户' }).click()
+  const sourcePicker = page.getByRole('dialog', { name: '选择转出账户' })
+  const account = sourcePicker.locator('.selection-row').filter({ hasText: '账户 1' })
   await expect(account).toBeVisible()
   await account.locator('input').check()
 
-  await sourcePanel.getByRole('button', { name: '折叠 日常钱包' }).click()
+  await sourcePicker.getByRole('button', { name: '折叠 日常钱包' }).click()
   await expect(account).toBeHidden()
-  await expect(sourcePanel.getByText('1 / 1 已选')).toBeVisible()
+  await expect(sourcePicker.getByText('1 / 1 已选')).toBeVisible()
 
-  await sourcePanel.getByRole('button', { name: '展开 日常钱包' }).click()
+  await sourcePicker.getByRole('button', { name: '展开 日常钱包' }).click()
   await expect(account).toBeVisible()
   await expect(account.locator('input')).toBeChecked()
+  await sourcePicker.getByRole('button', { name: '确定选择 1 个' }).click()
+  await expect(page.locator('.source-panel .selected-source').filter({ hasText: '账户 1' })).toBeVisible()
 })
 
 test('refresh all updates accounts concurrently and highlights changed balances', async ({ page }, testInfo) => {
@@ -203,11 +346,23 @@ test('refresh all updates accounts concurrently and highlights changed balances'
   await page.screenshot({ path: `artifacts/wallet-refreshed-${testInfo.project.name}.png`, fullPage: true })
 })
 
+test('automatic balance refresh can be switched off without disabling manual refresh', async ({ page }) => {
+  await page.goto('/')
+  const toggle = page.getByRole('checkbox', { name: '自动刷新' })
+  await expect(toggle).toBeChecked()
+  await toggle.uncheck()
+  await expect(toggle).not.toBeChecked()
+  await expect(page.getByText('自动刷新已关闭')).toBeVisible()
+  await expect(page.getByRole('button', { name: '刷新全部余额' })).toBeEnabled()
+  await toggle.check()
+  await expect(toggle).toBeChecked()
+})
+
 test('wallet menu refreshes only that wallet and highlights its changed accounts', async ({ page }, testInfo) => {
-  await page.route(`**/api/v1/wallets/groups/${walletGroup.id}/refresh`, async (route) => {
+  await page.route(`**/api/v1/wallets/${walletB.id}/refresh`, async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 250))
     const updatedWallet = { ...walletB, balances: walletB.balances.map((balance) => balance.asset === 'APT' ? { ...balance, baseUnits: '75000000', display: '0.75' } : balance), balanceUpdatedAt: new Date().toISOString() }
-    return route.fulfill({ json: { ...walletGroup, accounts: [updatedWallet], balances: updatedWallet.balances, updatedAt: new Date().toISOString() } })
+    return route.fulfill({ json: updatedWallet })
   })
   await page.goto('/')
   await page.getByRole('button', { name: /日常钱包/ }).click()
@@ -236,7 +391,10 @@ test('each account exposes clear incoming and outgoing transfer logs', async ({ 
   await expect(dialog.locator('.account-history-row')).toHaveCount(2)
   await expect(dialog.getByText('内部归集')).toBeVisible()
   await expect(dialog.getByText('已确认')).toBeVisible()
+  await expect(dialog.getByText('实际手续费 0.0051 APT')).toBeVisible()
   await expect(dialog.getByText('APT 手续费不足')).toBeVisible()
+  await expect(dialog.locator('.account-history-row').filter({ hasText: '外部付款' })).toContainText('交易所充值')
+  await expect(dialog.locator('.account-history-row').filter({ hasText: '外部付款' })).toContainText('地址簿')
   await expect(dialog.locator('a[href*="/txn/"]')).toHaveCount(1)
   await dialog.getByRole('button', { name: /^转出/ }).click()
   await expect(dialog.locator('.account-history-row')).toHaveCount(1)

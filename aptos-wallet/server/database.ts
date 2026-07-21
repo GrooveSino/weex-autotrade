@@ -63,8 +63,8 @@ export function openDatabase(path: string): SqliteDatabase {
       name TEXT NOT NULL,
       status TEXT NOT NULL,
       gas_payer_wallet_id TEXT,
-      interval_min_seconds INTEGER NOT NULL,
-      interval_max_seconds INTEGER NOT NULL,
+      interval_min_seconds REAL NOT NULL,
+      interval_max_seconds REAL NOT NULL,
       shuffle INTEGER NOT NULL,
       confirmation_phrase TEXT,
       summary_json TEXT,
@@ -87,7 +87,7 @@ export function openDatabase(path: string): SqliteDatabase {
       amount_max TEXT,
       frozen_amount_base_units TEXT,
       frozen_amount_display TEXT,
-      wait_after_seconds INTEGER NOT NULL DEFAULT 0,
+      wait_after_seconds REAL NOT NULL DEFAULT 0,
       status TEXT NOT NULL,
       tx_hash TEXT,
       error TEXT,
@@ -106,11 +106,20 @@ export function openDatabase(path: string): SqliteDatabase {
       sequence_number TEXT,
       tx_hash TEXT,
       state TEXT NOT NULL,
+      gas_fee_base_units TEXT,
       error TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
       FOREIGN KEY(step_id) REFERENCES job_steps(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS address_book_entries (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      address TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS audit_events (
@@ -125,6 +134,7 @@ export function openDatabase(path: string): SqliteDatabase {
     CREATE INDEX IF NOT EXISTS idx_steps_source_updated ON job_steps(source_wallet_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_steps_target_updated ON job_steps(target_wallet_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_attempts_job ON transaction_attempts(job_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_address_book_label ON address_book_entries(label COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
   `)
 
@@ -134,6 +144,7 @@ export function openDatabase(path: string): SqliteDatabase {
   ensureColumn(db, 'wallets', 'archived_at', 'TEXT')
   ensureColumn(db, 'wallet_groups', 'next_account_index', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(db, 'wallet_groups', 'archived_at', 'TEXT')
+  ensureColumn(db, 'transaction_attempts', 'gas_fee_base_units', 'TEXT')
   db.exec("UPDATE wallet_groups SET derivation_profile = 'aptos_hd' WHERE derivation_profile = 'okx_aptos'")
   db.exec("UPDATE wallet_groups SET derivation_profile = 'legacy_custom' WHERE derivation_profile = 'custom'")
   db.exec(`

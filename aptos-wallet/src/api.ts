@@ -1,4 +1,4 @@
-import type { JobDraftInput, JobPreflight, TransferJob, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
+import type { AddressBookEntry, JobDraftInput, JobPreflight, TransferJob, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
 
 let csrfToken = ''
 const PRODUCTION_WALLET_URL = 'http://127.0.0.1:48271'
@@ -50,13 +50,14 @@ export async function request<T>(path: string, init: RequestInit = {}, retriedAf
 
 export const post = <T>(path: string, body: unknown = {}) => request<T>(path, { method: 'POST', body: JSON.stringify(body) })
 export const put = <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) })
-export async function loadWorkspace(): Promise<{ wallets: WalletRecord[]; groups: WalletGroup[]; jobs: TransferJob[] }> {
-  const [wallets, groups, jobs] = await Promise.all([
+export async function loadWorkspace(): Promise<{ wallets: WalletRecord[]; groups: WalletGroup[]; jobs: TransferJob[]; addressBook: AddressBookEntry[] }> {
+  const [wallets, groups, jobs, addressBook] = await Promise.all([
     request<WalletRecord[]>('/api/v1/wallets'),
     request<WalletGroup[]>('/api/v1/wallets/groups'),
     request<TransferJob[]>('/api/v1/jobs'),
+    request<AddressBookEntry[]>('/api/v1/address-book'),
   ])
-  return { wallets, groups, jobs }
+  return { wallets, groups, jobs, addressBook }
 }
 
 export async function saveAndPreviewJob(draft: JobDraftInput, id?: string): Promise<JobPreflight> {
@@ -77,7 +78,7 @@ export async function download(path: string, filename: string): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-export function subscribe(onSnapshot: (value: { wallets: WalletRecord[]; groups: WalletGroup[]; jobs: TransferJob[] }) => void): () => void {
+export function subscribe(onSnapshot: (value: { wallets: WalletRecord[]; groups: WalletGroup[]; jobs: TransferJob[]; addressBook: AddressBookEntry[] }) => void): () => void {
   const source = new EventSource('/api/v1/events')
   source.addEventListener('snapshot', (event) => onSnapshot(JSON.parse((event as MessageEvent).data)))
   source.addEventListener('vault-locked', () => window.location.reload())

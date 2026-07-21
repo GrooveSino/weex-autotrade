@@ -1,18 +1,25 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
-  Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleDollarSign, Clock3, Copy, Download, Ellipsis,
+  Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, BookUser, Check, ChevronRight, CircleDollarSign, Clock3, Copy, Download, Ellipsis,
   Eye, FileClock, KeyRound, Layers3, Lock, Pencil, Plus, QrCode, RefreshCw, RotateCcw, Search, Send,
-  ShieldAlert, Shuffle, Upload, WalletCards, X,
+  ShieldAlert, Shuffle, Trash2, Upload, WalletCards, X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import type { AccountTransferLog, AccountTransferLogPage, AmountMode, AssetId, JobDraftInput, JobPreflight, MnemonicRestorePreview, TransferJob, TransferStepDraft, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
-import { formatAmount, hasAtMostDecimals } from '../shared/amounts'
+import type { AccountTransferLog, AccountTransferLogPage, AddressBookEntry, AmountMode, AssetId, JobDraftInput, JobPreflight, MnemonicRestorePreview, TransferJob, TransferStepDraft, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
+import { formatAmount, formatAmountWithMaxDecimals, hasAtMostDecimals } from '../shared/amounts'
 import { download, getStatus, loadWorkspace, post, request, saveAndPreviewJob, subscribe } from './api'
 import { createMnemonic, parseAccountIndexes, pickConfirmationIndexes } from './mnemonic'
 import { requestEncryptedSecret } from './secret-transport'
 import { pairTransferEndpoints } from './transfer-pairing'
 
-type View = 'wallets' | 'transfer' | 'jobs'
+const AUTO_REFRESH_STORAGE_KEY = 'aptos-wallet.auto-refresh'
+
+function defaultTransferPlanName(date = new Date()) {
+  const pad = (value: number) => value.toString().padStart(2, '0')
+  return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}时${pad(date.getMinutes())}分`
+}
+
+type View = 'wallets' | 'addressBook' | 'transfer' | 'jobs'
 type Modal = 'create' | 'restore' | 'private' | 'confirm' | 'secret' | 'password' | 'accounts' | 'archiveGroup' | 'secretAuth' | 'archived' | 'receive' | 'accountDetails' | 'accountAlias' | 'accountHistory' | null
 type SecretTarget = { kind: 'mnemonic'; group: WalletGroup } | { kind: 'privateKey'; wallet: WalletRecord }
 const statusLabels: Record<string, string> = {
@@ -27,6 +34,7 @@ export function App() {
   const [wallets, setWallets] = useState<WalletRecord[]>([])
   const [groups, setGroups] = useState<WalletGroup[]>([])
   const [jobs, setJobs] = useState<TransferJob[]>([])
+  const [addressBook, setAddressBook] = useState<AddressBookEntry[]>([])
   const [view, setView] = useState<View>('wallets')
   const [modal, setModal] = useState<Modal>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -39,7 +47,9 @@ export function App() {
   const [selectedWallet, setSelectedWallet] = useState<WalletRecord | null>(null)
   const [secretTarget, setSecretTarget] = useState<SecretTarget | null>(null)
   const [transferSourceWalletId, setTransferSourceWalletId] = useState<string | null>(null)
+  const [focusedJobId, setFocusedJobId] = useState<string | null>(null)
   const previousJobStatuses = useRef(new Map<string, string>())
+  const initialWorkspaceLoaded = useRef(false)
 
   useEffect(() => {
     const closeActionMenus = (event?: Event) => {
@@ -63,40 +73,68 @@ export function App() {
     setWallets(snapshot.wallets)
     setGroups(snapshot.groups)
     setJobs(snapshot.jobs)
+    setAddressBook(snapshot.addressBook)
+    return snapshot
   }
   const applyWalletUpdate = (updated: WalletRecord) => {
     setWallets((current) => current.map((wallet) => wallet.id === updated.id ? updated : wallet))
     setGroups((current) => current.map((group) => group.id === updated.groupId
-      ? { ...group, accounts: group.accounts.map((wallet) => wallet.id === updated.id ? updated : wallet) }
+      ? (() => {
+          const accounts = group.accounts.map((wallet) => wallet.id === updated.id ? updated : wallet)
+          const balances = group.balances.map((balance) => {
+            const total = accounts.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((item) => item.asset === balance.asset)?.baseUnits ?? '0'), 0n)
+            return { ...balance, baseUnits: total.toString(), display: formatAmount(total, balance.asset) }
+          })
+          return { ...group, accounts, balances }
+        })()
       : group))
   }
-  const applyGroupUpdate = (updated: WalletGroup) => {
-    setGroups((current) => current.map((group) => group.id === updated.id ? updated : group))
-    const accounts = new Map(updated.accounts.map((wallet) => [wallet.id, wallet]))
-    setWallets((current) => current.map((wallet) => accounts.get(wallet.id) ?? wallet))
-  }
-  const run = async (action: () => Promise<void>, success?: string) => {
-    setBusy(true)
+  const inspectJob = useCallback(async (id: string) => {
+    const updated = await request<TransferJob>(`/api/v1/jobs/${id}`)
+    setJobs((current) => current.map((job) => job.id === id ? updated : job))
+  }, [])
+  const handleFocusedJob = useCallback((id: string) => {
+    setFocusedJobId((current) => current === id ? null : current)
+  }, [])
+  const run = async (action: () => Promise<void>, success?: string, showGlobalBusy = true) => {
+    if (showGlobalBusy) setBusy(true)
     try {
       await action()
       if (success) setToast(success)
     } catch (error) {
       setToast(error instanceof Error ? error.message : '操作失败')
     } finally {
-      setBusy(false)
+      if (showGlobalBusy) setBusy(false)
     }
   }
 
   useEffect(() => { void refreshStatus().catch((error) => setToast(error.message)) }, [])
   useEffect(() => {
     if (!status?.unlocked) return
-    void reload()
-    return subscribe(({ wallets: nextWallets, groups: nextGroups, jobs: nextJobs }) => {
-      setWallets(nextWallets)
-      setGroups(nextGroups)
-      setJobs(nextJobs)
-      setPreviewJob((current) => current ? nextJobs.find((job) => job.id === current.id) ?? current : null)
-    })
+    let active = true
+    let unsubscribe = () => {}
+    void (async () => {
+      try {
+        // Read SQLite first so reopening the page immediately shows the durable
+        // worker state, even before the first SSE frame arrives.
+        const snapshot = await reload()
+        if (!active) return
+        if (!initialWorkspaceLoaded.current) {
+          initialWorkspaceLoaded.current = true
+          if (snapshot.jobs.some((job) => job.status === 'running')) setView('jobs')
+        }
+        unsubscribe = subscribe(({ wallets: nextWallets, groups: nextGroups, jobs: nextJobs, addressBook: nextAddressBook }) => {
+          setWallets(nextWallets)
+          setGroups(nextGroups)
+          setJobs(nextJobs)
+          setAddressBook(nextAddressBook)
+          setPreviewJob((current) => current ? nextJobs.find((job) => job.id === current.id) ?? current : null)
+        })
+      } catch (error) {
+        if (active) setToast(error instanceof Error ? error.message : '无法加载本地钱包状态')
+      }
+    })()
+    return () => { active = false; unsubscribe() }
   }, [status?.unlocked])
   useEffect(() => {
     if (!toast) return
@@ -122,6 +160,7 @@ export function App() {
         <div className="brand"><div className="brand-mark"><Layers3 size={19} /></div><div><strong>Aptos 本地钱包</strong><span>钱包与批量转账</span></div></div>
         <nav>
           <NavButton active={view === 'wallets'} icon={<WalletCards size={18} />} label="钱包" onClick={() => setView('wallets')} />
+          <NavButton active={view === 'addressBook'} icon={<BookUser size={18} />} label="地址簿" onClick={() => setView('addressBook')} count={addressBook.length} />
           <NavButton active={view === 'transfer'} icon={<CircleDollarSign size={18} />} label="转账计划" onClick={() => setView('transfer')} />
           <NavButton active={view === 'jobs'} icon={<FileClock size={18} />} label="执行记录" onClick={() => setView('jobs')} count={jobs.filter((job) => ['running', 'paused', 'uncertain'].includes(job.status)).length} />
         </nav>
@@ -132,13 +171,13 @@ export function App() {
           </div>
           <button className="nav-button" title="锁定钱包" aria-label="锁定钱包" onClick={() => void run(async () => {
             await post('/api/v1/vault/lock')
-            setWallets([]); setGroups([]); setJobs([]); await refreshStatus()
+            setWallets([]); setGroups([]); setJobs([]); setAddressBook([]); await refreshStatus()
           })}><Lock size={18} />锁定钱包</button>
           <button className="nav-button" title="修改主密码" aria-label="修改主密码" onClick={() => setModal('password')}><KeyRound size={18} />修改主密码</button>
         </div>
       </aside>
       <main>
-        <div hidden={view !== 'wallets'}><WalletView wallets={wallets} groups={groups} setModal={setModal} run={run} reload={reload} onWalletUpdated={applyWalletUpdate} onGroupUpdated={applyGroupUpdate} onToast={setToast}
+        <div hidden={view !== 'wallets'}><WalletView wallets={wallets} groups={groups} setModal={setModal} run={run} reload={reload} onWalletUpdated={applyWalletUpdate} onToast={setToast}
           onAccounts={(group) => { setSelectedGroup(group); setModal('accounts') }}
           onArchive={(group) => { setSelectedGroup(group); setModal('archiveGroup') }}
           onRevealMnemonic={(group) => { setSecretTarget({ kind: 'mnemonic', group }); setModal('secretAuth') }}
@@ -147,13 +186,14 @@ export function App() {
           onAlias={(wallet) => { setSelectedWallet(wallet); setModal('accountAlias') }}
           onDetails={(wallet) => { setSelectedWallet(wallet); setModal('accountDetails') }}
           onTransfer={(wallet) => { setTransferSourceWalletId(wallet.id); setView('transfer') }} /></div>
-        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
-        {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} run={run} setPreviewJob={(job) => { setPreviewPreflight(null); setPreviewJob(job) }} setModal={setModal} />}
+        {view === 'addressBook' && <AddressBookView entries={addressBook} run={run} reload={reload} />}
+        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} addressBook={addressBook} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
+        {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} addressBook={addressBook} run={run} inspectJob={inspectJob} focusedJobId={focusedJobId} onFocusedJobHandled={handleFocusedJob} setPreviewJob={(job) => { setPreviewPreflight(null); setPreviewJob(job) }} setModal={setModal} />}
       </main>
       {modal === 'create' && <CreateWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'restore' && <RestoreWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'private' && <ImportPrivateKeyDialog close={() => setModal(null)} run={run} reload={reload} />}
-      {modal === 'confirm' && previewJob && <ConfirmDialog job={previewJob} wallets={wallets} initialPreflight={previewPreflight} executionEnabled={status.executionEnabled} close={() => { setModal(null); setPreviewPreflight(null) }} run={run} onChanged={(result) => { setPreviewPreflight(result); setPreviewJob(result.job) }} onStarted={() => { setModal(null); setPreviewPreflight(null); setView('jobs') }} />}
+      {modal === 'confirm' && previewJob && <ConfirmDialog job={previewJob} wallets={wallets} addressBook={addressBook} initialPreflight={previewPreflight} executionEnabled={status.executionEnabled} close={() => { setModal(null); setPreviewPreflight(null) }} run={run} onChanged={(result) => { setPreviewPreflight(result); setPreviewJob(result.job) }} onStarted={(started) => { setJobs((current) => [started, ...current.filter((job) => job.id !== started.id)]); setFocusedJobId(started.id); setModal(null); setPreviewPreflight(null); setView('jobs') }} />}
       {modal === 'secret' && <SecretDialog title={secretTitle} secret={secret} close={() => { setSecret(''); setModal(null) }} />}
       {modal === 'password' && <PasswordDialog close={() => setModal(null)} run={run} />}
       {modal === 'accounts' && selectedGroup && <AccountDialog group={selectedGroup} close={() => { setSelectedGroup(null); setModal(null) }} run={run} reload={reload} />}
@@ -161,7 +201,7 @@ export function App() {
       {modal === 'secretAuth' && secretTarget && <SecretAuthDialog target={secretTarget} close={() => { setSecretTarget(null); setModal(null) }} run={run} onSecret={(title, value) => { setSecretTitle(title); setSecret(value); setSecretTarget(null); setModal('secret') }} />}
       {modal === 'archived' && <ArchivedDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'receive' && selectedWallet && <ReceiveDialog wallet={selectedWallet} close={() => { setSelectedWallet(null); setModal(null) }} />}
-      {modal === 'accountHistory' && selectedWallet && <AccountHistoryDialog wallet={selectedWallet} wallets={wallets} close={() => { setSelectedWallet(null); setModal(null) }} />}
+      {modal === 'accountHistory' && selectedWallet && <AccountHistoryDialog wallet={selectedWallet} wallets={wallets} addressBook={addressBook} close={() => { setSelectedWallet(null); setModal(null) }} />}
       {modal === 'accountAlias' && selectedWallet && <AccountAliasDialog wallet={selectedWallet} close={() => { setSelectedWallet(null); setModal(null) }} run={run} onUpdated={applyWalletUpdate} />}
       {modal === 'accountDetails' && selectedWallet && <AccountDetailsDialog wallet={selectedWallet} close={() => { setSelectedWallet(null); setModal(null) }} run={run} reload={reload}
         onReceive={() => setModal('receive')}
@@ -207,15 +247,72 @@ function VaultGate({ status, onDone, setToast }: { status: VaultStatus; onDone: 
         <button className="primary wide" disabled={busy}>{busy ? '处理中...' : status.initialized ? '解锁' : '完成设置'}</button>
       </form>
       {!status.initialized && <label className="file-button"><Upload size={16} />从加密备份恢复<input type="file" accept="application/json" onChange={(event) => event.target.files?.[0] && void restore(event.target.files[0])} /></label>}
-      <div className="mainnet-notice"><ShieldAlert size={16} />固定连接 Aptos Mainnet，真实执行默认关闭。</div>
+      <div className="mainnet-notice"><ShieldAlert size={16} />固定连接 Aptos Mainnet，{status.executionEnabled ? '真实转账已开启。' : '真实转账已关闭。'}</div>
     </div>
   </div>
 }
 
-function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, onGroupUpdated, onToast, onAccounts, onArchive, onRevealMnemonic, onReceive, onHistory, onAlias, onTransfer, onDetails }: {
+function AddressBookView({ entries, run, reload }: {
+  entries: AddressBookEntry[]
+  run: DialogProps['run']
+  reload: () => Promise<void>
+}) {
+  const [search, setSearch] = useState('')
+  const [editing, setEditing] = useState<AddressBookEntry | 'new' | null>(null)
+  const [deleting, setDeleting] = useState<AddressBookEntry | null>(null)
+  const term = search.trim().toLowerCase()
+  const visible = entries.filter((entry) => !term || `${entry.label} ${entry.address}`.toLowerCase().includes(term))
+  return <>
+    <PageHeader title="地址簿" subtitle={`${entries.length} 个常用外部地址`} actions={<button className="primary" onClick={() => setEditing('new')}><Plus size={16} />添加地址</button>} />
+    <section className="address-book-page">
+      <div className="address-book-toolbar">
+        <label className="selection-search"><Search size={15} /><input aria-label="搜索地址簿" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索别名或 Aptos 地址" /></label>
+      </div>
+      {visible.length === 0 ? <Empty icon={<BookUser size={30} />} text={entries.length ? '没有匹配的地址。' : '还没有常用地址。'} /> : <div className="address-book-table">
+        {visible.map((entry) => <article className="address-book-row" key={entry.id}>
+          <div className="address-book-mark"><BookUser size={17} /></div>
+          <div className="address-book-identity"><strong>{entry.label}</strong><span>外部地址</span></div>
+          <div className="address-book-address"><code>{entry.address}</code><IconButton title={`复制 ${entry.label} 地址`} icon={<Copy size={14} />} onClick={() => void navigator.clipboard.writeText(entry.address)} /></div>
+          <span className="address-book-updated">更新于 {new Date(entry.updatedAt).toLocaleDateString()}</span>
+          <div className="address-book-actions"><IconButton title={`编辑 ${entry.label}`} icon={<Pencil size={15} />} onClick={() => setEditing(entry)} /><IconButton title={`删除 ${entry.label}`} icon={<Trash2 size={15} />} danger onClick={() => setDeleting(entry)} /></div>
+        </article>)}
+      </div>}
+    </section>
+    {editing && <AddressBookEntryDialog entry={editing === 'new' ? null : editing} close={() => setEditing(null)} run={run} reload={reload} />}
+    {deleting && <Dialog title="删除地址" close={() => setDeleting(null)}><div className="warning-box"><ShieldAlert size={16} />删除后，历史记录不再显示这个地址的别名，但不会影响任何链上交易。</div><div className="detail-list"><div><span>别名</span><strong>{deleting.label}</strong></div><div><span>地址</span><Address value={deleting.address} /></div></div><div className="dialog-actions"><button className="secondary" onClick={() => setDeleting(null)}>取消</button><button className="danger-button" onClick={() => void run(async () => {
+      await request(`/api/v1/address-book/${deleting.id}`, { method: 'DELETE' })
+      await reload()
+      setDeleting(null)
+    }, '地址已删除')}>删除地址</button></div></Dialog>}
+  </>
+}
+
+function AddressBookEntryDialog({ entry, close, run, reload }: {
+  entry: AddressBookEntry | null
+  close: () => void
+  run: DialogProps['run']
+  reload: () => Promise<void>
+}) {
+  const [label, setLabel] = useState(entry?.label ?? '')
+  const [address, setAddress] = useState(entry?.address ?? '')
+  return <Dialog title={entry ? '编辑常用地址' : '添加常用地址'} close={close}><form onSubmit={(event) => { event.preventDefault(); void run(async () => {
+    const body = { label: label.trim(), address: address.trim() }
+    if (entry) await request(`/api/v1/address-book/${entry.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+    else await post('/api/v1/address-book', body)
+    await reload()
+    close()
+  }, entry ? '地址已更新' : '地址已加入地址簿') }}>
+    <label>地址别名<input autoFocus maxLength={120} value={label} onChange={(event) => setLabel(event.target.value)} placeholder="例如：交易所充值、合作方收款" /></label>
+    <label>Aptos 地址<textarea aria-label="地址簿 Aptos 地址" value={address} onChange={(event) => setAddress(event.target.value)} placeholder="0x..." /></label>
+    <p className="form-hint">别名仅保存在本机，发送前仍会同时显示完整地址供你核对。</p>
+    <DialogActions close={close} submit={entry ? '保存修改' : '添加地址'} disabled={!label.trim() || !address.trim()} />
+  </form></Dialog>
+}
+
+function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, onToast, onAccounts, onArchive, onRevealMnemonic, onReceive, onHistory, onAlias, onTransfer, onDetails }: {
   wallets: WalletRecord[]; groups: WalletGroup[]; setModal: (value: Modal) => void
   run: (action: () => Promise<void>, success?: string) => Promise<void>; reload: () => Promise<void>
-  onWalletUpdated: (wallet: WalletRecord) => void; onGroupUpdated: (group: WalletGroup) => void; onToast: (message: string) => void
+  onWalletUpdated: (wallet: WalletRecord) => void; onToast: (message: string) => void
   onAccounts: (group: WalletGroup) => void; onArchive: (group: WalletGroup) => void
   onRevealMnemonic: (group: WalletGroup) => void; onReceive: (wallet: WalletRecord) => void; onHistory: (wallet: WalletRecord) => void
   onAlias: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void
@@ -225,6 +322,13 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
   const [changedWalletIds, setChangedWalletIds] = useState<Set<string>>(new Set())
   const [refreshingAll, setRefreshingAll] = useState(false)
   const [refreshingGroupIds, setRefreshingGroupIds] = useState<Set<string>>(new Set())
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(() => {
+    try {
+      return window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) !== 'false'
+    } catch {
+      return true
+    }
+  })
   const latestWalletsRef = useRef(wallets)
   const refreshingWalletIdsRef = useRef(new Set<string>())
   const refreshingAllRef = useRef(false)
@@ -233,25 +337,19 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
   const standalone = wallets.filter((wallet) => !wallet.groupId)
   const totalApt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'APT')?.baseUnits ?? '0'), 0n)
   const totalUsdt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'USDT')?.baseUnits ?? '0'), 0n)
-  const markChangedWallets = (before: WalletRecord[], after: WalletRecord[]) => {
-    const previous = new Map(before.map((wallet) => [wallet.id, wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')]))
-    const changed = after.filter((wallet) => previous.get(wallet.id) !== wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')).map((wallet) => wallet.id)
-    if (!changed.length) return
-    setChangedWalletIds((current) => new Set([...current, ...changed]))
-    window.setTimeout(() => setChangedWalletIds((current) => {
-      const next = new Set(current); changed.forEach((id) => next.delete(id)); return next
-    }), 1_800)
-  }
   const refreshWalletBatch = async (candidates: WalletRecord[]) => {
     const available = candidates.filter((wallet) => !refreshingWalletIdsRef.current.has(wallet.id))
     if (!available.length) return { refreshed: 0, failed: 0 }
+    // Reserve the complete batch immediately so background, global, and group refreshes
+    // cannot enqueue the same account twice. Only accounts that reach a worker are
+    // exposed as loading in the UI.
     available.forEach((wallet) => refreshingWalletIdsRef.current.add(wallet.id))
-    setRefreshingWalletIds((current) => new Set([...current, ...available.map((wallet) => wallet.id)]))
     let nextIndex = 0
     let failed = 0
     const worker = async () => {
       while (nextIndex < available.length) {
         const wallet = available[nextIndex++]
+        setRefreshingWalletIds((current) => new Set(current).add(wallet.id))
         const before = wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
         try {
           const updated = await post<WalletRecord>(`/api/v1/wallets/${wallet.id}/refresh`)
@@ -273,7 +371,7 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
         }
       }
     }
-    await Promise.all(Array.from({ length: Math.min(10, available.length) }, worker))
+    await Promise.all(Array.from({ length: Math.min(2, available.length) }, worker))
     return { refreshed: available.length, failed }
   }
   const refreshAll = async (source: 'manual' | 'background' = 'manual') => {
@@ -294,38 +392,40 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
     }
   }
   useEffect(() => {
-    if (!wallets.length) return
+    try { window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefreshEnabled)) } catch { /* storage may be unavailable */ }
+  }, [autoRefreshEnabled])
+  useEffect(() => {
+    if (!autoRefreshEnabled || !wallets.length) return
     const timer = window.setInterval(() => { void refreshAll('background') }, 30_000)
     return () => window.clearInterval(timer)
-  }, [wallets.length])
+  }, [autoRefreshEnabled, wallets.length])
   const refreshGroup = async (group: WalletGroup) => {
     if (refreshingGroupIds.has(group.id)) return
     const before = wallets.filter((wallet) => wallet.groupId === group.id)
-    const ids = before.map((wallet) => wallet.id)
-    if (ids.some((id) => refreshingWalletIdsRef.current.has(id))) {
+    if (before.some((wallet) => refreshingWalletIdsRef.current.has(wallet.id))) {
       onToast(`${group.label} 正在刷新中，请稍后再试`)
       return
     }
-    ids.forEach((id) => refreshingWalletIdsRef.current.add(id))
     setRefreshingGroupIds((current) => new Set(current).add(group.id))
-    setRefreshingWalletIds((current) => new Set([...current, ...ids]))
     try {
-      const updated = await post<WalletGroup>(`/api/v1/wallets/groups/${group.id}/refresh`)
-      onGroupUpdated(updated)
-      markChangedWallets(before, updated.accounts)
-      const failed = updated.accounts.filter((wallet) => wallet.balanceError).length
-      onToast(failed ? `${group.label} 刷新完成，${failed} 个账户失败` : `${group.label} 的余额已刷新`)
+      // Use the same per-account queue as global refresh. This keeps the visible
+      // loading state truthful and applies the same conservative concurrency cap.
+      const result = await refreshWalletBatch(before)
+      onToast(result.failed ? `${group.label} 刷新完成，${result.failed} 个账户失败` : `${group.label} 的余额已刷新`)
     } catch (error) {
       onToast(error instanceof Error ? error.message : '钱包余额刷新失败')
     } finally {
-      ids.forEach((id) => refreshingWalletIdsRef.current.delete(id))
       setRefreshingGroupIds((current) => { const next = new Set(current); next.delete(group.id); return next })
-      setRefreshingWalletIds((current) => { const next = new Set(current); ids.forEach((id) => next.delete(id)); return next })
     }
   }
   return <>
-      <PageHeader title="钱包" subtitle={`${wallets.length} 个账户 · Aptos 主网 · 每 30 秒自动刷新`} actions={<>
-      <button className="secondary" title="立即刷新全部余额；后台也会每 30 秒自动刷新" onClick={() => void refreshAll()} disabled={refreshingAll || !wallets.length}><RefreshCw className={refreshingAll ? 'spin' : ''} size={16} />{refreshingAll ? '正在刷新' : '刷新全部余额'}</button>
+      <PageHeader title="钱包" subtitle={`${wallets.length} 个账户 · Aptos 主网 · ${autoRefreshEnabled ? '每 30 秒自动刷新' : '自动刷新已关闭'}`} actions={<>
+      <label className="refresh-switch" title="控制后台每 30 秒自动刷新余额">
+        <input type="checkbox" checked={autoRefreshEnabled} onChange={(event) => setAutoRefreshEnabled(event.target.checked)} />
+        <span className="refresh-switch-track" aria-hidden="true"><span /></span>
+        <span>自动刷新</span>
+      </label>
+      <button className="secondary" title="立即刷新全部余额；不受自动刷新开关影响" onClick={() => void refreshAll()} disabled={refreshingAll || !wallets.length}><RefreshCw className={refreshingAll ? 'spin' : ''} size={16} />{refreshingAll ? '正在刷新' : '刷新全部余额'}</button>
       <button className="secondary" onClick={() => setModal('restore')}><Upload size={16} />恢复钱包</button>
       <button className="primary" onClick={() => setModal('create')}><Plus size={16} />创建钱包</button>
       <details className="action-menu"><summary aria-label="更多操作"><Ellipsis size={18} /></summary><div>
@@ -392,32 +492,31 @@ function AccountBalance({ label, value, loading = false }: { label: string; valu
   return <div className="account-balance" aria-live="polite"><span>{label}</span><strong>{loading ? <RefreshCw className="spin" size={16} aria-label={`${label} 余额刷新中`} /> : value}</strong></div>
 }
 
-function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWalletId }: {
-  wallets: WalletRecord[]; groups: WalletGroup[]; busy: boolean
+function TransferView({ wallets, groups, addressBook, busy, run, onPreview, initialSourceWalletId }: {
+  wallets: WalletRecord[]; groups: WalletGroup[]; addressBook: AddressBookEntry[]; busy: boolean
   run: (action: () => Promise<void>, success?: string) => Promise<void>; onPreview: (result: JobPreflight) => void
   initialSourceWalletId: string | null
 }) {
-  const [name, setName] = useState(`转账计划 ${new Date().toLocaleDateString()}`)
+  const [name, setName] = useState(() => defaultTransferPlanName())
   const [sourceWalletIds, setSourceWalletIds] = useState<string[]>(() => initialSourceWalletId ? [initialSourceWalletId] : [])
   const [internalTargetWalletIds, setInternalTargetWalletIds] = useState<string[]>([])
   const [externalTargets, setExternalTargets] = useState('')
-  const [sourceSearch, setSourceSearch] = useState('')
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false)
   const [targetPickerOpen, setTargetPickerOpen] = useState(false)
+  const [addressBookPickerOpen, setAddressBookPickerOpen] = useState(false)
+  const [externalTargetOpen, setExternalTargetOpen] = useState(false)
   const [asset, setAsset] = useState<AssetId>('USDT')
   const [amountMode, setAmountMode] = useState<AmountMode>('random')
   const [amountMin, setAmountMin] = useState('1')
   const [amountMax, setAmountMax] = useState('5')
   const [steps, setSteps] = useState<TransferStepDraft[]>([])
   const [gasPayerWalletId, setGasPayer] = useState<string | null>(null)
+  const [intervalEnabled, setIntervalEnabled] = useState(true)
   const [intervalMinSeconds, setIntervalMin] = useState(5)
   const [intervalMaxSeconds, setIntervalMax] = useState(30)
   const [preflight, setPreflight] = useState<JobPreflight | null>(null)
   const initialSource = wallets.find((wallet) => wallet.id === initialSourceWalletId)
   const invalidate = () => { setPreflight(null); setSteps([]) }
-  const toggle = (values: string[], id: string, setter: (next: string[]) => void) => {
-    invalidate()
-    setter(values.includes(id) ? values.filter((value) => value !== id) : [...values, id])
-  }
   const orderedWallets = useMemo(() => [
     ...groups.flatMap((group) => wallets.filter((wallet) => wallet.groupId === group.id)),
     ...wallets.filter((wallet) => !wallet.groupId),
@@ -425,19 +524,23 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
   const orderedSourceWalletIds = useMemo(() => orderedWallets.filter((wallet) => sourceWalletIds.includes(wallet.id)).map((wallet) => wallet.id), [orderedWallets, sourceWalletIds])
   const targets = useMemo(() => {
     const selected = orderedWallets.filter((wallet) => internalTargetWalletIds.includes(wallet.id))
-      .map((wallet) => ({ walletId: wallet.id, address: wallet.address, label: walletOptionLabel(wallet, groups) }))
+      .map((wallet) => ({ walletId: wallet.id, address: wallet.address, label: walletOptionLabel(wallet, groups), addressBookEntryId: null as string | null }))
     const typed = externalTargets.split(/[\n,]/).map((value) => value.trim()).filter(Boolean).map((address) => {
       const wallet = wallets.find((item) => item.address.toLowerCase() === address.toLowerCase())
-      return { walletId: wallet?.id ?? null, address: wallet?.address ?? address, label: wallet ? walletOptionLabel(wallet, groups) : '外部地址' }
+      const entry = addressBookEntryFor(address, addressBook)
+      return { walletId: wallet?.id ?? null, address: wallet?.address ?? entry?.address ?? address, label: wallet ? walletOptionLabel(wallet, groups) : entry?.label ?? '外部地址', addressBookEntryId: entry?.id ?? null }
     })
-    const unique = new Map<string, { walletId: string | null; address: string; label: string }>()
-    for (const target of [...selected, ...typed]) unique.set(target.address.toLowerCase(), target)
+    const unique = new Map<string, { walletId: string | null; address: string; label: string; addressBookEntryId: string | null }>()
+    for (const target of [...selected, ...typed]) unique.set(aptosAddressKey(target.address), target)
     return [...unique.values()]
-  }, [externalTargets, groups, internalTargetWalletIds, orderedWallets, wallets])
+  }, [addressBook, externalTargets, groups, internalTargetWalletIds, orderedWallets, wallets])
+  const selectedAddressBookIds = useMemo(() => targets.map((target) => target.addressBookEntryId).filter((id): id is string => Boolean(id)), [targets])
   const pairing = useMemo(() => pairTransferEndpoints(orderedSourceWalletIds, targets), [orderedSourceWalletIds, targets])
   const pairs = pairing.pairs
   const maxConflict = amountMode === 'max' && pairing.mode === 'one_to_many' && pairs.length > 1
-  const invalidInterval = intervalMinSeconds < 0 || intervalMaxSeconds < intervalMinSeconds
+  const invalidInterval = intervalEnabled && (!hasAtMostOneDecimalNumber(intervalMinSeconds) || !hasAtMostOneDecimalNumber(intervalMaxSeconds)
+    || intervalMinSeconds < 0 || intervalMaxSeconds < intervalMinSeconds || intervalMaxSeconds > 604800
+  )
   const randomPrecisionIssue = amountMode === 'random' && [amountMin, amountMax].some((value) => value.trim() && !hasAtMostDecimals(value, 2))
   const canPreview = pairs.length > 0 && pairs.length <= 1000 && !pairing.issue && !maxConflict && !invalidInterval && !randomPrecisionIssue && (amountMode === 'max' || Boolean(amountMin.trim())) && (amountMode !== 'random' || Boolean(amountMax.trim()))
   const preview = () => void run(async () => {
@@ -447,7 +550,7 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
       amountMax: amountMode === 'random' ? amountMax : null,
     }))
     setSteps(generated)
-    const draft: JobDraftInput = { name, steps: generated, gasPayerWalletId, intervalMinSeconds, intervalMaxSeconds, shuffle: false }
+    const draft: JobDraftInput = { name, steps: generated, gasPayerWalletId, intervalMinSeconds: intervalEnabled ? intervalMinSeconds : 0, intervalMaxSeconds: intervalEnabled ? intervalMaxSeconds : 0, shuffle: false }
     const result = await saveAndPreviewJob(draft)
     setPreflight(result)
     onPreview(result)
@@ -479,7 +582,7 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
       </div>
       <div className="global-settings-row secondary-settings">
         <label className="gas-field setting-card"><span className="setting-label">手续费账户</span><select value={gasPayerWalletId ?? ''} onChange={(event) => { invalidate(); setGasPayer(event.target.value || null) }}><option value="">由每个转出账户支付</option><WalletOptions wallets={wallets} groups={groups} /></select></label>
-        <div className="interval-field setting-card"><span className="setting-label">执行节奏</span><div className="interval-inputs"><label><span>最短间隔（秒）</span><input type="number" min="0" max="604800" value={intervalMinSeconds} onChange={(event) => { invalidate(); setIntervalMin(Number(event.target.value)) }} /></label><span className="interval-separator">至</span><label><span>最长间隔（秒）</span><input type="number" min={intervalMinSeconds} max="604800" value={intervalMaxSeconds} onChange={(event) => { invalidate(); setIntervalMax(Number(event.target.value)) }} /></label></div></div>
+        <div className={`interval-field setting-card ${intervalEnabled ? '' : 'is-disabled'}`}><div className="interval-field-head"><span className="setting-label">执行节奏</span><label className="interval-switch"><input type="checkbox" aria-label="启用转账间隔" checked={intervalEnabled} onChange={(event) => { invalidate(); setIntervalEnabled(event.target.checked) }} /><span className="interval-switch-track"><span /></span><em>{intervalEnabled ? '随机间隔' : '连续执行'}</em></label></div>{intervalEnabled ? <><div className="interval-inputs"><label><span>最短间隔（秒）</span><input type="number" min="0" max="604800" step="0.1" value={intervalMinSeconds} onChange={(event) => { invalidate(); setIntervalMin(Number(event.target.value)) }} /></label><span className="interval-separator">至</span><label><span>最长间隔（秒）</span><input type="number" min={intervalMinSeconds} max="604800" step="0.1" value={intervalMaxSeconds} onChange={(event) => { invalidate(); setIntervalMax(Number(event.target.value)) }} /></label></div><small className="field-hint">按 0.1 秒随机，打乱顺序后重新抽取</small></> : <div className="interval-off-state"><Clock3 size={17} /><div><strong>不额外等待</strong><span>上一笔确认后立即执行下一笔</span></div></div>}</div>
       </div>
     </section>
     {preflight && <div className={`preflight-summary ${preflight.valid ? 'valid' : 'invalid'}`}>
@@ -488,16 +591,16 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
     </div>}
     <section className="transfer-compose-grid">
       <div className="selection-panel source-panel">
-        <div className="selection-head"><div><span className="step-number">1</span><div><h2>转出账户</h2><p>已选 {sourceWalletIds.length} 个</p></div></div>{sourceWalletIds.length > 0 && <button className="text-button" onClick={() => { invalidate(); setSourceWalletIds([]) }}>清空</button>}</div>
-        <label className="selection-search"><Search size={15} /><input aria-label="搜索转出账户" value={sourceSearch} onChange={(event) => setSourceSearch(event.target.value)} placeholder="搜索账户或地址" /></label>
-        <WalletSelectionList wallets={wallets} groups={groups} selected={sourceWalletIds} search={sourceSearch} onToggle={(id) => toggle(sourceWalletIds, id, setSourceWalletIds)} onSelectGroup={(ids) => { invalidate(); setSourceWalletIds(ids.every((id) => sourceWalletIds.includes(id)) ? sourceWalletIds.filter((id) => !ids.includes(id)) : [...new Set([...sourceWalletIds, ...ids])]) }} />
+        <div className="selection-head"><div><span className="step-number">1</span><div><h2>转出账户</h2><p>已选 {sourceWalletIds.length} 个</p></div></div><div className="selection-head-actions">{sourceWalletIds.length > 0 && <button className="text-button" onClick={() => { invalidate(); setSourceWalletIds([]) }}>清空</button>}<IconButton title="添加转出账户" icon={<Plus size={17} />} onClick={() => setSourcePickerOpen(true)} /></div></div>
+        <div className="selected-targets selected-sources" aria-live="polite">
+          {orderedSourceWalletIds.length === 0 ? <div className="target-empty">尚未添加转出账户</div> : orderedSourceWalletIds.map((walletId) => { const wallet = wallets.find((item) => item.id === walletId)!; return <div className="selected-target selected-source" key={wallet.id}><div><strong>{walletOptionLabel(wallet, groups)}</strong><code>{short(wallet.address)}</code></div><div className="selected-source-meta"><span>{wallet.balances.find((balance) => balance.asset === 'USDT')?.display ?? '-'} USDt</span><span>{wallet.balances.find((balance) => balance.asset === 'APT')?.display ?? '-'} APT</span></div><IconButton title={`移除 ${walletOptionLabel(wallet, groups)}`} icon={<X size={15} />} onClick={() => { invalidate(); setSourceWalletIds((current) => current.filter((id) => id !== wallet.id)) }} /></div> })}
+        </div>
       </div>
       <div className="compose-arrow" aria-hidden="true"><ArrowRight size={20} /><span>{pairs.length} 笔</span></div>
       <div className="selection-panel target-panel">
-        <div className="selection-head"><div><span className="step-number">2</span><div><h2>收款地址</h2><p>已选 {targets.length} 个</p></div></div><button className="secondary small" onClick={() => setTargetPickerOpen(true)}><WalletCards size={14} />从我的账户选择</button></div>
-        <label className="target-entry">外部 Aptos 地址<textarea aria-label="外部 Aptos 地址" value={externalTargets} onChange={(event) => { invalidate(); setExternalTargets(event.target.value) }} placeholder="每行填写一个 0x 地址，也可用逗号分隔" /></label>
+        <div className="selection-head"><div><span className="step-number">2</span><div><h2>收款地址</h2><p>已选 {targets.length} 个</p></div></div><div className="selection-head-actions"><button className="secondary small" onClick={() => setTargetPickerOpen(true)}><WalletCards size={14} />从我的账户选择</button><button className="secondary small" onClick={() => setAddressBookPickerOpen(true)}><BookUser size={14} />地址簿</button><IconButton title="添加外部地址" icon={<Plus size={17} />} onClick={() => setExternalTargetOpen(true)} /></div></div>
         <div className="selected-targets" aria-live="polite">
-          {targets.length === 0 ? <div className="target-empty">尚未添加收款地址</div> : targets.map((target) => <div className="selected-target" key={target.address}><div><strong>{target.label}</strong><code>{short(target.address)}</code></div><IconButton title={`移除 ${target.label}`} icon={<X size={15} />} onClick={() => {
+          {targets.length === 0 ? <div className="target-empty">尚未添加收款地址</div> : targets.map((target) => <div className={`selected-target ${target.addressBookEntryId ? 'from-address-book' : ''}`} key={target.address}><div><strong>{target.label}</strong>{target.addressBookEntryId && <span className="address-book-chip"><BookUser size={11} />地址簿</span>}<code>{short(target.address)}</code></div><IconButton title={`移除 ${target.label}`} icon={<X size={15} />} onClick={() => {
             invalidate()
             if (target.walletId) setInternalTargetWalletIds((current) => current.filter((id) => id !== target.walletId))
             setExternalTargets((current) => current.split(/[\n,]/).map((value) => value.trim()).filter((value) => value && value.toLowerCase() !== target.address.toLowerCase()).join('\n'))
@@ -507,7 +610,7 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
     </section>
     {pairing.mode === 'one_to_one' && pairs.length > 1 && !pairing.issue && <section className="pairing-preview" aria-label="一一配对预览">
       <div className="pairing-preview-head"><strong>按顺序一一配对</strong><span>第 N 个转出账户对应第 N 个收款地址</span></div>
-      {pairs.slice(0, 10).map(({ sourceWalletId, target }, position) => <div className="pairing-preview-row" key={`${sourceWalletId}:${target.address}`}><span>{position + 1}</span><TransferParty wallet={wallets.find((wallet) => wallet.id === sourceWalletId)} address={wallets.find((wallet) => wallet.id === sourceWalletId)?.address ?? sourceWalletId} /><ArrowRight size={14} /><TransferParty wallet={target.walletId ? wallets.find((wallet) => wallet.id === target.walletId) : null} address={target.address} /></div>)}
+      {pairs.slice(0, 10).map(({ sourceWalletId, target }, position) => <div className="pairing-preview-row" key={`${sourceWalletId}:${target.address}`}><span>{position + 1}</span><TransferParty wallet={wallets.find((wallet) => wallet.id === sourceWalletId)} address={wallets.find((wallet) => wallet.id === sourceWalletId)?.address ?? sourceWalletId} /><ArrowRight size={14} /><TransferParty wallet={target.walletId ? wallets.find((wallet) => wallet.id === target.walletId) : null} address={target.address} addressBook={addressBook} /></div>)}
       {pairs.length > 10 && <div className="list-overflow-note">另有 {pairs.length - 10} 组配对，将继续按当前顺序处理。</div>}
     </section>}
     <section className="transfer-summary-band">
@@ -516,31 +619,58 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
       <button className="primary" onClick={preview} disabled={busy || !canPreview}><Eye size={16} />进入转账预览</button>
     </section>
     {(pairing.issue || maxConflict || pairs.length > 1000 || invalidInterval || randomPrecisionIssue) && <div className="error-banner"><ShieldAlert size={17} />{pairing.issue?.kind === 'count_mismatch' ? `多对多转账必须一一对应：当前有 ${sourceWalletIds.length} 个转出账户和 ${targets.length} 个收款地址，请调整为相同数量。` : pairing.issue?.kind === 'self_transfer' ? `第 ${pairing.issue.position + 1} 组的转出账户和收款账户相同，请调整对应顺序或收款地址。` : maxConflict ? '全部余额模式下，一个转出账户只能对应一个收款地址。' : pairs.length > 1000 ? '转账超过 1000 笔，请减少账户或地址。' : invalidInterval ? '最长间隔不能小于最短间隔。' : '随机金额最多保留 2 位小数，例如 1.25。'}</div>}
-    {preflight && <TransferCheckList steps={steps} checks={preflight.checks} wallets={wallets} />}
-    {targetPickerOpen && <AddressBookDialog wallets={wallets} groups={groups} selected={internalTargetWalletIds} setSelected={(ids) => { invalidate(); setInternalTargetWalletIds(ids) }} close={() => setTargetPickerOpen(false)} />}
+    {preflight && <TransferCheckList steps={steps} checks={preflight.checks} wallets={wallets} addressBook={addressBook} />}
+    {sourcePickerOpen && <AccountPickerDialog title="选择转出账户" searchLabel="搜索转出账户" wallets={wallets} groups={groups} selected={sourceWalletIds} setSelected={(ids) => { invalidate(); setSourceWalletIds(ids) }} close={() => setSourcePickerOpen(false)} />}
+    {targetPickerOpen && <AccountPickerDialog title="从我的账户选择" searchLabel="搜索收款账户" wallets={wallets} groups={groups} selected={internalTargetWalletIds} setSelected={(ids) => { invalidate(); setInternalTargetWalletIds(ids) }} close={() => setTargetPickerOpen(false)} />}
+    {addressBookPickerOpen && <AddressBookPickerDialog entries={addressBook} selected={selectedAddressBookIds} close={() => setAddressBookPickerOpen(false)} setSelected={(ids) => {
+      invalidate()
+      const knownKeys = new Set(addressBook.map((entry) => aptosAddressKey(entry.address)))
+      const manual = externalTargets.split(/[\n,]/).map((value) => value.trim()).filter((value) => value && !knownKeys.has(aptosAddressKey(value)))
+      const selectedAddresses = addressBook.filter((entry) => ids.includes(entry.id)).map((entry) => entry.address)
+      setExternalTargets([...manual, ...selectedAddresses].join('\n'))
+    }} />}
+    {externalTargetOpen && <ExternalTargetDialog close={() => setExternalTargetOpen(false)} onAdd={(value) => {
+      invalidate()
+      setExternalTargets((current) => [current.trim(), value.trim()].filter(Boolean).join('\n'))
+      setExternalTargetOpen(false)
+    }} />}
   </>
 }
 
-function JobsView({ jobs, wallets, run, setPreviewJob, setModal }: {
-  jobs: TransferJob[]; wallets: WalletRecord[]; run: (action: () => Promise<void>, success?: string) => Promise<void>
+function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, onFocusedJobHandled, setPreviewJob, setModal }: {
+  jobs: TransferJob[]; wallets: WalletRecord[]; addressBook: AddressBookEntry[]; run: (action: () => Promise<void>, success?: string) => Promise<void>
+  inspectJob: (id: string) => Promise<void>; focusedJobId: string | null; onFocusedJobHandled: (id: string) => void
   setPreviewJob: (job: TransferJob) => void; setModal: (value: Modal) => void
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(jobs[0]?.id ?? null)
   const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0]
   const [clock, setClock] = useState(() => Date.now())
   useEffect(() => {
+    if (!focusedJobId || !jobs.some((job) => job.id === focusedJobId)) return
+    setSelectedId(focusedJobId)
+    onFocusedJobHandled(focusedJobId)
+  }, [focusedJobId, jobs, onFocusedJobHandled])
+  useEffect(() => {
     if (selected?.status !== 'running') return
     const timer = window.setInterval(() => setClock(Date.now()), 250)
     return () => window.clearInterval(timer)
   }, [selected?.id, selected?.status])
+  useEffect(() => {
+    if (!selected?.id) return
+    // Opening a record opportunistically fills legacy gas fees from its known
+    // transaction hashes. Failures stay silent so history remains available.
+    void inspectJob(selected.id).catch(() => undefined)
+  }, [inspectJob, selected?.id])
   const waitingStep = selected?.steps.find((step) => step.status === 'waiting')
   const waitingPrevious = waitingStep && selected ? selected.steps.find((step) => step.position === waitingStep.position - 1) : undefined
   const waitingTotalSeconds = waitingPrevious?.waitAfterSeconds ?? 0
   const waitingStartedAt = waitingStep?.updatedAt ? Date.parse(waitingStep.updatedAt) : Number.NaN
   const waitingElapsedSeconds = Number.isFinite(waitingStartedAt) ? Math.max(0, (clock - waitingStartedAt) / 1000) : 0
-  const waitingRemainingSeconds = waitingStep ? Math.max(0, Math.ceil(waitingTotalSeconds - waitingElapsedSeconds)) : 0
+  const waitingRemainingSeconds = waitingStep ? Math.max(0, Math.ceil((waitingTotalSeconds - waitingElapsedSeconds) * 10) / 10) : 0
   const activeStep = selected?.steps.find((step) => step.status === 'preparing' || step.status === 'submitting')
   const confirmedCount = selected?.steps.filter((step) => step.status === 'confirmed').length ?? 0
+  const actualGasFeeBaseUnits = selected?.steps.reduce((total, step) => total + BigInt(step.gasFeeBaseUnits ?? '0'), 0n) ?? 0n
+  const hasActualGasFee = selected?.steps.some((step) => step.gasFeeBaseUnits !== null && step.gasFeeBaseUnits !== undefined) ?? false
   const activityText = selected?.status !== 'running' ? null
     : waitingStep ? `正在等待第 ${waitingStep.position + 1} 笔`
       : activeStep ? `${activeStep.status === 'submitting' ? '正在提交' : '正在准备'}第 ${activeStep.position + 1} 笔`
@@ -560,14 +690,14 @@ function JobsView({ jobs, wallets, run, setPreviewJob, setModal }: {
       </div></div>
       {selected.error && <div className="error-banner"><ShieldAlert size={17} />{selected.error}</div>}
       <div className="progress-line"><span style={{ width: `${selected.steps.length ? selected.steps.filter((step) => step.status === 'confirmed').length / selected.steps.length * 100 : 0}%` }} /></div>
-      <div className="detail-meta"><span>{confirmedCount}/{selected.steps.length} 笔已确认</span><span>间隔 {selected.intervalMinSeconds}-{selected.intervalMaxSeconds} 秒</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
+      <div className="detail-meta"><span>{confirmedCount}/{selected.steps.length} 笔已确认</span><span>实际手续费 {hasActualGasFee ? formatGasFee(actualGasFeeBaseUnits.toString()) : '-'}</span><span>{selected.intervalMaxSeconds > 0 ? `间隔 ${formatSeconds(selected.intervalMinSeconds)}-${formatSeconds(selected.intervalMaxSeconds)} 秒` : '连续执行'}</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
       {activityText && <div className={`job-activity ${waitingStep ? 'is-waiting' : 'is-active'}`} aria-live="polite">
         <div className="job-activity-copy"><span className="job-activity-dot" /><div><strong>{activityText}</strong><span>{waitingStep ? `第 ${waitingStep.position} 笔已完成，下一笔将在倒计时结束后开始` : `已完成 ${confirmedCount} / ${selected.steps.length} 笔`}</span></div></div>
-        {waitingStep && <div className="job-countdown"><strong>{waitingRemainingSeconds}</strong><span>秒</span></div>}
+        {waitingStep && <div className="job-countdown"><strong>{formatSeconds(waitingRemainingSeconds)}</strong><span>秒</span></div>}
       </div>}
-      <div className="table-scroll"><table><thead><tr><th>#</th><th>来源</th><th>目标</th><th>资产</th><th>金额</th><th>等待</th><th>状态</th><th>交易</th></tr></thead><tbody>{selected.steps.map((step) => <tr className={step.id === waitingStep?.id ? 'job-step-waiting' : step.id === activeStep?.id ? 'job-step-active' : ''} key={step.id}>
-        <td>{step.position + 1}</td><td><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></td><td><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></td><td>{step.asset === 'USDT' ? 'USDt' : 'APT'}</td>
-        <td className="amount">{step.amountMode === 'max' ? `全额${step.frozenAmountDisplay ? ` (~${step.frozenAmountDisplay})` : ''}` : step.frozenAmountDisplay}</td><td>{step.waitAfterSeconds ? `${step.waitAfterSeconds}s` : '-'}</td><td>{step.id === waitingStep?.id ? <span className="status status-waiting status-countdown"><Clock3 size={12} />等待 {waitingRemainingSeconds}s</span> : <Status value={step.status} />}</td>
+      <div className="table-scroll"><table><thead><tr><th>#</th><th>来源</th><th>目标</th><th>资产</th><th>金额</th><th>手续费</th><th>等待</th><th>状态</th><th>交易</th></tr></thead><tbody>{selected.steps.map((step) => <tr className={step.id === waitingStep?.id ? 'job-step-waiting' : step.id === activeStep?.id ? 'job-step-active' : ''} key={step.id}>
+        <td>{step.position + 1}</td><td><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></td><td><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} addressBook={addressBook} /></td><td>{step.asset === 'USDT' ? 'USDt' : 'APT'}</td>
+        <td className="amount">{step.amountMode === 'max' ? `全额${step.frozenAmountDisplay ? ` (~${step.frozenAmountDisplay})` : ''}` : step.frozenAmountDisplay}</td><td className="gas-fee">{formatGasFee(step.gasFeeBaseUnits)}</td><td>{step.waitAfterSeconds ? `${formatSeconds(step.waitAfterSeconds)}s` : '-'}</td><td>{step.id === waitingStep?.id ? <span className="status status-waiting status-countdown"><Clock3 size={12} />等待 {formatSeconds(waitingRemainingSeconds)}s</span> : <Status value={step.status} />}</td>
         <td>{step.txHash ? <a className="tx-link" href={`https://explorer.aptoslabs.com/txn/${step.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(step.txHash)}</a> : step.error ? <span className="row-error">{step.error}</span> : '-'}</td>
       </tr>)}</tbody></table></div>
     </section>}</div>
@@ -779,7 +909,7 @@ function AccountAliasDialog({ wallet, close, run, onUpdated }: {
   </form></Dialog>
 }
 
-function AccountHistoryDialog({ wallet, wallets, close }: { wallet: WalletRecord; wallets: WalletRecord[]; close: () => void }) {
+function AccountHistoryDialog({ wallet, wallets, addressBook, close }: { wallet: WalletRecord; wallets: WalletRecord[]; addressBook: AddressBookEntry[]; close: () => void }) {
   const pageSize = 50
   const [direction, setDirection] = useState<'all' | 'in' | 'out'>('all')
   const [page, setPage] = useState(0)
@@ -811,18 +941,19 @@ function AccountHistoryDialog({ wallet, wallets, close }: { wallet: WalletRecord
     </div>
     {error && <div className="error-banner"><ShieldAlert size={17} />{error}</div>}
     {loading && !result ? <div className="history-loading"><RefreshCw className="spin" size={20} />正在读取日志...</div> : result?.items.length === 0 ? <Empty icon={<FileClock size={28} />} text="暂无转账记录。" /> : <div className="account-history-list">
-      {result?.items.map((item) => <AccountHistoryRow key={item.id} item={item} wallets={wallets} />)}
+      {result?.items.map((item) => <AccountHistoryRow key={item.id} item={item} wallets={wallets} addressBook={addressBook} />)}
     </div>}
     {result && result.total > pageSize && <div className="history-pagination"><span>第 {page + 1} 页 · 共 {result.total} 条</span><div><button className="secondary small" disabled={page === 0 || loading} onClick={() => setPage((current) => current - 1)}>上一页</button><button className="secondary small" disabled={(page + 1) * pageSize >= result.total || loading} onClick={() => setPage((current) => current + 1)}>下一页</button></div></div>}
   </Dialog>
 }
 
-function AccountHistoryRow({ item, wallets }: { item: AccountTransferLog; wallets: WalletRecord[] }) {
+function AccountHistoryRow({ item, wallets, addressBook }: { item: AccountTransferLog; wallets: WalletRecord[]; addressBook: AddressBookEntry[] }) {
   const counterparty = item.counterpartyWalletId ? wallets.find((wallet) => wallet.id === item.counterpartyWalletId) : null
+  const addressBookEntry = counterparty ? null : addressBookEntryFor(item.counterpartyAddress, addressBook)
   return <article className={`account-history-row direction-${item.direction}`}>
     <div className={`history-direction ${item.direction}`}>{item.direction === 'out' ? <ArrowUpRight size={17} /> : <ArrowDownLeft size={17} />}<span>{item.direction === 'out' ? '转出' : '转入'}</span></div>
-    <div className="history-main"><div><strong>{historyAmount(item)}</strong><Status value={item.status} /></div><span>{item.jobName} · 第 {item.position + 1} 笔</span></div>
-    <div className="history-counterparty"><span>{item.direction === 'out' ? '收款方' : '转出方'}</span><strong>{counterparty ? accountLabel(counterparty) : '外部地址'}</strong><Address value={item.counterpartyAddress} /></div>
+    <div className="history-main"><div><strong>{historyAmount(item)}</strong><Status value={item.status} /></div><span>{item.jobName} · 第 {item.position + 1} 笔</span><small>实际手续费 {formatGasFee(item.gasFeeBaseUnits)}</small></div>
+    <div className={`history-counterparty ${addressBookEntry ? 'from-address-book' : ''}`}><span>{item.direction === 'out' ? '收款方' : '转出方'}</span><strong>{counterparty ? accountLabel(counterparty) : addressBookEntry?.label ?? '外部地址'}</strong>{addressBookEntry && <small className="address-book-chip"><BookUser size={11} />地址簿</small>}<Address value={item.counterpartyAddress} /></div>
     <div className="history-time"><span>{new Date(item.updatedAt).toLocaleString()}</span>{item.txHash ? <a href={`https://explorer.aptoslabs.com/txn/${item.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(item.txHash)}<ArrowUpRight size={12} /></a> : <small>暂无交易哈希</small>}</div>
     {item.error && <div className="history-error"><ShieldAlert size={13} />{item.error}</div>}
   </article>
@@ -832,7 +963,7 @@ function DerivedPreview({ result }: { result: MnemonicRestorePreview }) {
   return <div className="derived-preview">{result.accounts.map((account) => <div key={account.accountIndex}><strong>账户 {account.accountIndex + 1}</strong><Address value={account.address} /></div>)}</div>
 }
 
-function TransferCheckList({ steps, checks, wallets }: { steps: TransferStepDraft[]; checks: JobPreflight['checks']; wallets: WalletRecord[] }) {
+function TransferCheckList({ steps, checks, wallets, addressBook }: { steps: TransferStepDraft[]; checks: JobPreflight['checks']; wallets: WalletRecord[]; addressBook: AddressBookEntry[] }) {
   const rows = steps.map((step, index) => ({ step, index, check: checks.find((item) => item.stepId === step.id) }))
   const visible = [...rows.filter((row) => row.check && !row.check.valid), ...rows.filter((row) => !row.check || row.check.valid)].slice(0, 100)
   return <section className="transfer-check-list">
@@ -840,7 +971,7 @@ function TransferCheckList({ steps, checks, wallets }: { steps: TransferStepDraf
     {visible.map(({ step, index, check }) => <div className={`step-row transfer-check-row ${check && !check.valid ? 'step-invalid' : ''}`} key={step.id}>
       <span className="check-position">{index + 1}</span>
       <div><span>转出</span><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></div>
-      <div><span>收款</span><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></div>
+      <div><span>收款</span><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} addressBook={addressBook} /></div>
       <div><span>金额</span><strong>{step.amountMode === 'max' ? '全部余额' : step.amountMode === 'random' ? `${step.amountMin} - ${step.amountMax}` : step.amountMin} {step.asset === 'USDT' ? 'USDt' : 'APT'}</strong></div>
       <div className={`step-check ${check?.valid ? 'valid' : 'invalid'}`}>{check?.valid ? <Check size={14} /> : <ShieldAlert size={14} />}<span>{check?.error ?? '余额与手续费检查通过'}</span><strong>{check && BigInt(check.estimatedGasBaseUnits) > 0n ? `约 ${formatAmount(check.estimatedGasBaseUnits, 'APT')} APT` : '待估算'}</strong></div>
     </div>)}
@@ -848,42 +979,69 @@ function TransferCheckList({ steps, checks, wallets }: { steps: TransferStepDraf
   </section>
 }
 
-function AddressBookDialog({ wallets, groups, selected, setSelected, close }: { wallets: WalletRecord[]; groups: WalletGroup[]; selected: string[]; setSelected: (ids: string[]) => void; close: () => void }) {
+function AccountPickerDialog({ title, searchLabel, wallets, groups, selected, setSelected, close }: { title: string; searchLabel: string; wallets: WalletRecord[]; groups: WalletGroup[]; selected: string[]; setSelected: (ids: string[]) => void; close: () => void }) {
   const [draft, setDraft] = useState(selected)
   const [search, setSearch] = useState('')
   const toggle = (id: string) => setDraft((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
   const selectGroup = (ids: string[]) => setDraft((current) => ids.every((id) => current.includes(id)) ? current.filter((id) => !ids.includes(id)) : [...new Set([...current, ...ids])])
-  return <Dialog title="从我的账户选择" close={close} wide>
-    <label className="selection-search dialog-search"><Search size={15} /><input aria-label="搜索收款账户" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索账户或地址" /></label>
+  return <Dialog title={title} close={close} wide>
+    <label className="selection-search dialog-search"><Search size={15} /><input aria-label={searchLabel} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索账户或地址" /></label>
     <div className="address-book-list"><WalletSelectionList wallets={wallets} groups={groups} selected={draft} search={search} onToggle={toggle} onSelectGroup={selectGroup} /></div>
     <div className="dialog-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={() => { setSelected(draft); close() }}><Check size={16} />确定选择 {draft.length} 个</button></div>
   </Dialog>
 }
 
-function ConfirmDialog({ job, wallets, initialPreflight, executionEnabled, close, run, onChanged, onStarted }: {
-  job: TransferJob; wallets: WalletRecord[]; initialPreflight: JobPreflight | null; executionEnabled: boolean; close: () => void
-  run: DialogProps['run']; onChanged: (result: JobPreflight) => void; onStarted: () => void
+function AddressBookPickerDialog({ entries, selected, setSelected, close }: {
+  entries: AddressBookEntry[]; selected: string[]; setSelected: (ids: string[]) => void; close: () => void
+}) {
+  const [draft, setDraft] = useState(selected)
+  const [search, setSearch] = useState('')
+  const term = search.trim().toLowerCase()
+  const visible = entries.filter((entry) => !term || `${entry.label} ${entry.address}`.toLowerCase().includes(term))
+  const toggle = (id: string) => setDraft((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
+  return <Dialog title="从地址簿选择" close={close} wide>
+    <label className="selection-search dialog-search"><Search size={15} /><input aria-label="搜索地址簿收款地址" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索别名或地址" /></label>
+    <div className="address-book-picker-list">{visible.length === 0 ? <Empty icon={<BookUser size={28} />} text={entries.length ? '没有匹配的地址。' : '地址簿还是空的，请先在地址簿页面添加。'} /> : visible.map((entry) => <label className={`address-book-picker-row ${draft.includes(entry.id) ? 'selected' : ''}`} key={entry.id}><input type="checkbox" checked={draft.includes(entry.id)} onChange={() => toggle(entry.id)} /><div><strong>{entry.label}</strong><code>{entry.address}</code></div><span className="address-book-chip"><BookUser size={11} />地址簿</span></label>)}</div>
+    <div className="dialog-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" onClick={() => { setSelected(draft); close() }}><Check size={16} />确定选择 {draft.length} 个</button></div>
+  </Dialog>
+}
+
+function ExternalTargetDialog({ close, onAdd }: { close: () => void; onAdd: (value: string) => void }) {
+  const [value, setValue] = useState('')
+  return <Dialog title="添加外部收款地址" close={close}><form onSubmit={(event) => { event.preventDefault(); if (value.trim()) onAdd(value) }}>
+    <label>外部 Aptos 地址<textarea autoFocus aria-label="外部 Aptos 地址" value={value} onChange={(event) => setValue(event.target.value)} placeholder="0x..." /></label>
+    <DialogActions close={close} submit="添加地址" disabled={!value.trim()} />
+  </form></Dialog>
+}
+
+function ConfirmDialog({ job, wallets, addressBook, initialPreflight, executionEnabled, close, run, onChanged, onStarted }: {
+  job: TransferJob; wallets: WalletRecord[]; addressBook: AddressBookEntry[]; initialPreflight: JobPreflight | null; executionEnabled: boolean; close: () => void
+  run: DialogProps['run']; onChanged: (result: JobPreflight) => void; onStarted: (job: TransferJob) => void
 }) {
   const [preview, setPreview] = useState<JobPreflight>(() => initialPreflight ?? { valid: true, job, checks: [], summary: job.summary })
   const [confirmation, setConfirmation] = useState('')
   const [liveExecutionEnabled, setLiveExecutionEnabled] = useState(executionEnabled)
+  const [shuffling, setShuffling] = useState(false)
   const currentJob = preview.job
   const summary = preview.summary ?? { sourceWalletCount: new Set(currentJob.steps.map((step) => step.sourceWalletId)).size, stepCount: currentJob.steps.length, aptBaseUnits: '0', usdtBaseUnits: '0', maxStepCount: currentJob.steps.filter((step) => step.amountMode === 'max').length, estimatedGasBaseUnits: '0', warnings: [] }
   const checks = new Map(preview.checks.map((check) => [check.stepId, check]))
-  const shuffle = () => void run(async () => {
-    if (!preview.valid || currentJob.steps.length < 2) return
-    const ids = secureShuffle(currentJob.steps.map((step) => step.id))
-    const result = await post<JobPreflight>(`/api/v1/jobs/${currentJob.id}/reorder`, { stepIds: ids })
-    setPreview(result)
-    setConfirmation('')
-    onChanged(result)
-  }, '已重新生成转账顺序')
+  const shuffle = () => {
+    if (!preview.valid || currentJob.steps.length < 2 || shuffling) return
+    setShuffling(true)
+    void run(async () => {
+      const ids = secureShuffle(currentJob.steps.map((step) => step.id))
+      const result = await post<JobPreflight>(`/api/v1/jobs/${currentJob.id}/reorder`, { stepIds: ids })
+      setPreview(result)
+      setConfirmation('')
+      onChanged(result)
+    }, '已重新生成转账顺序', false).finally(() => setShuffling(false))
+  }
   return <Dialog title="转账预览" close={close} wide><div className="transfer-preview-dialog">
     <div className={`confirm-banner ${preview.valid ? 'valid' : ''}`}><ShieldAlert size={20} /><div><strong>{preview.valid ? '预览已生成' : '预览未通过检查'}</strong><span>{preview.valid ? '下面显示本次将要执行的全部转账。发送前仍需输入完整确认短语。' : '所有转账条目仍保留在下方；修正余额、手续费或顺序问题后返回编辑。'}</span></div></div>
     <div className="confirm-metrics"><Metric label="来源钱包" value={summary.sourceWalletCount.toString()} /><Metric label="转账笔数" value={summary.stepCount.toString()} /><Metric label="APT 总额" value={formatAmount(summary.aptBaseUnits, 'APT')} /><Metric label="USDt 总额" value={formatAmount(summary.usdtBaseUnits, 'USDT')} /><Metric label="预计手续费" value={`${formatAmount(summary.estimatedGasBaseUnits, 'APT')} APT`} /></div>
     {summary.warnings.map((warning) => <div className="warning-line" key={warning}>{warning}</div>)}
-    <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2} onClick={shuffle}><Shuffle size={16} />随机打乱条目</button></div>
-    <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></div><div className="preview-step-target"><small>收款</small><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${step.waitAfterSeconds} 秒` : '最后一笔，无需等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
+    <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2 || shuffling} onClick={shuffle}><Shuffle className={shuffling ? 'spin' : ''} size={16} />{shuffling ? '正在打乱' : '随机打乱条目'}</button></div>
+    <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></div><div className="preview-step-target"><small>收款</small><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} addressBook={addressBook} /></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${formatSeconds(step.waitAfterSeconds)} 秒` : step.position === currentJob.steps.length - 1 ? '最后一笔，无需等待' : '连续执行，无额外等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
     {preview.valid && <label>输入完整确认短语<div className="phrase-row"><code className="phrase">{currentJob.confirmationPhrase}</code><button type="button" className="secondary small phrase-copy" title="复制确认短语" aria-label="复制确认短语" onClick={() => void navigator.clipboard.writeText(currentJob.confirmationPhrase ?? '')}><Copy size={14} />复制</button></div><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>}
     {!liveExecutionEnabled && <div className="error-banner"><Lock size={17} />当前页面记录的是仅预览状态。发送前会重新检查本机服务；若仍未开启真实转账，会保留在预览页面。</div>}
     <div className="dialog-actions transfer-preview-actions"><button className="secondary" onClick={close}>返回编辑</button><button className="danger-primary" disabled={!preview.valid || confirmation !== currentJob.confirmationPhrase} onClick={() => void run(async () => {
@@ -891,8 +1049,8 @@ function ConfirmDialog({ job, wallets, initialPreflight, executionEnabled, close
       setLiveExecutionEnabled(latestStatus.executionEnabled)
       if (!latestStatus.unlocked) throw new Error('保险库已锁定，请重新解锁')
       if (!latestStatus.executionEnabled) throw new Error('本机服务仍是仅预览模式，请使用 --enable-mainnet 启动')
-      await post(`/api/v1/jobs/${currentJob.id}/confirm`, { confirmation })
-      onStarted()
+      const started = await post<TransferJob>(`/api/v1/jobs/${currentJob.id}/confirm`, { confirmation })
+      onStarted(started)
     }, '任务已开始')}>{preview.valid ? '发送并执行' : '修正后再发送'}</button></div>
   </div></Dialog>
 }
@@ -945,7 +1103,7 @@ function WalletSelectionList({ wallets, groups, selected, search, onToggle, onSe
 
 function Dialog({ title, close, children, wide = false }: { title: string; close: () => void; children: React.ReactNode; wide?: boolean }) { return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className={`dialog ${wide ? 'wide-dialog' : ''}`} role="dialog" aria-modal="true" aria-label={title}><div className="dialog-head"><h2>{title}</h2><IconButton title="关闭" icon={<X size={18} />} onClick={close} /></div>{children}</div></div> }
 function DialogActions({ close, submit, onSubmit, disabled = false }: { close: () => void; submit: string; onSubmit?: () => void; disabled?: boolean }) { return <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>取消</button><button type={onSubmit ? 'button' : 'submit'} className="primary" onClick={onSubmit} disabled={disabled}>{submit}</button></div> }
-interface DialogProps { close: () => void; run: (action: () => Promise<void>, success?: string) => Promise<void>; reload: () => Promise<void> }
+interface DialogProps { close: () => void; run: (action: () => Promise<void>, success?: string, showGlobalBusy?: boolean) => Promise<void>; reload: () => Promise<void> }
 
 function PageHeader({ title, subtitle, actions }: { title: string; subtitle: string; actions?: React.ReactNode }) { return <header className="page-header"><div><h1>{title}</h1><p>{subtitle}</p></div>{actions && <div className="header-actions">{actions}</div>}</header> }
 function NavButton({ active, icon, label, onClick, count }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void; count?: number }) { return <button className={`nav-button ${active ? 'active' : ''}`} aria-label={label} onClick={onClick}>{icon}<span>{label}</span>{Boolean(count) && <b>{count}</b>}</button> }
@@ -953,12 +1111,23 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
 function IconButton({ title, icon, onClick, danger, disabled }: { title: string; icon: React.ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }) { return <button type="button" className={`icon-button ${danger ? 'danger' : ''}`} title={title} aria-label={title} onClick={onClick} disabled={disabled}>{icon}</button> }
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="empty">{icon}<p>{text}</p></div> }
 function Address({ value }: { value: string }) { return <button className="address" title={value} onClick={() => void navigator.clipboard.writeText(value)}><code>{short(value)}</code><Copy size={13} /></button> }
-function TransferParty({ wallet, address }: { wallet?: WalletRecord | null; address: string }) {
-  const alias = wallet ? walletAlias(wallet) : null
-  return <div className="transfer-party">{alias && <strong>{alias}</strong>}<Address value={address} /></div>
+function TransferParty({ wallet, address, addressBook = [] }: { wallet?: WalletRecord | null; address: string; addressBook?: AddressBookEntry[] }) {
+  const entry = wallet ? null : addressBookEntryFor(address, addressBook)
+  const alias = wallet ? walletAlias(wallet) : entry?.label ?? null
+  return <div className={`transfer-party ${entry ? 'from-address-book' : ''}`}>{alias && <strong>{entry && <BookUser size={12} />}{alias}</strong>}{entry && <span className="address-book-chip">地址簿</span>}<Address value={address} /></div>
 }
 function Status({ value }: { value: string }) { return <span className={`status status-${value}`}>{statusLabels[value] ?? value}</span> }
 function short(value: string) { return value.length > 18 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value }
+function aptosAddressKey(value: string) {
+  const hex = value.trim().toLowerCase().replace(/^0x/, '').replace(/^0+/, '')
+  return hex || '0'
+}
+function addressBookEntryFor(address: string, entries: AddressBookEntry[]) {
+  const key = aptosAddressKey(address)
+  return entries.find((entry) => aptosAddressKey(entry.address) === key) ?? null
+}
+function hasAtMostOneDecimalNumber(value: number) { return Number.isFinite(value) && Math.abs(value * 10 - Math.round(value * 10)) < 1e-9 }
+function formatSeconds(value: number) { return value.toFixed(1) }
 function secureShuffle<T>(values: T[]): T[] {
   const copy = [...values]
   const random = new Uint32Array(1)
@@ -984,4 +1153,7 @@ function historyAmount(item: AccountTransferLog) {
   if (item.amountMode === 'max') return `全部余额 ${symbol}`
   if (item.amountMode === 'random') return `${item.amountMin ?? '-'} - ${item.amountMax ?? '-'} ${symbol}`
   return `${item.amountMin ?? '-'} ${symbol}`
+}
+function formatGasFee(value: string | null | undefined) {
+  return value === null || value === undefined ? '-' : `${formatAmountWithMaxDecimals(value, 'APT', 4)} APT`
 }

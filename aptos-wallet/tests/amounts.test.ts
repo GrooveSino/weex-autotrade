@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatAmount, hasAtMostDecimals, parseAmount, randomAmountInclusive, randomBigIntInclusive } from '../shared/amounts.js'
+import { formatAmount, formatAmountWithMaxDecimals, hasAtMostDecimals, parseAmount, randomAmountInclusive, randomBigIntInclusive } from '../shared/amounts.js'
 
 describe('amount helpers', () => {
   it('round trips exact APT and USDt base units without floats', () => {
@@ -12,6 +12,13 @@ describe('amount helpers', () => {
   it('rejects excess precision and invalid ranges', () => {
     expect(() => parseAmount('0.0000001', 'USDT')).toThrow('最多支持 6 位小数')
     expect(() => randomBigIntInclusive(2n, 1n)).toThrow()
+  })
+
+  it('formats actual APT gas fees with no more than four decimals', () => {
+    expect(formatAmountWithMaxDecimals('507000', 'APT', 4)).toBe('0.0051')
+    expect(formatAmountWithMaxDecimals('500000', 'APT', 4)).toBe('0.005')
+    expect(formatAmountWithMaxDecimals('1', 'APT', 4)).toBe('<0.0001')
+    expect(formatAmountWithMaxDecimals('0', 'APT', 4)).toBe('0')
   })
 
   it('always samples within inclusive bigint bounds', () => {

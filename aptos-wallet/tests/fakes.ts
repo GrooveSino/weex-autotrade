@@ -12,7 +12,8 @@ export class FakeGateway implements ChainGateway {
   commitBeforeError = false
   validationError = false
   estimateError: string | null = null
-  private outcomes = new Map<string, { success: boolean; vmStatus: string }>()
+  findTransactionCalls = 0
+  private outcomes = new Map<string, { success: boolean; vmStatus: string; gasFeeBaseUnits: string }>()
 
   setBalance(address: string, asset: AssetId, value: bigint): void {
     this.balances.set(`${address}:${asset}`, value)
@@ -59,7 +60,7 @@ export class FakeGateway implements ChainGateway {
       this.balances.set(targetKey, (this.balances.get(targetKey) ?? 0n) + request.amount)
       const gasKey = `${feePayer ?? sender}:APT`
       this.balances.set(gasKey, (this.balances.get(gasKey) ?? 0n) - 10n)
-      this.outcomes.set(hash, { success: true, vmStatus: 'Executed successfully' })
+      this.outcomes.set(hash, { success: true, vmStatus: 'Executed successfully', gasFeeBaseUnits: '10' })
     }
     return {
       txHash: hash,
@@ -75,11 +76,12 @@ export class FakeGateway implements ChainGateway {
         commit()
         return hash
       },
-      wait: async () => this.outcomes.get(hash) ?? { success: false, vmStatus: 'missing' },
+      wait: async () => this.outcomes.get(hash) ?? { success: false, vmStatus: 'missing', gasFeeBaseUnits: '0' },
     }
   }
 
-  async findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string }> {
+  async findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string; gasFeeBaseUnits?: string }> {
+    this.findTransactionCalls += 1
     const result = this.outcomes.get(hash)
     return result ? { found: true, ...result } : { found: false }
   }

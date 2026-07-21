@@ -60,6 +60,14 @@ export interface WalletGroup {
   updatedAt: string
 }
 
+export interface AddressBookEntry {
+  id: string
+  label: string
+  address: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface DerivedAccountPreview {
   accountIndex: number
   derivationPath: string
@@ -93,6 +101,7 @@ export interface FrozenTransferStep extends TransferStepDraft {
   waitAfterSeconds: number
   status: StepStatus
   txHash: string | null
+  gasFeeBaseUnits: string | null
   error: string | null
   /** Persisted timestamp used by the UI to reconstruct a waiting countdown. */
   updatedAt?: string
@@ -149,6 +158,7 @@ export interface TransactionAttempt {
   sequenceNumber: string | null
   txHash: string | null
   state: 'prepared' | 'submitted' | 'confirmed' | 'failed' | 'uncertain'
+  gasFeeBaseUnits: string | null
   error: string | null
   createdAt: string
   updatedAt: string
@@ -170,6 +180,7 @@ export interface AccountTransferLog {
   frozenAmountDisplay: string | null
   status: StepStatus
   txHash: string | null
+  gasFeeBaseUnits: string | null
   error: string | null
   createdAt: string
   updatedAt: string

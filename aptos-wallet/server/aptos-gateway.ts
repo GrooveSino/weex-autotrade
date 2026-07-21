@@ -20,6 +20,7 @@ const MAINNET_READ_WINDOW_MS = 60_000
 const MAINNET_READ_WINDOW_LIMIT = 600
 const MAINNET_RATE_LIMIT_COOLDOWN_MS = 2_000
 const ACCOUNT_EXISTS_CACHE_TTL_MS = 5 * 60_000
+export type ReadPriority = 'normal' | 'high'
 
 interface FungibleMetadata {
   name: string
@@ -31,6 +32,7 @@ interface QueuedRead<T> {
   action: () => Promise<T>
   resolve: (value: T) => void
   reject: (error: unknown) => void
+  priority: ReadPriority
 }
 
 /** Keeps all fullnode/indexer calls under one conservative per-process budget. */
@@ -43,9 +45,15 @@ class MainnetReadLimiter {
   private cooldownUntil = 0
   private pumping = false
 
-  run<T>(action: () => Promise<T>): Promise<T> {
+  run<T>(action: () => Promise<T>, priority: ReadPriority = 'normal'): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({ action, resolve: resolve as (value: unknown) => void, reject })
+      const queued = { action, resolve: resolve as (value: unknown) => void, reject, priority }
+      if (priority === 'high') {
+        const firstNormal = this.queue.findIndex((item) => item.priority === 'normal')
+        this.queue.splice(firstNormal < 0 ? this.queue.length : firstNormal, 0, queued)
+      } else {
+        this.queue.push(queued)
+      }
       void this.pump()
     })
   }
@@ -125,6 +133,7 @@ export interface TransferRequest {
   recipient: string
   asset: AssetId
   amount: bigint
+  availableGasBalance?: bigint
 }
 
 export interface PreparedTransfer {
@@ -133,17 +142,17 @@ export interface PreparedTransfer {
   gasUnitPrice: bigint
   maxGasAmount: bigint
   submit(): Promise<string>
-  wait(): Promise<{ success: boolean; vmStatus: string }>
+  wait(): Promise<{ success: boolean; vmStatus: string; gasFeeBaseUnits: string }>
 }
 
 export interface ChainGateway {
-  getBalances(address: string): Promise<AssetBalance[]>
-  getBalance(address: string, asset: AssetId): Promise<bigint>
-  accountExists(address: string): Promise<boolean>
+  getBalances(address: string, priority?: ReadPriority): Promise<AssetBalance[]>
+  getBalance(address: string, asset: AssetId, priority?: ReadPriority): Promise<bigint>
+  accountExists(address: string, priority?: ReadPriority): Promise<boolean>
   validateUsdt(): Promise<void>
   estimateGas(request: TransferRequest): Promise<{ gasUnitPrice: bigint; maxGasAmount: bigint }>
   prepareTransfer(request: TransferRequest): Promise<PreparedTransfer>
-  findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string }>
+  findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string; gasFeeBaseUnits?: string }>
 }
 
 export class AptosMainnetGateway implements ChainGateway {
@@ -159,11 +168,11 @@ export class AptosMainnetGateway implements ChainGateway {
     }))
   }
 
-  async getBalances(address: string): Promise<AssetBalance[]> {
+  async getBalances(address: string, priority: ReadPriority = 'normal'): Promise<AssetBalance[]> {
     try {
-      const aptRead = await retryRead(() => this.readLimiter.run(() => this.getUnifiedAptBalance(address)))
+      const aptRead = await retryRead(() => this.readLimiter.run(() => this.getUnifiedAptBalance(address), priority))
       if (aptRead.accountExists) this.accountExistsCache.set(address, { value: true, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
-      const usdt = await this.getBalance(address, 'USDT')
+      const usdt = await this.getBalance(address, 'USDT', priority)
       return [
         { asset: 'APT', baseUnits: aptRead.balance.toString(), display: formatAmount(aptRead.balance, 'APT') },
         { asset: 'USDT', baseUnits: usdt.toString(), display: formatAmount(usdt, 'USDT') },
@@ -173,10 +182,10 @@ export class AptosMainnetGateway implements ChainGateway {
     }
   }
 
-  async getBalance(address: string, asset: AssetId): Promise<bigint> {
+  async getBalance(address: string, asset: AssetId, priority: ReadPriority = 'normal'): Promise<bigint> {
     try {
       if (asset === 'APT') {
-        const result = await retryRead(() => this.readLimiter.run(() => this.getUnifiedAptBalance(address)))
+        const result = await retryRead(() => this.readLimiter.run(() => this.getUnifiedAptBalance(address), priority))
         if (result.accountExists) this.accountExistsCache.set(address, { value: true, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
         return result.balance
       }
@@ -186,7 +195,7 @@ export class AptosMainnetGateway implements ChainGateway {
           typeArguments: ['0x1::object::ObjectCore'],
           functionArguments: [address, ASSETS.USDT.metadataAddress],
         },
-      })))
+      }), priority))
       return BigInt(balance ?? '0')
     } catch (error) {
       if (isNotFound(error)) return 0n
@@ -209,11 +218,11 @@ export class AptosMainnetGateway implements ChainGateway {
     return { balance: BigInt(match[1]), accountExists: true }
   }
 
-  async accountExists(address: string): Promise<boolean> {
+  async accountExists(address: string, priority: ReadPriority = 'normal'): Promise<boolean> {
     const cached = this.accountExistsCache.get(address)
     if (cached && cached.expiresAt > Date.now()) return cached.value
     try {
-      await retryRead(() => this.readLimiter.run(() => this.aptos.getAccountInfo({ accountAddress: address })))
+      await retryRead(() => this.readLimiter.run(() => this.aptos.getAccountInfo({ accountAddress: address }), priority))
       this.accountExistsCache.set(address, { value: true, expiresAt: Date.now() + ACCOUNT_EXISTS_CACHE_TTL_MS })
       return true
     } catch (error) {
@@ -285,7 +294,11 @@ export class AptosMainnetGateway implements ChainGateway {
         },
         wait: async () => {
           const response = await this.aptos.waitForTransaction({ transactionHash: submittedHash ?? txHash }) as UserTransactionResponse
-          return { success: response.success, vmStatus: response.vm_status }
+          return {
+            success: response.success,
+            vmStatus: response.vm_status,
+            gasFeeBaseUnits: (BigInt(response.gas_used) * BigInt(response.gas_unit_price)).toString(),
+          }
         },
       }
     } finally {
@@ -294,11 +307,17 @@ export class AptosMainnetGateway implements ChainGateway {
     }
   }
 
-  async findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string }> {
+  async findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string; gasFeeBaseUnits?: string }> {
     try {
       const response = await this.readLimiter.run(() => this.aptos.getTransactionByHash({ transactionHash: hash }))
       if (response.type === 'pending_transaction') return { found: true }
-      return { found: true, success: response.success, vmStatus: response.vm_status }
+      const finalized = response as UserTransactionResponse
+      return {
+        found: true,
+        success: finalized.success,
+        vmStatus: finalized.vm_status,
+        gasFeeBaseUnits: (BigInt(finalized.gas_used) * BigInt(finalized.gas_unit_price)).toString(),
+      }
     } catch (error) {
       if (isNotFound(error)) return { found: false }
       throw redactChainError(error)
@@ -306,12 +325,35 @@ export class AptosMainnetGateway implements ChainGateway {
   }
 
   private async buildAndSimulate(request: TransferRequest): Promise<{ transaction: SimpleTransaction; simulation: UserTransactionResponse }> {
-    const transaction = await this.build(request)
+    let transaction = await this.build(request)
+    const gasUnitPrice = transaction.rawTransaction.gas_unit_price
+    if (gasUnitPrice <= 0n) throw new Error('交易 Gas 单价无效')
+    const gasBalance = request.availableGasBalance ?? await this.getBalance(
+      (request.feePayer ?? request.sender).accountAddress.toString(),
+      'APT',
+      'high',
+    )
+    const spendableForGas = !request.feePayer && request.asset === 'APT'
+      ? gasBalance - request.amount
+      : gasBalance
+    const affordableGasUnits = spendableForGas > 0n ? spendableForGas / gasUnitPrice : 0n
+    if (affordableGasUnits <= 0n) throw new Error('INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE')
+
+    // Aptos SDK defaults to a 2,000,000-unit cap. Validation requires the fee
+    // payer to cover that whole cap before simulation, even when actual gas is
+    // tiny, so use the largest cap the selected payer can currently afford.
+    if (affordableGasUnits < transaction.rawTransaction.max_gas_amount) {
+      transaction = await this.build(request, {
+        accountSequenceNumber: transaction.rawTransaction.sequence_number,
+        gasUnitPrice: Number(gasUnitPrice),
+        maxGasAmount: Number(affordableGasUnits),
+      })
+    }
     const [simulation] = await this.readLimiter.run(() => this.aptos.transaction.simulate.simple({
       signerPublicKey: request.sender.publicKey,
       feePayerPublicKey: request.feePayer?.publicKey,
       transaction,
-      options: { estimateGasUnitPrice: true, estimateMaxGasAmount: true },
+      options: { estimateGasUnitPrice: true, estimateMaxGasAmount: false },
     }))
     return { transaction, simulation }
   }
@@ -326,23 +368,27 @@ export class AptosMainnetGateway implements ChainGateway {
       withFeePayer: Boolean(request.feePayer),
       options: buildOptions,
     }
-    if (request.asset === 'APT') {
-      return this.aptos.transaction.build.simple({
+    const transaction = request.asset === 'APT'
+      ? await this.aptos.transaction.build.simple({
         ...common,
         data: {
           function: '0x1::aptos_account::transfer',
           functionArguments: [request.recipient, request.amount.toString()],
         },
       })
-    }
-    return this.aptos.transaction.build.simple({
-      ...common,
-      data: {
-        function: '0x1::primary_fungible_store::transfer',
-        typeArguments: ['0x1::object::ObjectCore'],
-        functionArguments: [ASSETS.USDT.metadataAddress, request.recipient, request.amount.toString()],
-      },
-    })
+      : await this.aptos.transaction.build.simple({
+        ...common,
+        data: {
+          function: '0x1::primary_fungible_store::transfer',
+          typeArguments: ['0x1::object::ObjectCore'],
+          functionArguments: [ASSETS.USDT.metadataAddress, request.recipient, request.amount.toString()],
+        },
+      })
+
+    // The SDK initially uses 0x0 as the fee-payer placeholder. Bind the real
+    // sponsor before simulation and before either party signs the transaction.
+    if (request.feePayer) transaction.feePayerAddress = request.feePayer.accountAddress
+    return transaction
   }
 }
 

@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -37,6 +37,32 @@ async function setup(executionEnabled = false) {
 }
 
 describe('local API safety', () => {
+  it('serves frontend assets created after startup without returning the SPA HTML fallback', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'aptos-web-'))
+    mkdirSync(join(root, 'assets'))
+    writeFileSync(join(root, 'index.html'), '<!doctype html><div id="root"></div>')
+    const config: AppConfig = {
+      host: '127.0.0.1', port: 4311, webOrigin: 'http://127.0.0.1:4310',
+      databasePath: join(root, 'wallet.sqlite'), webDistPath: root, executionEnabled: false,
+    }
+    const app = await createApp(config)
+    apps.push(app)
+
+    writeFileSync(join(root, 'assets', 'index-new-hash.js'), 'globalThis.walletBooted = true')
+    const asset = await app.inject({ method: 'GET', url: '/assets/index-new-hash.js' })
+    expect(asset.statusCode).toBe(200)
+    expect(asset.headers['content-type']).toContain('javascript')
+    expect(asset.body).toBe('globalThis.walletBooted = true')
+
+    const missingAsset = await app.inject({ method: 'GET', url: '/assets/missing.js' })
+    expect(missingAsset.statusCode).toBe(404)
+    expect(missingAsset.body).not.toContain('<div id="root">')
+    const clientRoute = await app.inject({ method: 'GET', url: '/execution-history' })
+    expect(clientRoute.statusCode).toBe(200)
+    expect(clientRoute.body).toContain('<div id="root">')
+    expect(clientRoute.headers['cache-control']).toBe('no-store')
+  })
+
   it('requires CSRF, same-origin, and an unlocked HttpOnly session', async () => {
     const config: AppConfig = { host: '127.0.0.1', port: 4311, webOrigin: 'http://127.0.0.1:4310', databasePath: join(mkdtempSync(join(tmpdir(), 'aptos-api-auth-')), 'wallet.sqlite'), executionEnabled: false }
     const app = await createApp(config)
@@ -131,7 +157,7 @@ describe('local API safety', () => {
     expect(restoredArchive.json().archivedAt).toBeNull()
   })
 
-  it('returns paginated per-account transfer logs without secret material', async () => {
+  it('returns paginated per-account transfer logs and backfills legacy gas fees', async () => {
     const { app, headers, wallets, jobs, gateway } = await setup(true)
     const [source, target] = wallets.restoreGroup('日志钱包', MNEMONIC, 2).accounts
     gateway.setBalance(source.address, 'APT', 10_000_000n)
@@ -141,15 +167,19 @@ describe('local API safety', () => {
     const preview = await jobs.preview(draft.id)
     jobs.confirm(draft.id, preview.confirmationPhrase!)
     await waitFor(() => jobs.get(draft.id).status === 'completed')
+    app.services.db.prepare('UPDATE transaction_attempts SET gas_fee_base_units = NULL WHERE job_id = ?').run(draft.id)
 
     const outgoing = await app.inject({ method: 'GET', url: `/api/v1/wallets/${source.id}/transfers?direction=out&limit=50&offset=0`, headers })
     expect(outgoing.statusCode).toBe(200)
-    expect(outgoing.json()).toMatchObject({ total: 1, counts: { all: 1, in: 0, out: 1 }, items: [{ direction: 'out', counterpartyWalletId: target.id, jobName: '日志任务' }] })
+    expect(outgoing.json()).toMatchObject({ total: 1, counts: { all: 1, in: 0, out: 1 }, items: [{ direction: 'out', counterpartyWalletId: target.id, jobName: '日志任务', gasFeeBaseUnits: '10' }] })
+    expect(gateway.findTransactionCalls).toBe(1)
     expect(outgoing.body).not.toContain(MNEMONIC)
     expect(outgoing.body).not.toContain('privateKey')
 
     const incoming = await app.inject({ method: 'GET', url: `/api/v1/wallets/${target.id}/transfers?direction=in`, headers })
     expect(incoming.json().items[0]).toMatchObject({ direction: 'in', counterpartyWalletId: source.id })
+    const inspected = await app.inject({ method: 'GET', url: `/api/v1/jobs/${draft.id}`, headers })
+    expect(inspected.json().steps[0].gasFeeBaseUnits).toBe('10')
     expect((await app.inject({ method: 'GET', url: `/api/v1/wallets/${crypto.randomUUID()}/transfers`, headers })).statusCode).toBe(404)
   })
 
@@ -164,6 +194,30 @@ describe('local API safety', () => {
       expect(response.json().label).toBe(label)
     }
     expect((await app.inject({ method: 'PATCH', url: `/api/v1/wallets/${derived.id}`, headers, payload: { label: '   ' } })).statusCode).toBe(400)
+  })
+
+  it('protects and manages normalized external address book entries', async () => {
+    const { app, config, headers } = await setup()
+    const firstAddress = `0x${'a'.repeat(64)}`
+    const secondAddress = `0x${'b'.repeat(64)}`
+    const unauthorized = await app.inject({ method: 'POST', url: '/api/v1/address-book', headers: { origin: config.webOrigin }, payload: { label: '交易所', address: firstAddress } })
+    expect(unauthorized.statusCode).toBe(403)
+
+    const created = await app.inject({ method: 'POST', url: '/api/v1/address-book', headers, payload: { label: '交易所充值', address: firstAddress } })
+    expect(created.statusCode).toBe(200)
+    expect(created.json()).toMatchObject({ label: '交易所充值' })
+    expect(created.json().address).toBe(firstAddress)
+
+    const id = created.json().id as string
+    const updated = await app.inject({ method: 'PATCH', url: `/api/v1/address-book/${id}`, headers, payload: { label: '交易所主账户', address: secondAddress } })
+    expect(updated.json()).toMatchObject({ id, label: '交易所主账户' })
+    const listed = await app.inject({ method: 'GET', url: '/api/v1/address-book', headers })
+    expect(listed.json()).toEqual([expect.objectContaining({ id, label: '交易所主账户' })])
+
+    const duplicate = await app.inject({ method: 'POST', url: '/api/v1/address-book', headers, payload: { label: '重复', address: secondAddress } })
+    expect(duplicate.statusCode).toBe(409)
+    expect((await app.inject({ method: 'DELETE', url: `/api/v1/address-book/${id}`, headers })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'GET', url: '/api/v1/address-book', headers })).json()).toEqual([])
   })
 
   it('refreshes one wallet group behind session and CSRF protection', async () => {
