@@ -477,7 +477,7 @@ function TransferView({ wallets, groups, busy, run, onPreview, initialSourceWall
     </section>
     {pairing.mode === 'one_to_one' && pairs.length > 1 && !pairing.issue && <section className="pairing-preview" aria-label="一一配对预览">
       <div className="pairing-preview-head"><strong>按顺序一一配对</strong><span>第 N 个转出账户对应第 N 个收款地址</span></div>
-      {pairs.slice(0, 10).map(({ sourceWalletId, target }, position) => <div className="pairing-preview-row" key={`${sourceWalletId}:${target.address}`}><span>{position + 1}</span><strong>{walletLabel(sourceWalletId, wallets)}</strong><ArrowRight size={14} /><div><strong>{target.label}</strong><code>{short(target.address)}</code></div></div>)}
+      {pairs.slice(0, 10).map(({ sourceWalletId, target }, position) => <div className="pairing-preview-row" key={`${sourceWalletId}:${target.address}`}><span>{position + 1}</span><TransferParty wallet={wallets.find((wallet) => wallet.id === sourceWalletId)} address={wallets.find((wallet) => wallet.id === sourceWalletId)?.address ?? sourceWalletId} /><ArrowRight size={14} /><TransferParty wallet={target.walletId ? wallets.find((wallet) => wallet.id === target.walletId) : null} address={target.address} /></div>)}
       {pairs.length > 10 && <div className="list-overflow-note">另有 {pairs.length - 10} 组配对，将继续按当前顺序处理。</div>}
     </section>}
     <section className="transfer-summary-band">
@@ -514,7 +514,7 @@ function JobsView({ jobs, wallets, run, setPreviewJob, setModal }: {
       <div className="progress-line"><span style={{ width: `${selected.steps.length ? selected.steps.filter((step) => step.status === 'confirmed').length / selected.steps.length * 100 : 0}%` }} /></div>
       <div className="detail-meta"><span>{selected.steps.length} 笔</span><span>间隔 {selected.intervalMinSeconds}-{selected.intervalMaxSeconds} 秒</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
       <div className="table-scroll"><table><thead><tr><th>#</th><th>来源</th><th>目标</th><th>资产</th><th>金额</th><th>等待</th><th>状态</th><th>交易</th></tr></thead><tbody>{selected.steps.map((step) => <tr key={step.id}>
-        <td>{step.position + 1}</td><td>{walletLabel(step.sourceWalletId, wallets)}</td><td><Address value={step.targetAddress} /></td><td>{step.asset === 'USDT' ? 'USDt' : 'APT'}</td>
+        <td>{step.position + 1}</td><td><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></td><td><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></td><td>{step.asset === 'USDT' ? 'USDt' : 'APT'}</td>
         <td className="amount">{step.amountMode === 'max' ? `全额${step.frozenAmountDisplay ? ` (~${step.frozenAmountDisplay})` : ''}` : step.frozenAmountDisplay}</td><td>{step.waitAfterSeconds}s</td><td><Status value={step.status} /></td>
         <td>{step.txHash ? <a className="tx-link" href={`https://explorer.aptoslabs.com/txn/${step.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(step.txHash)}</a> : step.error ? <span className="row-error">{step.error}</span> : '-'}</td>
       </tr>)}</tbody></table></div>
@@ -787,8 +787,8 @@ function TransferCheckList({ steps, checks, wallets }: { steps: TransferStepDraf
     <div className="section-head"><div><h2>检查结果</h2><span>{steps.length} 笔转账，手续费按链上模拟估算</span></div></div>
     {visible.map(({ step, index, check }) => <div className={`step-row transfer-check-row ${check && !check.valid ? 'step-invalid' : ''}`} key={step.id}>
       <span className="check-position">{index + 1}</span>
-      <div><span>转出</span><strong>{walletLabel(step.sourceWalletId, wallets)}</strong></div>
-      <div><span>收款</span><code>{short(step.targetAddress)}</code></div>
+      <div><span>转出</span><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></div>
+      <div><span>收款</span><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></div>
       <div><span>金额</span><strong>{step.amountMode === 'max' ? '全部余额' : step.amountMode === 'random' ? `${step.amountMin} - ${step.amountMax}` : step.amountMin} {step.asset === 'USDT' ? 'USDt' : 'APT'}</strong></div>
       <div className={`step-check ${check?.valid ? 'valid' : 'invalid'}`}>{check?.valid ? <Check size={14} /> : <ShieldAlert size={14} />}<span>{check?.error ?? '余额与手续费检查通过'}</span><strong>{check && BigInt(check.estimatedGasBaseUnits) > 0n ? `约 ${formatAmount(check.estimatedGasBaseUnits, 'APT')} APT` : '待估算'}</strong></div>
     </div>)}
@@ -831,7 +831,7 @@ function ConfirmDialog({ job, wallets, initialPreflight, executionEnabled, close
     <div className="confirm-metrics"><Metric label="来源钱包" value={summary.sourceWalletCount.toString()} /><Metric label="转账笔数" value={summary.stepCount.toString()} /><Metric label="APT 总额" value={formatAmount(summary.aptBaseUnits, 'APT')} /><Metric label="USDt 总额" value={formatAmount(summary.usdtBaseUnits, 'USDT')} /><Metric label="预计手续费" value={`${formatAmount(summary.estimatedGasBaseUnits, 'APT')} APT`} /></div>
     {summary.warnings.map((warning) => <div className="warning-line" key={warning}>{warning}</div>)}
     <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2} onClick={shuffle}><Shuffle size={16} />随机打乱条目</button></div>
-    <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><strong>{walletLabel(step.sourceWalletId, wallets)}</strong></div><div className="preview-step-target"><small>收款</small><code>{short(step.targetAddress)}</code></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${step.waitAfterSeconds} 秒` : '最后一笔，无需等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
+    <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></div><div className="preview-step-target"><small>收款</small><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${step.waitAfterSeconds} 秒` : '最后一笔，无需等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
     {preview.valid && <label>输入完整确认短语<code className="phrase">{currentJob.confirmationPhrase}</code><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>}
     {!liveExecutionEnabled && <div className="error-banner"><Lock size={17} />当前页面记录的是仅预览状态。发送前会重新检查本机服务；若仍未开启真实转账，会保留在预览页面。</div>}
     <div className="dialog-actions transfer-preview-actions"><button className="secondary" onClick={close}>返回编辑</button><button className="danger-primary" disabled={!preview.valid || confirmation !== currentJob.confirmationPhrase} onClick={() => void run(async () => {
@@ -901,6 +901,10 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
 function IconButton({ title, icon, onClick, danger, disabled }: { title: string; icon: React.ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }) { return <button type="button" className={`icon-button ${danger ? 'danger' : ''}`} title={title} aria-label={title} onClick={onClick} disabled={disabled}>{icon}</button> }
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="empty">{icon}<p>{text}</p></div> }
 function Address({ value }: { value: string }) { return <button className="address" title={value} onClick={() => void navigator.clipboard.writeText(value)}><code>{short(value)}</code><Copy size={13} /></button> }
+function TransferParty({ wallet, address }: { wallet?: WalletRecord | null; address: string }) {
+  const alias = wallet ? walletAlias(wallet) : null
+  return <div className="transfer-party">{alias && <strong>{alias}</strong>}<Address value={address} /></div>
+}
 function Status({ value }: { value: string }) { return <span className={`status status-${value}`}>{statusLabels[value] ?? value}</span> }
 function short(value: string) { return value.length > 18 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value }
 function secureShuffle<T>(values: T[]): T[] {
@@ -915,6 +919,10 @@ function secureShuffle<T>(values: T[]): T[] {
 }
 function walletOptionLabel(wallet: WalletRecord, groups: WalletGroup[]) { const group = groups.find((item) => item.id === wallet.groupId); return group ? `${group.label} · ${accountLabel(wallet)}` : wallet.label }
 function walletLabel(id: string, wallets: WalletRecord[]) { const wallet = wallets.find((item) => item.id === id); return wallet ? accountLabel(wallet) : id }
+function walletAlias(wallet: WalletRecord): string | null {
+  if (wallet.accountIndex !== null && wallet.label === `账户 #${wallet.accountIndex}`) return null
+  return wallet.label.trim() || null
+}
 function accountLabel(wallet: WalletRecord) {
   return wallet.accountIndex !== null && wallet.label === `账户 #${wallet.accountIndex}` ? `账户 ${wallet.accountIndex + 1}` : wallet.label
 }
