@@ -54,6 +54,7 @@ interface StepRow {
   status: StepStatus
   tx_hash: string | null
   error: string | null
+  updated_at: string
 }
 
 interface AccountTransferRow {
@@ -94,6 +95,7 @@ function mapStep(row: StepRow): FrozenTransferStep {
     status: row.status,
     txHash: row.tx_hash,
     error: row.error,
+    updatedAt: row.updated_at,
   }
 }
 

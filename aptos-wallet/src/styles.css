@@ -1342,6 +1342,88 @@ textarea {
     color: var(--muted);
     font-size: 11px;
 }
+.job-activity {
+    min-height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 16px 12px;
+    padding: 12px 14px;
+    border: 1px solid #c9ddd3;
+    border-radius: 6px;
+    background: #f2f8f4;
+}
+.job-activity.is-waiting {
+    border-color: #e8c987;
+    background: #fff9ed;
+}
+.job-activity-copy {
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.job-activity-copy > div {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+}
+.job-activity-copy strong {
+    color: #23463a;
+    font-size: 13px;
+}
+.job-activity-copy span:not(.job-activity-dot) {
+    color: var(--muted);
+    font-size: 11px;
+}
+.job-activity-dot {
+    width: 9px;
+    height: 9px;
+    flex: 0 0 auto;
+    margin-top: 4px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 4px #087f5b1a;
+    animation: activity-pulse 1.4s ease-in-out infinite;
+}
+.job-activity.is-waiting .job-activity-dot {
+    background: #c47a13;
+    box-shadow: 0 0 0 4px #c47a131a;
+}
+.job-countdown {
+    min-width: 76px;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 4px;
+    color: #9a5904;
+    font-variant-numeric: tabular-nums;
+}
+.job-countdown strong {
+    font-size: 28px;
+    line-height: 1;
+    font-weight: 800;
+}
+.job-countdown span {
+    font-size: 11px;
+    font-weight: 700;
+}
+.status-countdown {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+}
+.job-step-waiting td {
+    background: #fffbf1;
+}
+.job-step-waiting td:first-child {
+    box-shadow: inset 3px 0 #d7972d;
+}
+.job-step-active td {
+    background: #f3faf6;
+}
 .progress-line {
     height: 3px;
     background: #e2e8e5;
@@ -2174,6 +2256,10 @@ textarea {
         box-shadow: none;
     }
 }
+@keyframes activity-pulse {
+    0%, 100% { opacity: .55; transform: scale(.9); }
+    50% { opacity: 1; transform: scale(1); }
+}
 @media (max-width: 1050px) {
     .primary-settings,
     .secondary-settings {
@@ -2442,7 +2528,8 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
     .spin,
     .account-row.balance-changed,
-    .busy-bar {
+    .busy-bar,
+    .job-activity-dot {
         animation-duration: 0.01ms;
         animation-iteration-count: 1;
     }

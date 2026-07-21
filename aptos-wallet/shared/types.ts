@@ -94,6 +94,8 @@ export interface FrozenTransferStep extends TransferStepDraft {
   status: StepStatus
   txHash: string | null
   error: string | null
+  /** Persisted timestamp used by the UI to reconstruct a waiting countdown. */
+  updatedAt?: string
 }
 
 export interface TransferJob {

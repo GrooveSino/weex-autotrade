@@ -527,6 +527,24 @@ function JobsView({ jobs, wallets, run, setPreviewJob, setModal }: {
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(jobs[0]?.id ?? null)
   const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0]
+  const [clock, setClock] = useState(() => Date.now())
+  useEffect(() => {
+    if (selected?.status !== 'running') return
+    const timer = window.setInterval(() => setClock(Date.now()), 250)
+    return () => window.clearInterval(timer)
+  }, [selected?.id, selected?.status])
+  const waitingStep = selected?.steps.find((step) => step.status === 'waiting')
+  const waitingPrevious = waitingStep && selected ? selected.steps.find((step) => step.position === waitingStep.position - 1) : undefined
+  const waitingTotalSeconds = waitingPrevious?.waitAfterSeconds ?? 0
+  const waitingStartedAt = waitingStep?.updatedAt ? Date.parse(waitingStep.updatedAt) : Number.NaN
+  const waitingElapsedSeconds = Number.isFinite(waitingStartedAt) ? Math.max(0, (clock - waitingStartedAt) / 1000) : 0
+  const waitingRemainingSeconds = waitingStep ? Math.max(0, Math.ceil(waitingTotalSeconds - waitingElapsedSeconds)) : 0
+  const activeStep = selected?.steps.find((step) => step.status === 'preparing' || step.status === 'submitting')
+  const confirmedCount = selected?.steps.filter((step) => step.status === 'confirmed').length ?? 0
+  const activityText = selected?.status !== 'running' ? null
+    : waitingStep ? `正在等待第 ${waitingStep.position + 1} 笔`
+      : activeStep ? `${activeStep.status === 'submitting' ? '正在提交' : '正在准备'}第 ${activeStep.position + 1} 笔`
+        : confirmedCount >= (selected?.steps.length ?? 0) ? '正在收尾' : '正在检查下一笔'
   return <>
     <PageHeader title="执行记录" subtitle={`${jobs.length} 个任务`} />
     <div className="jobs-layout"><section className="job-list">
@@ -542,10 +560,14 @@ function JobsView({ jobs, wallets, run, setPreviewJob, setModal }: {
       </div></div>
       {selected.error && <div className="error-banner"><ShieldAlert size={17} />{selected.error}</div>}
       <div className="progress-line"><span style={{ width: `${selected.steps.length ? selected.steps.filter((step) => step.status === 'confirmed').length / selected.steps.length * 100 : 0}%` }} /></div>
-      <div className="detail-meta"><span>{selected.steps.length} 笔</span><span>间隔 {selected.intervalMinSeconds}-{selected.intervalMaxSeconds} 秒</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
-      <div className="table-scroll"><table><thead><tr><th>#</th><th>来源</th><th>目标</th><th>资产</th><th>金额</th><th>等待</th><th>状态</th><th>交易</th></tr></thead><tbody>{selected.steps.map((step) => <tr key={step.id}>
+      <div className="detail-meta"><span>{confirmedCount}/{selected.steps.length} 笔已确认</span><span>间隔 {selected.intervalMinSeconds}-{selected.intervalMaxSeconds} 秒</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
+      {activityText && <div className={`job-activity ${waitingStep ? 'is-waiting' : 'is-active'}`} aria-live="polite">
+        <div className="job-activity-copy"><span className="job-activity-dot" /><div><strong>{activityText}</strong><span>{waitingStep ? `第 ${waitingStep.position} 笔已完成，下一笔将在倒计时结束后开始` : `已完成 ${confirmedCount} / ${selected.steps.length} 笔`}</span></div></div>
+        {waitingStep && <div className="job-countdown"><strong>{waitingRemainingSeconds}</strong><span>秒</span></div>}
+      </div>}
+      <div className="table-scroll"><table><thead><tr><th>#</th><th>来源</th><th>目标</th><th>资产</th><th>金额</th><th>等待</th><th>状态</th><th>交易</th></tr></thead><tbody>{selected.steps.map((step) => <tr className={step.id === waitingStep?.id ? 'job-step-waiting' : step.id === activeStep?.id ? 'job-step-active' : ''} key={step.id}>
         <td>{step.position + 1}</td><td><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></td><td><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} /></td><td>{step.asset === 'USDT' ? 'USDt' : 'APT'}</td>
-        <td className="amount">{step.amountMode === 'max' ? `全额${step.frozenAmountDisplay ? ` (~${step.frozenAmountDisplay})` : ''}` : step.frozenAmountDisplay}</td><td>{step.waitAfterSeconds}s</td><td><Status value={step.status} /></td>
+        <td className="amount">{step.amountMode === 'max' ? `全额${step.frozenAmountDisplay ? ` (~${step.frozenAmountDisplay})` : ''}` : step.frozenAmountDisplay}</td><td>{step.waitAfterSeconds ? `${step.waitAfterSeconds}s` : '-'}</td><td>{step.id === waitingStep?.id ? <span className="status status-waiting status-countdown"><Clock3 size={12} />等待 {waitingRemainingSeconds}s</span> : <Status value={step.status} />}</td>
         <td>{step.txHash ? <a className="tx-link" href={`https://explorer.aptoslabs.com/txn/${step.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(step.txHash)}</a> : step.error ? <span className="row-error">{step.error}</span> : '-'}</td>
       </tr>)}</tbody></table></div>
     </section>}</div>

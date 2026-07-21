@@ -74,6 +74,33 @@ test('wallet accounts and transfer builder remain usable', async ({ page }, test
   await page.screenshot({ path: `artifacts/preview-${testInfo.project.name}.png`, fullPage: true })
 })
 
+test('running transfer shows the current step and a live wait countdown', async ({ page }, testInfo) => {
+  const waitStartedAt = new Date(Date.now() - 2_000).toISOString()
+  const steps = [
+    { id: '81111111-1111-4111-8111-111111111111', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null, position: 0, frozenAmountBaseUnits: '1000000', frozenAmountDisplay: '1', waitAfterSeconds: 10, status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, error: null, updatedAt: now },
+    { id: '82222222-2222-4222-8222-222222222222', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1.2', amountMax: null, position: 1, frozenAmountBaseUnits: '1200000', frozenAmountDisplay: '1.2', waitAfterSeconds: 10, status: 'waiting', txHash: null, error: null, updatedAt: waitStartedAt },
+    { id: '83333333-3333-4333-8333-333333333333', sourceWalletId: walletA.id, targetAddress: walletB.address, targetWalletId: walletB.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1.5', amountMax: null, position: 2, frozenAmountBaseUnits: '1500000', frozenAmountDisplay: '1.5', waitAfterSeconds: 0, status: 'pending', txHash: null, error: null, updatedAt: now },
+  ]
+  const job = { id: '84444444-4444-4444-8444-444444444444', name: '等待倒计时测试', status: 'running', gasPayerWalletId: null, intervalMinSeconds: 5, intervalMaxSeconds: 30, shuffle: false, confirmationPhrase: null, createdAt: now, updatedAt: now, error: null, summary: null, steps }
+  await page.route('**/api/v1/jobs', async (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [job] })
+    return route.fallback()
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: /执行记录/ }).click()
+  const activity = page.locator('.job-activity')
+  await expect(activity).toContainText('正在等待第 2 笔')
+  await expect(page.locator('.job-step-waiting')).toHaveCount(1)
+  const countdown = page.locator('.job-countdown strong')
+  const first = Number(await countdown.textContent())
+  await page.waitForTimeout(1_100)
+  const second = Number(await countdown.textContent())
+  expect(first).toBeGreaterThan(0)
+  expect(second).toBeLessThan(first)
+  await page.screenshot({ path: `artifacts/job-countdown-${testInfo.project.name}.png`, fullPage: true })
+})
+
 test('insufficient APT marks the transfer row and blocks confirmation', async ({ page }, testInfo) => {
   let stepId = ''
   let lastDraftSteps: Array<Record<string, unknown>> = []
