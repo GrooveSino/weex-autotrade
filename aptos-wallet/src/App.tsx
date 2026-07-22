@@ -428,6 +428,12 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
       setRefreshingGroupIds((current) => { const next = new Set(current); next.delete(group.id); return next })
     }
   }
+  const archiveAccount = async (wallet: WalletRecord) => {
+    await run(async () => {
+      await post(`/api/v1/wallets/${wallet.id}/archive`)
+      await reload()
+    }, '账户已归档')
+  }
   return <>
       <PageHeader title="钱包" subtitle={`${wallets.length} 个账户 · Aptos 主网 · ${autoRefreshEnabled ? '每 30 秒自动刷新' : '自动刷新已关闭'}`} actions={<>
       <label className="refresh-switch" title="控制后台每 30 秒自动刷新余额">
@@ -471,19 +477,19 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
               </div></details>
             </div>
           </div>
-          {isOpen && <WalletList wallets={wallets.filter((wallet) => wallet.groupId === group.id)} refreshingWalletIds={refreshingWalletIds} changedWalletIds={changedWalletIds} onReceive={onReceive} onHistory={onHistory} onAlias={onAlias} onTransfer={onTransfer} onDetails={onDetails} />}
+          {isOpen && <WalletList wallets={wallets.filter((wallet) => wallet.groupId === group.id)} refreshingWalletIds={refreshingWalletIds} changedWalletIds={changedWalletIds} onReceive={onReceive} onHistory={onHistory} onAlias={onAlias} onTransfer={onTransfer} onArchive={archiveAccount} onDetails={onDetails} />}
         </div>
       })}
     </section>
     <section className="table-section standalone-section">
       <div className="section-head"><h2>导入的账户</h2><span>使用私钥单独导入</span></div>
       {wallets.length === 0 ? <Empty icon={<WalletCards size={28} />} text="还没有钱包，先创建或恢复一个钱包。" /> :
-        standalone.length === 0 ? <Empty icon={<WalletCards size={28} />} text="没有导入的账户。" /> : <WalletList wallets={standalone} refreshingWalletIds={refreshingWalletIds} changedWalletIds={changedWalletIds} onReceive={onReceive} onHistory={onHistory} onAlias={onAlias} onTransfer={onTransfer} onDetails={onDetails} />}
+        standalone.length === 0 ? <Empty icon={<WalletCards size={28} />} text="没有导入的账户。" /> : <WalletList wallets={standalone} refreshingWalletIds={refreshingWalletIds} changedWalletIds={changedWalletIds} onReceive={onReceive} onHistory={onHistory} onAlias={onAlias} onTransfer={onTransfer} onArchive={archiveAccount} onDetails={onDetails} />}
     </section>
   </>
 }
 
-function WalletList({ wallets, refreshingWalletIds, changedWalletIds, onReceive, onHistory, onAlias, onTransfer, onDetails }: { wallets: WalletRecord[]; refreshingWalletIds: Set<string>; changedWalletIds: Set<string>; onReceive: (wallet: WalletRecord) => void; onHistory: (wallet: WalletRecord) => void; onAlias: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onDetails: (wallet: WalletRecord) => void }) {
+function WalletList({ wallets, refreshingWalletIds, changedWalletIds, onReceive, onHistory, onAlias, onTransfer, onArchive, onDetails }: { wallets: WalletRecord[]; refreshingWalletIds: Set<string>; changedWalletIds: Set<string>; onReceive: (wallet: WalletRecord) => void; onHistory: (wallet: WalletRecord) => void; onAlias: (wallet: WalletRecord) => void; onTransfer: (wallet: WalletRecord) => void; onArchive: (wallet: WalletRecord) => Promise<void>; onDetails: (wallet: WalletRecord) => void }) {
   return <div className="account-list">{wallets.map((wallet) => { const refreshing = refreshingWalletIds.has(wallet.id); const changed = changedWalletIds.has(wallet.id); return <article className={`account-row ${refreshing ? 'refreshing' : ''} ${changed ? 'balance-changed' : ''}`} key={wallet.id} aria-busy={refreshing}>
     <div className="account-identity"><div className="account-name-line"><strong className="account-name-badge">{accountLabel(wallet)}</strong><IconButton title={`设置 ${accountLabel(wallet)} 的别名`} icon={<Pencil size={15} />} onClick={() => onAlias(wallet)} /></div><Address value={wallet.address} />{wallet.balanceError && <span className="row-error">{wallet.balanceError}</span>}</div>
     <div className="account-state"><Status value={wallet.accountStatus} /></div>
@@ -491,11 +497,43 @@ function WalletList({ wallets, refreshingWalletIds, changedWalletIds, onReceive,
     <AccountBalance label="USDt" value={wallet.balances.find((item) => item.asset === 'USDT')?.display ?? '-'} loading={refreshing} />
     <div className="account-actions">
       <button className="secondary small" onClick={() => onReceive(wallet)}><QrCode size={14} />收款</button>
+      <ArchiveAccountButton wallet={wallet} onArchive={onArchive} />
       <button className="secondary small" onClick={() => onHistory(wallet)}><FileClock size={14} />日志</button>
       <button className="primary small" onClick={() => onTransfer(wallet)}><Send size={14} />转账</button>
       <IconButton title={`${accountLabel(wallet)} 详情`} icon={<Ellipsis size={17} />} onClick={() => onDetails(wallet)} />
     </div>
   </article> })}</div>
+}
+
+function ArchiveAccountButton({ wallet, onArchive }: { wallet: WalletRecord; onArchive: (wallet: WalletRecord) => Promise<void> }) {
+  const [armed, setArmed] = useState(false)
+  const [archiving, setArchiving] = useState(false)
+  const resetTimer = useRef<number | null>(null)
+  const clearResetTimer = () => {
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current)
+    resetTimer.current = null
+  }
+  useEffect(() => () => clearResetTimer(), [])
+  const handleClick = async () => {
+    if (archiving) return
+    if (!armed) {
+      setArmed(true)
+      clearResetTimer()
+      resetTimer.current = window.setTimeout(() => {
+        setArmed(false)
+        resetTimer.current = null
+      }, 5_000)
+      return
+    }
+    clearResetTimer()
+    setArchiving(true)
+    await onArchive(wallet)
+    setArchiving(false)
+    setArmed(false)
+  }
+  return <button className={`account-archive-button ${armed ? 'is-confirming' : ''}`} aria-label={armed ? `确认归档 ${accountLabel(wallet)}` : `归档 ${accountLabel(wallet)}`} title={armed ? '再次点击，归档此账户' : '归档此账户'} onClick={() => void handleClick()} disabled={archiving}>
+    {armed ? <Check size={14} /> : <Archive size={14} />}{archiving ? '归档中' : armed ? '点击确认' : '归档'}
+  </button>
 }
 
 function AccountBalance({ label, value, loading = false }: { label: string; value: string; loading?: boolean }) {

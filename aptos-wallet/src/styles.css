@@ -642,6 +642,27 @@ tbody tr:hover {
     justify-content: flex-end;
     gap: 7px;
 }
+.account-archive-button {
+    width: 92px;
+    justify-content: center;
+    gap: 5px;
+    color: #9d352a;
+    border: 1px solid #e6bcb7;
+    background: #fffafa;
+}
+.account-archive-button:hover:not(:disabled) {
+    color: #85281f;
+    border-color: #cf847c;
+    background: #fff1ef;
+}
+.account-archive-button.is-confirming {
+    color: #fff;
+    border-color: #af3428;
+    background: #b83d31;
+}
+.account-archive-button.is-confirming:hover:not(:disabled) {
+    background: #982d24;
+}
 .icon-button {
     width: 30px;
     height: 30px;
@@ -2802,7 +2823,8 @@ textarea {
         justify-content: stretch;
     }
     .account-actions .primary,
-    .account-actions .secondary {
+    .account-actions .secondary,
+    .account-actions .account-archive-button {
         flex: 1;
     }
     .history-toolbar {

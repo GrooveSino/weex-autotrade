@@ -108,6 +108,22 @@ test('wallet accounts and transfer builder remain usable', async ({ page }, test
   await page.screenshot({ path: `artifacts/preview-${testInfo.project.name}.png`, fullPage: true })
 })
 
+test('account archive requires a second click in the same place', async ({ page }) => {
+  let archiveRequests = 0
+  await page.route(`**/api/v1/wallets/${walletB.id}/archive`, async (route) => {
+    archiveRequests += 1
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /日常钱包/ }).click()
+  const account = page.locator('.account-row').filter({ hasText: '账户 1' })
+  await account.getByRole('button', { name: '归档 账户 1' }).click()
+  await expect(account.getByRole('button', { name: '确认归档 账户 1' })).toHaveText('点击确认')
+  expect(archiveRequests).toBe(0)
+  await account.getByRole('button', { name: '确认归档 账户 1' }).click()
+  await expect.poll(() => archiveRequests).toBe(1)
+})
+
 test('transfer interval can be disabled for continuous execution', async ({ page }) => {
   let submitted: Record<string, unknown> | null = null
   await page.route('**/api/v1/jobs', async (route) => {
