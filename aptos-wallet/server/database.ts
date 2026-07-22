@@ -114,6 +114,33 @@ export function openDatabase(path: string): SqliteDatabase {
       FOREIGN KEY(step_id) REFERENCES job_steps(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS chain_transfer_logs (
+      id TEXT PRIMARY KEY,
+      wallet_id TEXT NOT NULL,
+      transaction_version INTEGER NOT NULL,
+      event_index INTEGER NOT NULL,
+      transaction_hash TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK(direction IN ('in', 'out')),
+      counterparty_address TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      amount_base_units TEXT NOT NULL,
+      amount_display TEXT NOT NULL,
+      gas_fee_base_units TEXT,
+      chain_timestamp TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(wallet_id) REFERENCES wallets(id) ON DELETE CASCADE,
+      UNIQUE(wallet_id, transaction_version, event_index)
+    );
+
+    CREATE TABLE IF NOT EXISTS chain_transfer_sync (
+      wallet_id TEXT PRIMARY KEY,
+      next_before_version INTEGER,
+      has_more INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(wallet_id) REFERENCES wallets(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS address_book_entries (
       id TEXT PRIMARY KEY,
       label TEXT NOT NULL,
@@ -134,6 +161,7 @@ export function openDatabase(path: string): SqliteDatabase {
     CREATE INDEX IF NOT EXISTS idx_steps_source_updated ON job_steps(source_wallet_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_steps_target_updated ON job_steps(target_wallet_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_attempts_job ON transaction_attempts(job_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chain_logs_wallet_time ON chain_transfer_logs(wallet_id, transaction_version DESC, event_index DESC);
     CREATE INDEX IF NOT EXISTS idx_address_book_label ON address_book_entries(label COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
   `)

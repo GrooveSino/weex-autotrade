@@ -16,7 +16,7 @@ import {
   type TransferStepCheck,
   type TransferJob,
 } from '../shared/types.js'
-import type { ChainGateway, TransferRequest } from './aptos-gateway.js'
+import type { ChainGateway, ChainTransferCandidate, TransferRequest } from './aptos-gateway.js'
 import type { SqliteDatabase } from './database.js'
 import { WalletService } from './wallets.js'
 
@@ -24,6 +24,21 @@ const GAS_RESERVE_BASE_UNITS = 100_000n
 const GAS_BACKFILL_LIMIT = 25
 const GAS_BACKFILL_CONCURRENCY = 2
 const GAS_BACKFILL_RETRY_COOLDOWN_MS = 5 * 60_000
+const CHAIN_SYNC_BATCH_SIZE = 5
+
+interface ChainSyncResult {
+  hasMore: boolean
+  syncedAt: string | null
+  added: number
+}
+
+export interface JobPreflightProgress {
+  jobId: string
+  phase: 'prepare' | 'asset' | 'balances' | 'simulation' | 'finalizing' | 'complete' | 'failed'
+  message: string
+  completed: number
+  total: number
+}
 
 interface MissingGasAttemptRow {
   id: string
@@ -69,6 +84,7 @@ interface StepRow {
 
 interface AccountTransferRow {
   id: string
+  source: 'local' | 'chain'
   job_id: string
   job_name: string
   job_status: JobStatus
@@ -114,6 +130,7 @@ function mapStep(row: StepRow): FrozenTransferStep {
 function mapAccountTransfer(row: AccountTransferRow): AccountTransferLog {
   return {
     id: row.id,
+    source: row.source,
     jobId: row.job_id,
     jobName: row.job_name,
     jobStatus: row.job_status,
@@ -141,6 +158,7 @@ export class JobService extends EventEmitter {
   private cancelRequested = false
   private readonly gasBackfillAttemptedAt = new Map<string, number>()
   private readonly gasBackfillInFlight = new Map<string, Promise<boolean>>()
+  private readonly chainSyncInFlight = new Map<string, Promise<ChainSyncResult>>()
 
   constructor(
     private readonly db: SqliteDatabase,
@@ -215,7 +233,10 @@ export class JobService extends EventEmitter {
     if (job.status !== 'draft' && job.status !== 'previewed') throw new Error('当前任务不能重新预览')
     const rows = this.stepRows(id)
     if (!rows.length) throw new Error('任务至少需要一笔转账')
-    if (rows.some((row) => row.asset === 'USDT')) await this.gateway.validateUsdt()
+    const report = (phase: JobPreflightProgress['phase'], message: string, completed = 0, total = 0) => {
+      this.emit('preflight-progress', { jobId: id, phase, message, completed, total } satisfies JobPreflightProgress)
+    }
+    report('prepare', '正在整理转账清单')
     const ordered = job.shuffle ? shuffle(rows) : rows
     const frozen = ordered.map((row, position) => freezeStep(row, position, job.intervalMinSeconds, job.intervalMaxSeconds, position === ordered.length - 1))
     try {
@@ -223,6 +244,7 @@ export class JobService extends EventEmitter {
     } catch (error) {
       const message = safeError(error)
       const position = Number(message.match(/第 (\d+) 笔/)?.[1] ?? '1') - 1
+      report('failed', message)
       return {
         valid: false,
         job: { ...job, steps: frozen },
@@ -230,26 +252,40 @@ export class JobService extends EventEmitter {
         summary: null,
       }
     }
-    const { summary, projectedMaxAmounts, checks } = await this.inspectBalances(job, frozen)
-    if (checks.some((check) => !check.valid)) return { valid: false, job: { ...job, steps: frozen }, checks, summary }
-    const phrase = this.confirmationPhrase(job.id, frozen.length)
-    const now = new Date().toISOString()
-    this.db.transaction(() => {
-      this.db.prepare('UPDATE job_steps SET position = position + 10000 WHERE job_id = ?').run(id)
-      this.db.prepare(`UPDATE jobs SET status = 'previewed', confirmation_phrase = ?, summary_json = ?, error = NULL, updated_at = ? WHERE id = ?`)
-        .run(phrase, JSON.stringify(summary), now, id)
-      const update = this.db.prepare(`
-        UPDATE job_steps SET position = ?, frozen_amount_base_units = ?, frozen_amount_display = ?, wait_after_seconds = ?,
-          status = 'pending', tx_hash = NULL, error = NULL, updated_at = ? WHERE id = ?
-      `)
-      for (const step of frozen) {
-        const maxProjection = projectedMaxAmounts.get(step.id)
-        update.run(step.position, step.frozenAmountBaseUnits, maxProjection ? formatAmount(maxProjection, step.asset) : step.frozenAmountDisplay,
-          step.waitAfterSeconds, now, step.id)
+    try {
+      if (rows.some((row) => row.asset === 'USDT')) {
+        report('asset', '正在校验 USDt 合约元数据')
+        await this.gateway.validateUsdt()
       }
-    })()
-    this.emitChange()
-    return { valid: true, job: this.get(id), checks, summary }
+      const { summary, projectedMaxAmounts, checks } = await this.inspectBalances(job, frozen, report)
+      if (checks.some((check) => !check.valid)) {
+        report('complete', '检查完成，发现需要修正的条目', 1, 1)
+        return { valid: false, job: { ...job, steps: frozen }, checks, summary }
+      }
+      report('finalizing', '正在冻结金额、顺序与等待时间')
+      const phrase = this.confirmationPhrase(job.id, frozen.length)
+      const now = new Date().toISOString()
+      this.db.transaction(() => {
+        this.db.prepare('UPDATE job_steps SET position = position + 10000 WHERE job_id = ?').run(id)
+        this.db.prepare(`UPDATE jobs SET status = 'previewed', confirmation_phrase = ?, summary_json = ?, error = NULL, updated_at = ? WHERE id = ?`)
+          .run(phrase, JSON.stringify(summary), now, id)
+        const update = this.db.prepare(`
+          UPDATE job_steps SET position = ?, frozen_amount_base_units = ?, frozen_amount_display = ?, wait_after_seconds = ?,
+            status = 'pending', tx_hash = NULL, error = NULL, updated_at = ? WHERE id = ?
+        `)
+        for (const step of frozen) {
+          const maxProjection = projectedMaxAmounts.get(step.id)
+          update.run(step.position, step.frozenAmountBaseUnits, maxProjection ? formatAmount(maxProjection, step.asset) : step.frozenAmountDisplay,
+            step.waitAfterSeconds, now, step.id)
+        }
+      })()
+      this.emitChange()
+      report('complete', '预览检查完成，可以确认执行', 1, 1)
+      return { valid: true, job: this.get(id), checks, summary }
+    } catch (error) {
+      report('failed', safeError(error))
+      throw error
+    }
   }
 
   async reorderPreview(id: string, stepIds: string[]): Promise<JobPreflight> {
@@ -333,6 +369,55 @@ export class JobService extends EventEmitter {
     return this.get(id)
   }
 
+  async reconcileUncertain(id: string): Promise<TransferJob> {
+    const job = this.get(id)
+    if (job.status !== 'uncertain') throw new Error('只有待核对任务可以重新核对')
+    const attempts = this.db.prepare(`
+      SELECT id, step_id, tx_hash FROM transaction_attempts
+      WHERE job_id = ? AND state = 'uncertain'
+      ORDER BY created_at ASC
+    `).all(id) as Array<{ id: string; step_id: string; tx_hash: string }>
+    if (!attempts.length) throw new Error('没有需要核对的交易')
+
+    let pending = 0
+    for (const attempt of attempts) {
+      const result = await this.gateway.findTransaction(attempt.tx_hash)
+      if (!result.found || result.success === undefined) {
+        if (result.found) pending += 1
+        else {
+          const message = '已重新核对：链上未发现该交易，未执行自动重发。'
+          this.updateAttempt(attempt.id, 'failed', message)
+          this.setStepStatus(attempt.step_id, 'failed', message)
+        }
+        continue
+      }
+      if (!result.success) {
+        const message = result.vmStatus ?? '链上执行失败'
+        this.updateAttempt(attempt.id, 'failed', message, result.gasFeeBaseUnits)
+        this.setStepStatus(attempt.step_id, 'failed', message)
+        continue
+      }
+      this.updateAttempt(attempt.id, 'confirmed', null, result.gasFeeBaseUnits)
+      this.setStepStatus(attempt.step_id, 'confirmed', null)
+    }
+
+    if (pending) {
+      this.setJobStatus(id, 'uncertain', '链上交易仍在确认，请稍后重新核对')
+      return this.get(id)
+    }
+    const updated = this.get(id)
+    if (updated.steps.some((step) => step.status === 'failed')) {
+      this.setJobStatus(id, 'failed', '已重新核对：存在未上链或链上失败的交易，未自动重发。')
+    } else if (updated.steps.every((step) => step.status === 'confirmed')) {
+      this.setJobStatus(id, 'completed', null)
+      this.audit('job.completed_after_reconcile', id, {})
+    } else {
+      this.setJobStatus(id, 'paused', '已核对已提交交易；剩余步骤需要手动恢复。')
+    }
+    this.audit('job.uncertain_reconciled', id, {})
+    return this.get(id)
+  }
+
   cancel(id: string): TransferJob | null {
     const job = this.get(id)
     if (!['draft', 'previewed', 'running', 'paused'].includes(job.status)) throw new Error('当前任务不能取消')
@@ -350,60 +435,165 @@ export class JobService extends EventEmitter {
     return this.db.prepare('SELECT * FROM transaction_attempts WHERE job_id = ? ORDER BY created_at ASC').all(jobId) as Record<string, unknown>[]
   }
 
+  async syncAccountTransfers(walletId: string, continueOlder: boolean): Promise<ChainSyncResult> {
+    const active = this.chainSyncInFlight.get(walletId)
+    if (active) return active
+    const operation = this.performAccountTransferSync(walletId, continueOlder)
+    this.chainSyncInFlight.set(walletId, operation)
+    try {
+      return await operation
+    } finally {
+      if (this.chainSyncInFlight.get(walletId) === operation) this.chainSyncInFlight.delete(walletId)
+    }
+  }
+
+  private async performAccountTransferSync(walletId: string, continueOlder: boolean): Promise<ChainSyncResult> {
+    const wallet = this.wallets.get(walletId)
+    const previous = this.readChainSync(walletId)
+    if (continueOlder && !previous.hasMore) return { ...previous, added: 0 }
+    if (!continueOlder && previous.hasMore) return { ...previous, added: 0 }
+    const beforeVersion = continueOlder ? previous.nextBeforeVersion?.toString() ?? null : null
+    const page = await this.gateway.getAccountTransferHistory(wallet.address, beforeVersion, CHAIN_SYNC_BATCH_SIZE)
+    const byVersion = new Map<string, ChainTransferCandidate[]>()
+    for (const record of page.records) {
+      const group = byVersion.get(record.transactionVersion) ?? []
+      group.push(record)
+      byVersion.set(record.transactionVersion, group)
+    }
+    let added = 0
+    let reachedKnownRecord = false
+    let lastVersion = page.nextBeforeVersion
+    for (const [version, records] of byVersion) {
+      lastVersion = version
+      if (this.db.prepare('SELECT 1 FROM chain_transfer_logs WHERE wallet_id = ? AND transaction_version = ? LIMIT 1').get(walletId, Number(version))) {
+        reachedKnownRecord = true
+        break
+      }
+      const transactionHash = await this.gateway.getTransactionHashByVersion(version)
+      const localRecord = this.db.prepare(`
+        SELECT 1
+        FROM transaction_attempts AS attempt
+        JOIN job_steps AS step ON step.id = attempt.step_id
+        WHERE attempt.tx_hash = ?
+          AND (step.source_wallet_id = ? OR step.target_wallet_id = ? OR lower(step.target_address) = lower(?))
+        LIMIT 1
+      `).get(transactionHash, walletId, walletId, wallet.address)
+      if (localRecord) {
+        reachedKnownRecord = true
+        break
+      }
+      const now = new Date().toISOString()
+      this.db.transaction(() => {
+        const insert = this.db.prepare(`
+          INSERT OR IGNORE INTO chain_transfer_logs(
+            id, wallet_id, transaction_version, event_index, transaction_hash, direction, counterparty_address,
+            asset, amount_base_units, amount_display, gas_fee_base_units, chain_timestamp, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        for (const record of records) {
+          const result = insert.run(
+            randomUUID(), walletId, Number(record.transactionVersion), record.eventIndex, transactionHash, record.direction,
+            record.counterpartyAddress, record.asset, record.amountBaseUnits, formatAmount(BigInt(record.amountBaseUnits), record.asset),
+            record.gasFeeBaseUnits, normalizeChainTimestamp(record.chainTimestamp), now, now,
+          )
+          added += result.changes
+        }
+      })()
+    }
+    const hasMore = !reachedKnownRecord && page.hasMore
+    const nextBeforeVersion = hasMore && lastVersion ? Number(lastVersion) : null
+    const syncedAt = new Date().toISOString()
+    this.db.prepare(`
+      INSERT INTO chain_transfer_sync(wallet_id, next_before_version, has_more, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(wallet_id) DO UPDATE SET next_before_version = excluded.next_before_version,
+        has_more = excluded.has_more, updated_at = excluded.updated_at
+    `).run(walletId, nextBeforeVersion, Number(hasMore), syncedAt)
+    this.audit('wallet.chain_history_synced', walletId, { added, hasMore })
+    return { hasMore, syncedAt, added }
+  }
+
+  private readChainSync(walletId: string): ChainSyncResult & { nextBeforeVersion: number | null } {
+    const row = this.db.prepare('SELECT next_before_version, has_more, updated_at FROM chain_transfer_sync WHERE wallet_id = ?').get(walletId) as { next_before_version: number | null; has_more: number; updated_at: string } | undefined
+    return { hasMore: Boolean(row?.has_more), syncedAt: row?.updated_at ?? null, added: 0, nextBeforeVersion: row?.next_before_version ?? null }
+  }
+
   accountTransfers(walletId: string, limit = 100, offset = 0, direction: 'all' | 'in' | 'out' = 'all'): AccountTransferLogPage {
     this.wallets.get(walletId)
     const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit)))
     const boundedOffset = Math.max(0, Math.trunc(offset))
-    const counts = this.db.prepare(`
-      SELECT
-        COUNT(*) AS total,
-        SUM(CASE WHEN source_wallet_id = ? THEN 1 ELSE 0 END) AS outgoing,
-        SUM(CASE WHEN source_wallet_id <> ? AND target_wallet_id = ? THEN 1 ELSE 0 END) AS incoming
-      FROM job_steps
-      WHERE (source_wallet_id = ? OR target_wallet_id = ?)
-        AND EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = job_steps.id)
-    `).get(walletId, walletId, walletId, walletId, walletId) as { total: number; incoming: number | null; outgoing: number | null }
-    const condition = direction === 'out' ? 'step.source_wallet_id = ?'
-      : direction === 'in' ? 'step.source_wallet_id <> ? AND step.target_wallet_id = ?'
-        : 'step.source_wallet_id = ? OR step.target_wallet_id = ?'
-    const conditionParams = direction === 'out' ? [walletId] : [walletId, walletId]
+    const cte = `
+      WITH account_logs AS (
+        SELECT
+          'local' AS source,
+          step.id,
+          step.job_id,
+          job.name AS job_name,
+          job.status AS job_status,
+          step.position,
+          CASE WHEN step.source_wallet_id = $walletId THEN 'out' ELSE 'in' END AS direction,
+          CASE WHEN step.source_wallet_id = $walletId THEN step.target_address ELSE source.address END AS counterparty_address,
+          CASE WHEN step.source_wallet_id = $walletId THEN step.target_wallet_id ELSE step.source_wallet_id END AS counterparty_wallet_id,
+          step.asset,
+          step.amount_mode,
+          step.amount_min,
+          step.amount_max,
+          step.frozen_amount_display,
+          step.status,
+          step.tx_hash,
+          (SELECT attempt.gas_fee_base_units FROM transaction_attempts AS attempt
+            WHERE attempt.step_id = step.id AND attempt.gas_fee_base_units IS NOT NULL
+            ORDER BY attempt.created_at DESC LIMIT 1) AS gas_fee_base_units,
+          step.error,
+          job.created_at,
+          step.updated_at
+        FROM job_steps AS step
+        JOIN jobs AS job ON job.id = step.job_id
+        JOIN wallets AS source ON source.id = step.source_wallet_id
+        WHERE (step.source_wallet_id = $walletId OR step.target_wallet_id = $walletId)
+          AND EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = step.id)
+        UNION ALL
+        SELECT
+          'chain' AS source,
+          chain.id,
+          'chain:' || chain.transaction_version || ':' || chain.event_index AS job_id,
+          '链上交易' AS job_name,
+          'completed' AS job_status,
+          0 AS position,
+          chain.direction,
+          chain.counterparty_address,
+          (SELECT id FROM wallets WHERE lower(address) = lower(chain.counterparty_address) LIMIT 1) AS counterparty_wallet_id,
+          chain.asset,
+          'fixed' AS amount_mode,
+          chain.amount_display AS amount_min,
+          NULL AS amount_max,
+          chain.amount_display AS frozen_amount_display,
+          'confirmed' AS status,
+          chain.transaction_hash AS tx_hash,
+          chain.gas_fee_base_units,
+          NULL AS error,
+          chain.chain_timestamp AS created_at,
+          chain.chain_timestamp AS updated_at
+        FROM chain_transfer_logs AS chain
+        WHERE chain.wallet_id = $walletId
+      )`
+    const directionCondition = direction === 'out' ? "direction = 'out'" : direction === 'in' ? "direction = 'in'" : '1 = 1'
+    const counts = this.db.prepare(`${cte} SELECT COUNT(*) AS total, SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS incoming, SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS outgoing FROM account_logs`).get({ walletId }) as { total: number; incoming: number | null; outgoing: number | null }
     const total = direction === 'out' ? counts.outgoing ?? 0 : direction === 'in' ? counts.incoming ?? 0 : counts.total
-    const rows = this.db.prepare(`
-      SELECT
-        step.id,
-        step.job_id,
-        job.name AS job_name,
-        job.status AS job_status,
-        step.position,
-        CASE WHEN step.source_wallet_id = ? THEN 'out' ELSE 'in' END AS direction,
-        CASE WHEN step.source_wallet_id = ? THEN step.target_address ELSE source.address END AS counterparty_address,
-        CASE WHEN step.source_wallet_id = ? THEN step.target_wallet_id ELSE step.source_wallet_id END AS counterparty_wallet_id,
-        step.asset,
-        step.amount_mode,
-        step.amount_min,
-        step.amount_max,
-        step.frozen_amount_display,
-        step.status,
-        step.tx_hash,
-        (SELECT attempt.gas_fee_base_units FROM transaction_attempts AS attempt
-          WHERE attempt.step_id = step.id AND attempt.gas_fee_base_units IS NOT NULL
-          ORDER BY attempt.created_at DESC LIMIT 1) AS gas_fee_base_units,
-        step.error,
-        job.created_at,
-        step.updated_at
-      FROM job_steps AS step
-      JOIN jobs AS job ON job.id = step.job_id
-      JOIN wallets AS source ON source.id = step.source_wallet_id
-      WHERE (${condition})
-        AND EXISTS (SELECT 1 FROM transaction_attempts AS attempt WHERE attempt.step_id = step.id)
-      ORDER BY step.updated_at DESC, job.created_at DESC, step.position DESC
-      LIMIT ? OFFSET ?
-    `).all(walletId, walletId, walletId, ...conditionParams, boundedLimit, boundedOffset) as AccountTransferRow[]
-    return { items: rows.map(mapAccountTransfer), total, counts: { all: counts.total, in: counts.incoming ?? 0, out: counts.outgoing ?? 0 } }
+    const rows = this.db.prepare(`${cte} SELECT * FROM account_logs WHERE ${directionCondition} ORDER BY updated_at DESC, id DESC LIMIT $limit OFFSET $offset`).all({ walletId, limit: boundedLimit, offset: boundedOffset }) as AccountTransferRow[]
+    const sync = this.readChainSync(walletId)
+    return { items: rows.map(mapAccountTransfer), total, counts: { all: counts.total, in: counts.incoming ?? 0, out: counts.outgoing ?? 0 }, sync: { hasMore: sync.hasMore, syncedAt: sync.syncedAt, added: 0, error: null } }
   }
 
   async accountTransfersWithGasBackfill(walletId: string, limit = 100, offset = 0, direction: 'all' | 'in' | 'out' = 'all'): Promise<AccountTransferLogPage> {
     this.wallets.get(walletId)
+    let syncError: string | null = null
+    let added = 0
+    try {
+      added = (await this.syncAccountTransfers(walletId, false)).added
+    } catch (error) {
+      syncError = safeError(error)
+    }
     const attempts = this.db.prepare(`
       SELECT attempt.id, attempt.job_id, attempt.tx_hash
       FROM transaction_attempts AS attempt
@@ -416,7 +606,10 @@ export class JobService extends EventEmitter {
       LIMIT ?
     `).all(walletId, walletId, GAS_BACKFILL_LIMIT) as MissingGasAttemptRow[]
     await this.backfillGasFees(attempts)
-    return this.accountTransfers(walletId, limit, offset, direction)
+    const result = this.accountTransfers(walletId, limit, offset, direction)
+    result.sync.added = added
+    result.sync.error = syncError
+    return result
   }
 
   private async run(jobId: string): Promise<void> {
@@ -453,18 +646,18 @@ export class JobService extends EventEmitter {
     try {
       let amount = step.frozenAmountBaseUnits ? BigInt(step.frozenAmountBaseUnits) : null
       const sponsored = Boolean(job.gasPayerWalletId && job.gasPayerWalletId !== step.sourceWalletId)
+      const sourceAddress = this.wallets.get(step.sourceWalletId).address
+      let assetBalance: bigint
       if (step.amountMode === 'max') {
-        const balance = await this.gateway.getBalance(this.wallets.get(step.sourceWalletId).address, step.asset, 'high')
+        assetBalance = await this.gateway.getBalance(sourceAddress, step.asset, 'high')
         if (step.asset === 'APT' && !sponsored) {
-          const estimate = await this.gateway.estimateGas(this.transferRequest(job, step, 1n))
+          const estimate = await this.gateway.estimateGas(this.transferRequest(job, step, 1n, assetBalance))
           const networkReserve = estimate.gasUnitPrice * estimate.maxGasAmount
           const reserve = networkReserve > GAS_RESERVE_BASE_UNITS ? networkReserve : GAS_RESERVE_BASE_UNITS
-          amount = balance - reserve
-        } else amount = balance
-      }
+          amount = assetBalance - reserve
+        } else amount = assetBalance
+      } else assetBalance = await this.gateway.getBalance(sourceAddress, step.asset, 'high')
       if (!amount || amount <= 0n) throw new Error('可转金额不足')
-      const sourceAddress = this.wallets.get(step.sourceWalletId).address
-      const assetBalance = await this.gateway.getBalance(sourceAddress, step.asset, 'high')
       if (assetBalance < amount) throw new Error('链上余额已变化，任务已暂停')
       const prepared = await this.gateway.prepareTransfer(this.transferRequest(job, step, amount))
       const attemptId = randomUUID()
@@ -516,7 +709,7 @@ export class JobService extends EventEmitter {
         ...(managedTargetId ? [managedTargetId] : []),
         ...(job.gasPayerWalletId ? [job.gasPayerWalletId] : []),
       ])
-      await Promise.all([...relatedWalletIds].map((walletId) => this.wallets.refresh(walletId, 'high')))
+      await Promise.all([...relatedWalletIds].map((walletId) => this.wallets.refreshAsset(walletId, step.asset, 'high')))
       this.emitChange()
       return 'confirmed'
     } catch (error) {
@@ -605,17 +798,36 @@ export class JobService extends EventEmitter {
     return task
   }
 
-  private async inspectBalances(job: TransferJob, steps: FrozenTransferStep[]): Promise<{ summary: JobSummary; projectedMaxAmounts: Map<string, bigint>; checks: TransferStepCheck[] }> {
+  private async inspectBalances(
+    job: TransferJob,
+    steps: FrozenTransferStep[],
+    report: (phase: JobPreflightProgress['phase'], message: string, completed?: number, total?: number) => void,
+  ): Promise<{ summary: JobSummary; projectedMaxAmounts: Map<string, bigint>; checks: TransferStepCheck[] }> {
     const walletById = new Map(this.wallets.list().map((wallet) => [wallet.id, wallet]))
-    const requiredIds = new Set(steps.flatMap((step) => [step.sourceWalletId, ...(step.targetWalletId ? [step.targetWalletId] : [])]))
+    const requiredIds = new Set(steps.map((step) => step.sourceWalletId))
     if (job.gasPayerWalletId) requiredIds.add(job.gasPayerWalletId)
     for (const id of requiredIds) if (!walletById.has(id)) throw new Error(`钱包不存在：${id}`)
     const ledger = new Map<string, bigint>()
     const key = (walletId: string, asset: AssetId) => `${walletId}:${asset}`
-    for (const id of requiredIds) {
-      const wallet = walletById.get(id)!
-      for (const asset of ['APT', 'USDT'] as const) ledger.set(key(id, asset), await this.gateway.getBalance(wallet.address, asset))
+    const balanceRequirements = new Map<string, { walletId: string; asset: AssetId }>()
+    const requireBalance = (walletId: string, asset: AssetId) => balanceRequirements.set(key(walletId, asset), { walletId, asset })
+    for (const step of steps) {
+      requireBalance(step.sourceWalletId, step.asset)
+      const gasWalletId = job.gasPayerWalletId && job.gasPayerWalletId !== step.sourceWalletId
+        ? job.gasPayerWalletId
+        : step.sourceWalletId
+      requireBalance(gasWalletId, 'APT')
     }
+    const totalChecks = balanceRequirements.size + steps.length
+    let completedChecks = 0
+    report('balances', `正在读取 ${balanceRequirements.size} 项必要余额`, completedChecks, totalChecks)
+    await Promise.all([...balanceRequirements.values()].map(async ({ walletId, asset }) => {
+      const wallet = walletById.get(walletId)!
+      const balance = await this.gateway.getBalance(wallet.address, asset, 'high')
+      ledger.set(key(walletId, asset), balance)
+      completedChecks += 1
+      report('balances', `已读取 ${wallet.label} 的 ${ASSETS[asset].symbol} 余额`, completedChecks, totalChecks)
+    }))
     let aptTotal = 0n
     let usdtTotal = 0n
     let estimatedGas = 0n
@@ -644,12 +856,29 @@ export class JobService extends EventEmitter {
       if (walletById.get(step.sourceWalletId)!.address === step.targetAddress) {
         check.error = '不能转账给同一个账户'
         checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔地址检查未通过`, completedChecks, totalChecks)
         continue
       }
       let amount = step.frozenAmountBaseUnits ? BigInt(step.frozenAmountBaseUnits) : sourceBalance
+      if (amount <= 0n || sourceBalance <= 0n) {
+        check.error = `${ASSETS[step.asset].symbol} 可转余额不足`
+        checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔余额不足，已跳过模拟`, completedChecks, totalChecks)
+        continue
+      }
+      if (step.amountMode !== 'max' && sourceBalance < amount) {
+        check.error = `${ASSETS[step.asset].symbol} 余额不足，需要 ${formatAmount(amount, step.asset)} ${ASSETS[step.asset].symbol}`
+        checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔余额不足，已跳过模拟`, completedChecks, totalChecks)
+        continue
+      }
       const estimateAmount = step.asset === 'APT' && step.amountMode === 'max' && !sponsored ? 1n : amount > 0n ? amount : 1n
       let gasCost: bigint
       try {
+        report('simulation', `正在模拟第 ${step.position + 1} / ${steps.length} 笔链上交易`, completedChecks, totalChecks)
         const estimate = await this.gateway.estimateGas(this.transferRequest(job, step, estimateAmount, gasBalance))
         gasCost = estimate.gasUnitPrice * estimate.maxGasAmount
         check.estimatedGasBaseUnits = gasCost.toString()
@@ -657,6 +886,8 @@ export class JobService extends EventEmitter {
       } catch (error) {
         check.error = safeError(error, sponsored ? walletById.get(gasWalletId)?.label : undefined)
         checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔模拟失败`, completedChecks, totalChecks)
         continue
       }
       if (step.asset === 'APT' && step.amountMode === 'max' && !sponsored) {
@@ -666,11 +897,15 @@ export class JobService extends EventEmitter {
       if (amount <= 0n) {
         check.error = `${ASSETS[step.asset].symbol} 可转余额不足`
         checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
         continue
       }
       if (sourceBalance < amount) {
         check.error = `${ASSETS[step.asset].symbol} 余额不足，需要 ${formatAmount(amount, step.asset)} ${ASSETS[step.asset].symbol}`
         checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
         continue
       }
       const assetAfterTransfer = sourceBalance - amount
@@ -678,6 +913,8 @@ export class JobService extends EventEmitter {
       if (gasAvailableAfterTransfer < gasCost) {
         check.error = `APT 手续费不足，预计需要 ${formatAmount(gasCost, 'APT')} APT，可用 ${formatAmount(gasAvailableAfterTransfer, 'APT')} APT`
         checks.push(check)
+        completedChecks += 1
+        report('simulation', `第 ${step.position + 1} 笔手续费不足`, completedChecks, totalChecks)
         continue
       }
       ledger.set(sourceKey, assetAfterTransfer)
@@ -691,6 +928,8 @@ export class JobService extends EventEmitter {
       else usdtTotal += amount
       check.valid = true
       checks.push(check)
+      completedChecks += 1
+      report('simulation', `第 ${step.position + 1} 笔模拟通过`, completedChecks, totalChecks)
     }
     if ([...pairCounts.values()].some((count) => count > 1)) warnings.push('清单包含重复的来源、目标与资产组合')
     if (steps.some((step) => step.amountMode === 'max')) warnings.push('全额转账以执行时链上余额为准，预览金额仅供参考')
@@ -881,9 +1120,19 @@ async function sleepInterruptible(milliseconds: number, interrupted: () => boole
   while (Date.now() < end && !interrupted()) await new Promise((resolve) => setTimeout(resolve, Math.min(500, end - Date.now())))
 }
 
+function normalizeChainTimestamp(value: string): string {
+  const explicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`
+  const parsed = new Date(explicitZone)
+  if (Number.isNaN(parsed.getTime())) throw new Error('链上交易时间格式无效')
+  return parsed.toISOString()
+}
+
 function safeError(error: unknown, feePayerLabel?: string): string {
   const message = error instanceof Error ? error.message : String(error)
   const normalized = message.toUpperCase()
+  if (normalized.includes('TOO MANY REQUESTS') || normalized.includes('HTTP 429')) {
+    return 'Aptos 公共节点暂时限流，程序已自动降速并等待；这笔交易没有自动重发。'
+  }
   if (normalized.includes('INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE') || normalized.includes('OUT_OF_GAS') || normalized.includes('MAX_GAS_UNITS_BELOW_MIN')) {
     if (feePayerLabel) return `手续费账户“${feePayerLabel}”的 APT 余额不足，请充值或改用其他手续费账户。`
     return '交易无法支付 APT 网络手续费：请给转出账户充值 APT，或选择一个有 APT 余额的手续费账户。'

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { AssetBalance, AssetId } from '../shared/types.js'
 import { formatAmount } from '../shared/amounts.js'
-import type { ChainGateway, PreparedTransfer, TransferRequest } from '../server/aptos-gateway.js'
+import type { ChainGateway, ChainTransferPage, PreparedTransfer, TransferRequest } from '../server/aptos-gateway.js'
 
 export class FakeGateway implements ChainGateway {
   balances = new Map<string, bigint>()
@@ -13,6 +13,9 @@ export class FakeGateway implements ChainGateway {
   validationError = false
   estimateError: string | null = null
   findTransactionCalls = 0
+  chainHistoryPages: ChainTransferPage[] = []
+  chainHistoryCalls: Array<{ address: string; beforeVersion: string | null; limit: number }> = []
+  transactionHashes = new Map<string, string>()
   private outcomes = new Map<string, { success: boolean; vmStatus: string; gasFeeBaseUnits: string }>()
 
   setBalance(address: string, asset: AssetId, value: bigint): void {
@@ -84,5 +87,14 @@ export class FakeGateway implements ChainGateway {
     this.findTransactionCalls += 1
     const result = this.outcomes.get(hash)
     return result ? { found: true, ...result } : { found: false }
+  }
+
+  async getAccountTransferHistory(address: string, beforeVersion: string | null = null, limit = 5): Promise<ChainTransferPage> {
+    this.chainHistoryCalls.push({ address, beforeVersion, limit })
+    return this.chainHistoryPages.shift() ?? { records: [], hasMore: false, nextBeforeVersion: null }
+  }
+
+  async getTransactionHashByVersion(version: string): Promise<string> {
+    return this.transactionHashes.get(version) ?? `0x${version.padStart(64, '0')}`
   }
 }

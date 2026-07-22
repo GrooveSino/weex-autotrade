@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { SqliteDatabase } from './database.js'
 
-const BACKUP_TABLES = ['vault_meta', 'wallet_groups', 'wallets', 'jobs', 'job_steps', 'transaction_attempts', 'address_book_entries', 'audit_events'] as const
+const BACKUP_TABLES = ['vault_meta', 'wallet_groups', 'wallets', 'jobs', 'job_steps', 'transaction_attempts', 'chain_transfer_logs', 'chain_transfer_sync', 'address_book_entries', 'audit_events'] as const
 
 export interface VaultBackup {
   format: 'aptos-local-wallet-backup'

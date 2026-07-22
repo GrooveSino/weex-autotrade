@@ -11,7 +11,7 @@ import { AptosMainnetGateway, type ChainGateway } from './aptos-gateway.js'
 import { BackupService, type VaultBackup } from './backup.js'
 import { assertLocalOnlyConfig, type AppConfig } from './config.js'
 import { openDatabase, type SqliteDatabase } from './database.js'
-import { JobService } from './jobs.js'
+import { JobService, type JobPreflightProgress } from './jobs.js'
 import { EncryptedVault, VaultLockedError } from './vault.js'
 import { WalletService } from './wallets.js'
 
@@ -194,6 +194,10 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     for (const client of sseClients) client.write(payload)
   }
   jobs.on('change', broadcast)
+  jobs.on('preflight-progress', (progress: JobPreflightProgress) => {
+    const payload = `event: preflight-progress\ndata: ${JSON.stringify(progress)}\n\n`
+    for (const client of sseClients) client.write(payload)
+  })
   const sessionSweep = setInterval(() => {
     if (sessionToken && Date.now() - sessionLastSeenAt >= SESSION_IDLE_TIMEOUT_MS && !jobs.list().some((job) => job.status === 'running')) {
       invalidateSession(true)
@@ -378,6 +382,14 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     const { limit, offset, direction } = transferLogQuery.parse(request.query)
     return jobs.accountTransfersWithGasBackfill(id, limit, offset, direction)
   })
+  app.post('/api/v1/wallets/:id/transfers/sync', { preHandler: requireSession }, async (request) => {
+    const { id } = walletIdParams.parse(request.params)
+    const { limit, offset, direction } = transferLogQuery.parse(request.query)
+    const sync = await jobs.syncAccountTransfers(id, true)
+    const result = jobs.accountTransfers(id, limit, offset, direction)
+    result.sync.added = sync.added
+    return result
+  })
   app.post('/api/v1/wallets/:id/reveal', { preHandler: requireSession }, async (request) => {
     const { id } = walletIdParams.parse(request.params)
     const body = z.object({
@@ -430,6 +442,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   })
   app.post('/api/v1/jobs/:id/pause', { preHandler: requireSession }, async (request) => jobs.pause(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs/:id/resume', { preHandler: requireSession }, async (request) => jobs.resume(jobIdParams.parse(request.params).id))
+  app.post('/api/v1/jobs/:id/reconcile', { preHandler: requireSession }, async (request) => jobs.reconcileUncertain(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs/:id/cancel', { preHandler: requireSession }, async (request) => jobs.cancel(jobIdParams.parse(request.params).id))
   app.get('/api/v1/jobs/:id/attempts', { preHandler: requireSession }, async (request) => jobs.attempts(jobIdParams.parse(request.params).id))
 

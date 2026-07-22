@@ -76,6 +76,46 @@ describe('Aptos HD wallet groups', () => {
     expect(withArchived.nextAccountIndex).toBe(39)
   })
 
+  it('archives an account with history, while discarding unexecuted plans', () => {
+    const account = wallets.restoreGroup('可归档钱包', MNEMONIC, 1).accounts[0]
+    const now = new Date().toISOString()
+    const insertJob = (status: string, withAttempt = false) => {
+      const jobId = crypto.randomUUID()
+      const stepId = crypto.randomUUID()
+      db.prepare(`INSERT INTO jobs(id,name,status,interval_min_seconds,interval_max_seconds,shuffle,created_at,updated_at)
+        VALUES (?, ?, ?, 0, 0, 0, ?, ?)`).run(jobId, `${status} 计划`, status, now, now)
+      db.prepare(`INSERT INTO job_steps(id,job_id,position,source_wallet_id,target_address,asset,amount_mode,status,updated_at)
+        VALUES (?, ?, 0, ?, ?, 'USDT', 'fixed', 'pending', ?)`).run(stepId, jobId, account.id, account.address, now)
+      if (withAttempt) {
+        db.prepare(`INSERT INTO transaction_attempts(id,job_id,step_id,sender_address,state,created_at,updated_at)
+          VALUES (?, ?, ?, ?, 'confirmed', ?, ?)`).run(crypto.randomUUID(), jobId, stepId, account.address, now, now)
+      }
+      return jobId
+    }
+
+    const draftId = insertJob('draft')
+    const previewedId = insertJob('previewed')
+    const completedId = insertJob('completed', true)
+
+    expect(wallets.archive(account.id).archivedAt).not.toBeNull()
+    expect(db.prepare('SELECT id FROM jobs WHERE id IN (?, ?)').all(draftId, previewedId)).toHaveLength(0)
+    expect(db.prepare('SELECT status FROM jobs WHERE id = ?').get(completedId)).toEqual({ status: 'completed' })
+  })
+
+  it.each(['running', 'paused', 'uncertain'] as const)('keeps %s jobs blocking archive', (status) => {
+    const account = wallets.restoreGroup(`${status} 保护`, MNEMONIC, 1).accounts[0]
+    const now = new Date().toISOString()
+    const jobId = crypto.randomUUID()
+    const stepId = crypto.randomUUID()
+    db.prepare(`INSERT INTO jobs(id,name,status,interval_min_seconds,interval_max_seconds,shuffle,created_at,updated_at)
+      VALUES (?, ?, ?, 0, 0, 0, ?, ?)`).run(jobId, `${status} 计划`, status, now, now)
+    db.prepare(`INSERT INTO job_steps(id,job_id,position,source_wallet_id,target_address,asset,amount_mode,status,updated_at)
+      VALUES (?, ?, 0, ?, ?, 'USDT', 'fixed', 'pending', ?)`).run(stepId, jobId, account.id, account.address, now)
+
+    expect(() => wallets.archive(account.id)).toThrow('账户仍被活动任务引用，不能归档')
+    expect(wallets.get(account.id).archivedAt).toBeNull()
+  })
+
   it('refreshes managed accounts as unused, used, or funded', async () => {
     const group = wallets.restoreGroup('状态钱包', MNEMONIC, 3)
     const [unused, used, funded] = group.accounts

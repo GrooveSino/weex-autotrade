@@ -66,7 +66,15 @@ chmod 600 "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 
 DOMAIN="gui/$(id -u)"
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  for _ in {1..10}; do
+    if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+fi
 bootstrapped=false
 for _ in 1 2 3 4 5; do
   if launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
@@ -84,7 +92,19 @@ if [[ "$bootstrapped" != true ]]; then
   exit 1
 fi
 launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
-launchctl kickstart -k "$DOMAIN/$LABEL"
+
+ready=false
+for _ in {1..20}; do
+  if curl --fail --silent --max-time 1 "http://127.0.0.1:48271/api/v1/status" >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$ready" != true ]]; then
+  print -u2 "本机服务启动超时。请查看: /tmp/aptos-wallet-launchd.error.log"
+  exit 1
+fi
 
 print "已安装并启动 $LABEL"
 print "服务地址: http://127.0.0.1:48271"

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
-  Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, BookUser, Check, ChevronRight, CircleDollarSign, Clock3, Copy, Download, Ellipsis,
+  Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, BookUser, Check, ChevronRight, CircleDollarSign, Clock3, CloudDownload, Copy, Download, Ellipsis,
   Eye, FileClock, KeyRound, Layers3, Lock, Pencil, Plus, QrCode, RefreshCw, RotateCcw, Search, Send,
   ShieldAlert, Shuffle, Trash2, Upload, WalletCards, X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import type { AccountTransferLog, AccountTransferLogPage, AddressBookEntry, AmountMode, AssetId, JobDraftInput, JobPreflight, MnemonicRestorePreview, TransferJob, TransferStepDraft, VaultStatus, WalletGroup, WalletRecord } from '../shared/types'
 import { formatAmount, formatAmountWithMaxDecimals, hasAtMostDecimals } from '../shared/amounts'
-import { download, getStatus, loadWorkspace, post, request, saveAndPreviewJob, subscribe } from './api'
+import { download, getStatus, loadWorkspace, post, request, saveAndPreviewJob, subscribe, type PreflightProgress } from './api'
 import { createMnemonic, parseAccountIndexes, pickConfirmationIndexes } from './mnemonic'
 import { requestEncryptedSecret } from './secret-transport'
 import { pairTransferEndpoints } from './transfer-pairing'
@@ -29,6 +29,14 @@ const statusLabels: Record<string, string> = {
   unused: '未激活', used: '已使用', funded: '有余额', standalone: '独立账户',
 }
 
+function presentError(error: string): string {
+  const normalized = error.toUpperCase()
+  if (normalized.includes('TOO MANY REQUESTS') || normalized.includes('HTTP 429') || normalized.includes('CODE:429')) {
+    return 'Aptos 公共节点暂时限流。程序已自动降速；本笔交易没有自动重发，可稍后重新核对或重新预览后发送。'
+  }
+  return error
+}
+
 export function App() {
   const [status, setStatus] = useState<VaultStatus | null>(null)
   const [wallets, setWallets] = useState<WalletRecord[]>([])
@@ -41,6 +49,7 @@ export function App() {
   const [busy, setBusy] = useState(false)
   const [previewJob, setPreviewJob] = useState<TransferJob | null>(null)
   const [previewPreflight, setPreviewPreflight] = useState<JobPreflight | null>(null)
+  const [preflightProgress, setPreflightProgress] = useState<PreflightProgress | null>(null)
   const [secret, setSecret] = useState('')
   const [secretTitle, setSecretTitle] = useState('秘密')
   const [selectedGroup, setSelectedGroup] = useState<WalletGroup | null>(null)
@@ -102,7 +111,7 @@ export function App() {
       await action()
       if (success) setToast(success)
     } catch (error) {
-      setToast(error instanceof Error ? error.message : '操作失败')
+      setToast(error instanceof Error ? presentError(error.message) : '操作失败')
     } finally {
       if (showGlobalBusy) setBusy(false)
     }
@@ -129,7 +138,7 @@ export function App() {
           setJobs(nextJobs)
           setAddressBook(nextAddressBook)
           setPreviewJob((current) => current ? nextJobs.find((job) => job.id === current.id) ?? current : null)
-        })
+        }, (progress) => setPreflightProgress((current) => !current || current.jobId === progress.jobId ? progress : current))
       } catch (error) {
         if (active) setToast(error instanceof Error ? error.message : '无法加载本地钱包状态')
       }
@@ -187,7 +196,7 @@ export function App() {
           onDetails={(wallet) => { setSelectedWallet(wallet); setModal('accountDetails') }}
           onTransfer={(wallet) => { setTransferSourceWalletId(wallet.id); setView('transfer') }} /></div>
         {view === 'addressBook' && <AddressBookView entries={addressBook} run={run} reload={reload} />}
-        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} addressBook={addressBook} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
+        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} addressBook={addressBook} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreflightStart={(jobId) => setPreflightProgress({ jobId, phase: 'prepare', message: '正在创建预览检查', completed: 0, total: 0 })} onPreflightFinished={(jobId) => setPreflightProgress((current) => current?.jobId === jobId ? null : current)} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
         {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} addressBook={addressBook} run={run} inspectJob={inspectJob} focusedJobId={focusedJobId} onFocusedJobHandled={handleFocusedJob} setPreviewJob={(job) => { setPreviewPreflight(null); setPreviewJob(job) }} setModal={setModal} />}
       </main>
       {modal === 'create' && <CreateWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
@@ -209,6 +218,7 @@ export function App() {
         onAlias={() => setModal('accountAlias')}
         onTransfer={() => { setSelectedWallet(null); setModal(null); setTransferSourceWalletId(selectedWallet.id); setView('transfer') }}
         onReveal={() => { setSecretTarget({ kind: 'privateKey', wallet: selectedWallet }); setSelectedWallet(null); setModal('secretAuth') }} />}
+      {preflightProgress && <PreflightProgressDialog progress={preflightProgress} />}
       {toast && <div className="toast">{toast}</div>}
       {busy && <div className="busy-bar" />}
     </div>
@@ -492,9 +502,10 @@ function AccountBalance({ label, value, loading = false }: { label: string; valu
   return <div className="account-balance" aria-live="polite"><span>{label}</span><strong>{loading ? <RefreshCw className="spin" size={16} aria-label={`${label} 余额刷新中`} /> : value}</strong></div>
 }
 
-function TransferView({ wallets, groups, addressBook, busy, run, onPreview, initialSourceWalletId }: {
+function TransferView({ wallets, groups, addressBook, busy, run, onPreview, onPreflightStart, onPreflightFinished, initialSourceWalletId }: {
   wallets: WalletRecord[]; groups: WalletGroup[]; addressBook: AddressBookEntry[]; busy: boolean
   run: (action: () => Promise<void>, success?: string) => Promise<void>; onPreview: (result: JobPreflight) => void
+  onPreflightStart: (jobId: string) => void; onPreflightFinished: (jobId: string) => void
   initialSourceWalletId: string | null
 }) {
   const [name, setName] = useState(() => defaultTransferPlanName())
@@ -551,9 +562,17 @@ function TransferView({ wallets, groups, addressBook, busy, run, onPreview, init
     }))
     setSteps(generated)
     const draft: JobDraftInput = { name, steps: generated, gasPayerWalletId, intervalMinSeconds: intervalEnabled ? intervalMinSeconds : 0, intervalMaxSeconds: intervalEnabled ? intervalMaxSeconds : 0, shuffle: false }
-    const result = await saveAndPreviewJob(draft)
-    setPreflight(result)
-    onPreview(result)
+    let checkingJobId: string | null = null
+    try {
+      const result = await saveAndPreviewJob(draft, undefined, (jobId) => {
+        checkingJobId = jobId
+        onPreflightStart(jobId)
+      })
+      setPreflight(result)
+      onPreview(result)
+    } finally {
+      if (checkingJobId) onPreflightFinished(checkingJobId)
+    }
   })
   return <>
     <PageHeader title="转账计划" subtitle={initialSource ? `已选择 ${walletOptionLabel(initialSource, groups)}` : '选择转出账户与收款地址，统一设置本次转账'} />
@@ -686,9 +705,10 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
         {selected.status === 'previewed' && <button className="primary" onClick={() => { setPreviewJob(selected); setModal('confirm') }}><Check size={16} />确认执行</button>}
         {selected.status === 'running' && <button className="secondary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/pause`) })}>暂停</button>}
         {selected.status === 'paused' && <button className="primary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/resume`) })}>恢复</button>}
+        {selected.status === 'uncertain' && <button className="secondary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/reconcile`) }, '已重新核对链上状态')}>重新核对</button>}
         {['draft', 'previewed', 'running', 'paused'].includes(selected.status) && <button className="danger-button" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/cancel`) })}>取消</button>}
       </div></div>
-      {selected.error && <div className="error-banner"><ShieldAlert size={17} />{selected.error}</div>}
+      {selected.error && <div className="error-banner"><ShieldAlert size={17} />{presentError(selected.error)}</div>}
       <div className="progress-line"><span style={{ width: `${selected.steps.length ? selected.steps.filter((step) => step.status === 'confirmed').length / selected.steps.length * 100 : 0}%` }} /></div>
       <div className="detail-meta"><span>{confirmedCount}/{selected.steps.length} 笔已确认</span><span>实际手续费 {hasActualGasFee ? formatGasFee(actualGasFeeBaseUnits.toString()) : '-'}</span><span>{selected.intervalMaxSeconds > 0 ? `间隔 ${formatSeconds(selected.intervalMinSeconds)}-${formatSeconds(selected.intervalMaxSeconds)} 秒` : '连续执行'}</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
       {activityText && <div className={`job-activity ${waitingStep ? 'is-waiting' : 'is-active'}`} aria-live="polite">
@@ -698,7 +718,7 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
       <div className="table-scroll"><table><thead><tr><th>#</th><th>来源</th><th>目标</th><th>资产</th><th>金额</th><th>手续费</th><th>等待</th><th>状态</th><th>交易</th></tr></thead><tbody>{selected.steps.map((step) => <tr className={step.id === waitingStep?.id ? 'job-step-waiting' : step.id === activeStep?.id ? 'job-step-active' : ''} key={step.id}>
         <td>{step.position + 1}</td><td><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></td><td><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} addressBook={addressBook} /></td><td>{step.asset === 'USDT' ? 'USDt' : 'APT'}</td>
         <td className="amount">{step.amountMode === 'max' ? `全额${step.frozenAmountDisplay ? ` (~${step.frozenAmountDisplay})` : ''}` : step.frozenAmountDisplay}</td><td className="gas-fee">{formatGasFee(step.gasFeeBaseUnits)}</td><td>{step.waitAfterSeconds ? `${formatSeconds(step.waitAfterSeconds)}s` : '-'}</td><td>{step.id === waitingStep?.id ? <span className="status status-waiting status-countdown"><Clock3 size={12} />等待 {formatSeconds(waitingRemainingSeconds)}s</span> : <Status value={step.status} />}</td>
-        <td>{step.txHash ? <a className="tx-link" href={`https://explorer.aptoslabs.com/txn/${step.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(step.txHash)}</a> : step.error ? <span className="row-error">{step.error}</span> : '-'}</td>
+        <td>{step.txHash ? <a className="tx-link" href={`https://explorer.aptoslabs.com/txn/${step.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(step.txHash)}</a> : step.error ? <span className="row-error">{presentError(step.error)}</span> : '-'}</td>
       </tr>)}</tbody></table></div>
     </section>}</div>
   </>
@@ -915,6 +935,7 @@ function AccountHistoryDialog({ wallet, wallets, addressBook, close }: { wallet:
   const [page, setPage] = useState(0)
   const [result, setResult] = useState<AccountTransferLogPage | null>(null)
   const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const loadRequest = useRef(0)
   const load = async () => {
@@ -930,6 +951,18 @@ function AccountHistoryDialog({ wallet, wallets, addressBook, close }: { wallet:
       if (requestId === loadRequest.current) setLoading(false)
     }
   }
+  const syncOlder = async () => {
+    setSyncing(true)
+    setError(null)
+    try {
+      const next = await request<AccountTransferLogPage>(`/api/v1/wallets/${wallet.id}/transfers/sync?direction=${direction}&limit=${pageSize}&offset=${page * pageSize}`, { method: 'POST', body: '{}' })
+      setResult(next)
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : '链上日志同步失败')
+    } finally {
+      setSyncing(false)
+    }
+  }
   useEffect(() => { void load() }, [wallet.id, direction, page])
   const counts = result?.counts ?? { all: 0, in: 0, out: 0 }
   return <Dialog title={`${accountLabel(wallet)} · 转账日志`} close={close} wide>
@@ -937,9 +970,11 @@ function AccountHistoryDialog({ wallet, wallets, addressBook, close }: { wallet:
       <div className="segmented history-filter" role="group" aria-label="日志方向">
         {([['all', '全部', counts.all], ['out', '转出', counts.out], ['in', '转入', counts.in]] as const).map(([value, label, count]) => <button className={direction === value ? 'active' : ''} aria-pressed={direction === value} key={value} onClick={() => { setDirection(value); setPage(0) }}>{label}<span>{count}</span></button>)}
       </div>
-      <div className="history-tools"><IconButton title="刷新日志" icon={<RefreshCw className={loading ? 'spin' : ''} size={16} />} onClick={() => void load()} /><a className="secondary small" href={`https://explorer.aptoslabs.com/account/${wallet.address}?network=mainnet`} target="_blank" rel="noreferrer">链上记录<ArrowUpRight size={14} /></a></div>
+      <div className="history-tools">{result?.sync.hasMore && <button className="secondary small chain-sync-button" disabled={syncing} onClick={() => void syncOlder()}><CloudDownload className={syncing ? 'spin' : ''} size={14} />{syncing ? '正在同步' : '与链上同步'}</button>}<IconButton title="刷新日志" icon={<RefreshCw className={loading ? 'spin' : ''} size={16} />} onClick={() => void load()} /><a className="secondary small" href={`https://explorer.aptoslabs.com/account/${wallet.address}?network=mainnet`} target="_blank" rel="noreferrer">链上记录<ArrowUpRight size={14} /></a></div>
     </div>
-    {error && <div className="error-banner"><ShieldAlert size={17} />{error}</div>}
+    {error && <div className="error-banner"><ShieldAlert size={17} />{presentError(error)}</div>}
+    {result?.sync.error && <div className="error-banner"><ShieldAlert size={17} />链上日志暂时同步失败：{presentError(result.sync.error)}</div>}
+    {result && (result.sync.added > 0 || result.sync.hasMore) && <div className="chain-sync-status"><CloudDownload size={15} /><div><strong>{result.sync.added > 0 ? `本次补充 ${result.sync.added} 条链上记录` : '本地日志尚未追平链上'}</strong><span>{result.sync.hasMore ? '为控制请求量，每次最多继续同步 5 笔。' : '当前可见链上记录已经同步完成。'}</span></div></div>}
     {loading && !result ? <div className="history-loading"><RefreshCw className="spin" size={20} />正在读取日志...</div> : result?.items.length === 0 ? <Empty icon={<FileClock size={28} />} text="暂无转账记录。" /> : <div className="account-history-list">
       {result?.items.map((item) => <AccountHistoryRow key={item.id} item={item} wallets={wallets} addressBook={addressBook} />)}
     </div>}
@@ -952,7 +987,7 @@ function AccountHistoryRow({ item, wallets, addressBook }: { item: AccountTransf
   const addressBookEntry = counterparty ? null : addressBookEntryFor(item.counterpartyAddress, addressBook)
   return <article className={`account-history-row direction-${item.direction}`}>
     <div className={`history-direction ${item.direction}`}>{item.direction === 'out' ? <ArrowUpRight size={17} /> : <ArrowDownLeft size={17} />}<span>{item.direction === 'out' ? '转出' : '转入'}</span></div>
-    <div className="history-main"><div><strong>{historyAmount(item)}</strong><Status value={item.status} /></div><span>{item.jobName} · 第 {item.position + 1} 笔</span><small>实际手续费 {formatGasFee(item.gasFeeBaseUnits)}</small></div>
+    <div className="history-main"><div><strong>{historyAmount(item)}</strong><Status value={item.status} /></div><span>{item.source === 'chain' ? '链上同步记录' : `${item.jobName} · 第 ${item.position + 1} 笔`}</span><small>实际手续费 {formatGasFee(item.gasFeeBaseUnits)}</small></div>
     <div className={`history-counterparty ${addressBookEntry ? 'from-address-book' : ''}`}><span>{item.direction === 'out' ? '收款方' : '转出方'}</span><strong>{counterparty ? accountLabel(counterparty) : addressBookEntry?.label ?? '外部地址'}</strong>{addressBookEntry && <small className="address-book-chip"><BookUser size={11} />地址簿</small>}<Address value={item.counterpartyAddress} /></div>
     <div className="history-time"><span>{new Date(item.updatedAt).toLocaleString()}</span>{item.txHash ? <a href={`https://explorer.aptoslabs.com/txn/${item.txHash}?network=mainnet`} target="_blank" rel="noreferrer">{short(item.txHash)}<ArrowUpRight size={12} /></a> : <small>暂无交易哈希</small>}</div>
     {item.error && <div className="history-error"><ShieldAlert size={13} />{item.error}</div>}
@@ -1102,6 +1137,30 @@ function WalletSelectionList({ wallets, groups, selected, search, onToggle, onSe
 }
 
 function Dialog({ title, close, children, wide = false }: { title: string; close: () => void; children: React.ReactNode; wide?: boolean }) { return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className={`dialog ${wide ? 'wide-dialog' : ''}`} role="dialog" aria-modal="true" aria-label={title}><div className="dialog-head"><h2>{title}</h2><IconButton title="关闭" icon={<X size={18} />} onClick={close} /></div>{children}</div></div> }
+
+function PreflightProgressDialog({ progress }: { progress: PreflightProgress }) {
+  const [expanded, setExpanded] = useState(false)
+  const [logs, setLogs] = useState<string[]>([])
+  useEffect(() => {
+    setLogs((current) => current.at(-1) === progress.message ? current : [...current.slice(-15), progress.message])
+  }, [progress.message])
+  const percent = progress.total > 0 ? Math.min(100, Math.max(4, Math.round((progress.completed / progress.total) * 100))) : 8
+  return <div className="preflight-backdrop" role="status" aria-live="polite" aria-label="正在检查转账计划">
+    <section className="preflight-progress-dialog">
+      <div className="preflight-progress-icon"><RefreshCw className="spin" size={23} /></div>
+      <div className="preflight-progress-heading"><span>正在检查转账计划</span><strong>{preflightPhaseLabel(progress.phase)}</strong></div>
+      <p>{progress.message}</p>
+      <div className="preflight-progress-track" aria-label={progress.total > 0 ? `检查进度 ${progress.completed} / ${progress.total}` : '正在准备检查'}><span style={{ width: `${percent}%` }} /></div>
+      <div className="preflight-progress-meta"><span>{progress.total > 0 ? `${progress.completed} / ${progress.total}` : '正在连接本地服务'}</span><span>{progress.phase === 'simulation' ? '逐笔模拟中' : '安全检查中'}</span></div>
+      <button type="button" className="preflight-log-toggle" onClick={() => setExpanded((value) => !value)}>{expanded ? '收起详细日志' : '展开详细日志'}</button>
+      {expanded && <ol className="preflight-log">{logs.map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ol>}
+    </section>
+  </div>
+}
+
+function preflightPhaseLabel(phase: PreflightProgress['phase']) {
+  return ({ prepare: '整理转账清单', asset: '校验 USDt', balances: '读取必要余额', simulation: '模拟链上交易', finalizing: '冻结执行计划', complete: '检查完成', failed: '检查未通过' })[phase]
+}
 function DialogActions({ close, submit, onSubmit, disabled = false }: { close: () => void; submit: string; onSubmit?: () => void; disabled?: boolean }) { return <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>取消</button><button type={onSubmit ? 'button' : 'submit'} className="primary" onClick={onSubmit} disabled={disabled}>{submit}</button></div> }
 interface DialogProps { close: () => void; run: (action: () => Promise<void>, success?: string, showGlobalBusy?: boolean) => Promise<void>; reload: () => Promise<void> }
 

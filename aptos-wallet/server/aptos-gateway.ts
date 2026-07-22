@@ -15,11 +15,16 @@ import { formatAmount } from '../shared/amounts.js'
 import type { AppConfig } from './config.js'
 
 const MAINNET_READ_MAX_CONCURRENCY = 2
-const MAINNET_READ_MIN_INTERVAL_MS = 200
+// Keep anonymous Fullnode traffic well below its public quota while allowing
+// a normal multi-step preview to complete without a long serial queue.
+const MAINNET_READ_MIN_INTERVAL_MS = 350
 const MAINNET_READ_WINDOW_MS = 60_000
-const MAINNET_READ_WINDOW_LIMIT = 600
+const MAINNET_READ_WINDOW_LIMIT = 180
 const MAINNET_RATE_LIMIT_COOLDOWN_MS = 2_000
 const ACCOUNT_EXISTS_CACHE_TTL_MS = 5 * 60_000
+const USDT_METADATA_CACHE_TTL_MS = 6 * 60 * 60_000
+const PREVIEW_NETWORK_ATTEMPTS = 2
+const APTOS_COIN_TYPE = '0x1::aptos_coin::AptosCoin'
 export type ReadPriority = 'normal' | 'high'
 
 interface FungibleMetadata {
@@ -145,6 +150,23 @@ export interface PreparedTransfer {
   wait(): Promise<{ success: boolean; vmStatus: string; gasFeeBaseUnits: string }>
 }
 
+export interface ChainTransferCandidate {
+  transactionVersion: string
+  eventIndex: number
+  direction: 'in' | 'out'
+  counterpartyAddress: string
+  asset: AssetId
+  amountBaseUnits: string
+  chainTimestamp: string
+  gasFeeBaseUnits: string | null
+}
+
+export interface ChainTransferPage {
+  records: ChainTransferCandidate[]
+  hasMore: boolean
+  nextBeforeVersion: string | null
+}
+
 export interface ChainGateway {
   getBalances(address: string, priority?: ReadPriority): Promise<AssetBalance[]>
   getBalance(address: string, asset: AssetId, priority?: ReadPriority): Promise<bigint>
@@ -153,12 +175,78 @@ export interface ChainGateway {
   estimateGas(request: TransferRequest): Promise<{ gasUnitPrice: bigint; maxGasAmount: bigint }>
   prepareTransfer(request: TransferRequest): Promise<PreparedTransfer>
   findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string; gasFeeBaseUnits?: string }>
+  getAccountTransferHistory(address: string, beforeVersion?: string | null, limit?: number): Promise<ChainTransferPage>
+  getTransactionHashByVersion(version: string): Promise<string>
+}
+
+interface RawFungibleActivity {
+  amount?: string | number | null
+  asset_type?: string | null
+  type?: string | null
+  owner_address?: string | null
+  is_gas_fee?: boolean | null
+  is_transaction_success?: boolean | null
+  transaction_timestamp?: string | null
+  event_index?: string | number | null
+}
+
+interface RawAccountTransaction {
+  transaction_version: string | number
+  user_transaction?: { sender?: string | null; timestamp?: string | null } | null
+  fungible_asset_activities?: RawFungibleActivity[]
+}
+
+function sameAddress(left: string | null | undefined, right: string): boolean {
+  return Boolean(left && left.toLowerCase() === right.toLowerCase())
+}
+
+function parseChainTransferRow(row: RawAccountTransaction, address: string): ChainTransferCandidate[] {
+  const activities = row.fungible_asset_activities ?? []
+  const transferActivities = activities.filter((activity) => {
+    const asset = activity.asset_type
+    const type = activity.type ?? ''
+    return activity.is_gas_fee !== true
+      && activity.is_transaction_success !== false
+      && (asset === APTOS_COIN_TYPE || asset === ASSETS.USDT.metadataAddress)
+      && (type.includes('Withdraw') || type.includes('Deposit'))
+  })
+  const gasFee = activities
+    .filter((activity) => activity.is_gas_fee === true && sameAddress(activity.owner_address, address))
+    .reduce((sum, activity) => sum + BigInt(String(activity.amount ?? '0')), 0n)
+  const sender = row.user_transaction?.sender ?? address
+  const timestamp = row.user_transaction?.timestamp ?? transferActivities[0]?.transaction_timestamp ?? new Date().toISOString()
+  const records: ChainTransferCandidate[] = []
+  for (const activity of transferActivities.filter((candidate) => sameAddress(candidate.owner_address, address))) {
+    const amount = BigInt(String(activity.amount ?? '0'))
+    const isWithdraw = (activity.type ?? '').includes('Withdraw')
+    const direction = isWithdraw ? 'out' : 'in'
+    const counterpart = transferActivities
+      .filter((candidate) => !sameAddress(candidate.owner_address, address)
+        && candidate.asset_type === activity.asset_type
+        && BigInt(String(candidate.amount ?? '0')) === amount
+        && ((candidate.type ?? '').includes('Deposit') === isWithdraw))
+      .sort((left, right) => Math.abs(Number(left.event_index ?? 0) - Number(activity.event_index ?? 0)) - Math.abs(Number(right.event_index ?? 0) - Number(activity.event_index ?? 0)))[0]
+    if (!counterpart?.owner_address) continue
+    records.push({
+      transactionVersion: String(row.transaction_version),
+      eventIndex: Number(activity.event_index ?? 0),
+      direction,
+      counterpartyAddress: counterpart.owner_address || sender,
+      asset: activity.asset_type === ASSETS.USDT.metadataAddress ? 'USDT' : 'APT',
+      amountBaseUnits: amount.toString(),
+      chainTimestamp: timestamp,
+      gasFeeBaseUnits: gasFee > 0n && direction === 'out' ? gasFee.toString() : null,
+    })
+  }
+  return records
 }
 
 export class AptosMainnetGateway implements ChainGateway {
   readonly aptos: Aptos
   private readonly readLimiter = new MainnetReadLimiter()
   private readonly accountExistsCache = new Map<string, { value: boolean; expiresAt: number }>()
+  private usdtValidatedUntil = 0
+  private usdtValidationInFlight: Promise<void> | null = null
 
   constructor(config: AppConfig) {
     this.aptos = new Aptos(new AptosConfig({
@@ -235,12 +323,23 @@ export class AptosMainnetGateway implements ChainGateway {
   }
 
   async validateUsdt(): Promise<void> {
-    const metadata = await this.readLimiter.run(() => this.aptos.getAccountResource<FungibleMetadata>({
-      accountAddress: ASSETS.USDT.metadataAddress,
-      resourceType: '0x1::fungible_asset::Metadata',
-    }))
-    if (metadata.name !== 'Tether USD' || metadata.symbol !== 'USDt' || Number(metadata.decimals) !== 6) {
-      throw new Error('原生 USDt 元数据校验失败，已停止执行')
+    if (this.usdtValidatedUntil > Date.now()) return
+    if (this.usdtValidationInFlight) return this.usdtValidationInFlight
+    const validation = (async () => {
+      const metadata = await retryRead(() => this.readLimiter.run(() => this.aptos.getAccountResource<FungibleMetadata>({
+        accountAddress: ASSETS.USDT.metadataAddress,
+        resourceType: '0x1::fungible_asset::Metadata',
+      }), 'high'), PREVIEW_NETWORK_ATTEMPTS)
+      if (metadata.name !== 'Tether USD' || metadata.symbol !== 'USDt' || Number(metadata.decimals) !== 6) {
+        throw new Error('原生 USDt 元数据校验失败，已停止执行')
+      }
+      this.usdtValidatedUntil = Date.now() + USDT_METADATA_CACHE_TTL_MS
+    })()
+    this.usdtValidationInFlight = validation
+    try {
+      await validation
+    } finally {
+      this.usdtValidationInFlight = null
     }
   }
 
@@ -270,7 +369,7 @@ export class AptosMainnetGateway implements ChainGateway {
       const maxGasAmount = (gasUsed * 125n + 99n) / 100n
       const gasUnitPrice = BigInt(first.simulation.gas_unit_price)
       const sequenceNumber = first.transaction.rawTransaction.sequence_number.toString()
-      const transaction = await this.build(request, {
+      const transaction = await this.buildForPreview(request, {
         accountSequenceNumber: BigInt(sequenceNumber),
         gasUnitPrice: Number(gasUnitPrice),
         maxGasAmount: Number(maxGasAmount),
@@ -287,13 +386,16 @@ export class AptosMainnetGateway implements ChainGateway {
         gasUnitPrice,
         maxGasAmount,
         submit: async () => {
-          const pending = await this.aptos.transaction.submit.simple({ transaction, senderAuthenticator, feePayerAuthenticator })
+          // Submissions are intentionally queued but never retried. This keeps
+          // them from colliding with balance refreshes while preserving the
+          // one-submit-only safety rule.
+          const pending = await this.readLimiter.run(() => this.aptos.transaction.submit.simple({ transaction, senderAuthenticator, feePayerAuthenticator }), 'high')
           submittedHash = pending.hash
           if (pending.hash !== txHash) throw new Error('节点返回的交易哈希与本地签名哈希不一致')
           return pending.hash
         },
         wait: async () => {
-          const response = await this.aptos.waitForTransaction({ transactionHash: submittedHash ?? txHash }) as UserTransactionResponse
+          const response = await this.waitForFinalizedTransaction(submittedHash ?? txHash)
           return {
             success: response.success,
             vmStatus: response.vm_status,
@@ -309,7 +411,7 @@ export class AptosMainnetGateway implements ChainGateway {
 
   async findTransaction(hash: string): Promise<{ found: boolean; success?: boolean; vmStatus?: string; gasFeeBaseUnits?: string }> {
     try {
-      const response = await this.readLimiter.run(() => this.aptos.getTransactionByHash({ transactionHash: hash }))
+      const response = await retryRead(() => this.readLimiter.run(() => this.aptos.getTransactionByHash({ transactionHash: hash }), 'high'))
       if (response.type === 'pending_transaction') return { found: true }
       const finalized = response as UserTransactionResponse
       return {
@@ -324,8 +426,84 @@ export class AptosMainnetGateway implements ChainGateway {
     }
   }
 
+  private async waitForFinalizedTransaction(transactionHash: string): Promise<UserTransactionResponse> {
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      try {
+        const response = await retryRead(() => this.readLimiter.run(
+          () => this.aptos.getTransactionByHash({ transactionHash }),
+          'high',
+        ))
+        if (response.type !== 'pending_transaction') return response as UserTransactionResponse
+      } catch (error) {
+        // The fullnode can briefly return 404 before a newly submitted
+        // transaction reaches its mempool. Other errors remain actionable.
+        if (!isNotFound(error)) throw error
+      }
+      await sleep(1_000)
+    }
+    throw new Error('等待链上确认超时')
+  }
+
+  async getAccountTransferHistory(address: string, beforeVersion: string | null = null, limit = 5): Promise<ChainTransferPage> {
+    const boundedLimit = Math.max(1, Math.min(5, Math.trunc(limit)))
+    const versionFilter = beforeVersion ? ', transaction_version: {_lt: $before}' : ''
+    const query = `query($address: String!${beforeVersion ? ', $before: bigint' : ''}) {
+      account_transactions(
+        where: {
+          account_address: {_eq: $address}
+          fungible_asset_activities: {
+            owner_address: {_eq: $address}
+            is_gas_fee: {_eq: false}
+            is_transaction_success: {_eq: true}
+            asset_type: {_in: ["${APTOS_COIN_TYPE}", "${ASSETS.USDT.metadataAddress}"]}
+          }${versionFilter}
+        }
+        order_by: {transaction_version: desc}
+        limit: ${boundedLimit + 1}
+      ) {
+        transaction_version
+        user_transaction { sender timestamp }
+        fungible_asset_activities {
+          amount asset_type type owner_address is_gas_fee is_transaction_success transaction_timestamp event_index
+        }
+      }
+    }`
+    try {
+      const indexer = this.aptos.config.getRequestUrl(AptosApiType.INDEXER).replace(/\/$/, '')
+      const response = await this.readLimiter.run(() => fetch(indexer, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ query, variables: beforeVersion ? { address, before: beforeVersion } : { address } }),
+      }))
+      if (response.status === 429) throw new RateLimitedHttpError(parseRetryAfter(response.headers.get('retry-after')))
+      if (!response.ok) throw new Error(`Aptos 链上日志查询失败 (HTTP ${response.status})`)
+      const body = await response.json() as { errors?: Array<{ message?: string }>; data?: { account_transactions?: RawAccountTransaction[] } }
+      if (body.errors?.length) throw new Error(body.errors[0]?.message || 'Aptos 链上日志查询失败')
+      const rows = body.data?.account_transactions ?? []
+      const records = rows.flatMap((row) => parseChainTransferRow(row, address))
+      const selectedVersions = rows.slice(0, boundedLimit).map((row) => String(row.transaction_version))
+      return {
+        records: records.filter((record) => selectedVersions.includes(record.transactionVersion)),
+        hasMore: rows.length > boundedLimit,
+        nextBeforeVersion: selectedVersions.at(-1) ?? null,
+      }
+    } catch (error) {
+      throw redactChainError(error)
+    }
+  }
+
+  async getTransactionHashByVersion(version: string): Promise<string> {
+    try {
+      const response = await this.readLimiter.run(() => this.aptos.getTransactionByVersion({ ledgerVersion: BigInt(version) })) as { hash?: string }
+      if (!response.hash) throw new Error('链上交易缺少哈希')
+      return response.hash
+    } catch (error) {
+      throw redactChainError(error)
+    }
+  }
+
   private async buildAndSimulate(request: TransferRequest): Promise<{ transaction: SimpleTransaction; simulation: UserTransactionResponse }> {
-    let transaction = await this.build(request)
+    let transaction = await this.buildForPreview(request)
     const gasUnitPrice = transaction.rawTransaction.gas_unit_price
     if (gasUnitPrice <= 0n) throw new Error('交易 Gas 单价无效')
     const gasBalance = request.availableGasBalance ?? await this.getBalance(
@@ -343,19 +521,26 @@ export class AptosMainnetGateway implements ChainGateway {
     // payer to cover that whole cap before simulation, even when actual gas is
     // tiny, so use the largest cap the selected payer can currently afford.
     if (affordableGasUnits < transaction.rawTransaction.max_gas_amount) {
-      transaction = await this.build(request, {
+      transaction = await this.buildForPreview(request, {
         accountSequenceNumber: transaction.rawTransaction.sequence_number,
         gasUnitPrice: Number(gasUnitPrice),
         maxGasAmount: Number(affordableGasUnits),
       })
     }
-    const [simulation] = await this.readLimiter.run(() => this.aptos.transaction.simulate.simple({
+    const [simulation] = await retryRead(() => this.readLimiter.run(() => this.aptos.transaction.simulate.simple({
       signerPublicKey: request.sender.publicKey,
       feePayerPublicKey: request.feePayer?.publicKey,
       transaction,
       options: { estimateGasUnitPrice: true, estimateMaxGasAmount: false },
-    }))
+    }), 'high'), PREVIEW_NETWORK_ATTEMPTS)
     return { transaction, simulation }
+  }
+
+  private buildForPreview(
+    request: TransferRequest,
+    options?: { accountSequenceNumber: bigint; gasUnitPrice: number; maxGasAmount: number },
+  ): Promise<SimpleTransaction> {
+    return retryRead(() => this.readLimiter.run(() => this.build(request, options), 'high'), PREVIEW_NETWORK_ATTEMPTS)
   }
 
   private async build(

@@ -10,6 +10,7 @@ const config: AppConfig = {
   databasePath: ':memory:',
   executionEnabled: false,
   fullnodeUrl: 'https://fullnode.example/v1',
+  indexerUrl: 'https://indexer.example/v1/graphql',
 }
 
 afterEach(() => vi.unstubAllGlobals())
@@ -54,6 +55,26 @@ describe('Aptos mainnet balance reader', () => {
     await gateway.getBalances(address)
     await expect(gateway.accountExists(address)).resolves.toBe(true)
     expect(accountInfo).not.toHaveBeenCalled()
+  })
+
+  it('reads bounded incoming transfer history from the indexer', async () => {
+    const address = `0x${'b'.repeat(64)}`
+    const sender = `0x${'a'.repeat(64)}`
+    const rows = [900, 899].map((transaction_version) => ({
+      transaction_version,
+      user_transaction: { sender, timestamp: '2026-07-21T12:00:00' },
+      fungible_asset_activities: [
+        { amount: 2_500_000, asset_type: '0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b', type: '0x1::fungible_asset::Withdraw', owner_address: sender, is_gas_fee: false, is_transaction_success: true, event_index: 0 },
+        { amount: 2_500_000, asset_type: '0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b', type: '0x1::fungible_asset::Deposit', owner_address: address, is_gas_fee: false, is_transaction_success: true, event_index: 1 },
+      ],
+    }))
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { account_transactions: rows } }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await new AptosMainnetGateway(config).getAccountTransferHistory(address, null, 1)
+    expect(page).toMatchObject({ hasMore: true, nextBeforeVersion: '900', records: [{ transactionVersion: '900', direction: 'in', counterpartyAddress: sender, asset: 'USDT', amountBaseUnits: '2500000' }] })
+    expect(fetchMock.mock.calls[0][0]).toBe(config.indexerUrl)
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).query).toContain('limit: 2')
   })
 
   it('keeps concurrent fullnode requests at the process-wide limit', async () => {

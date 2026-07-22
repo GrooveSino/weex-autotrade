@@ -47,12 +47,12 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/v1/events') return route.fulfill({ status: 204 })
     if (path === `/api/v1/wallets/${walletB.id}/transfers`) {
       const logs = [
-        { id: '66666666-6666-4666-8666-666666666666', jobId: '33333333-3333-4333-8333-333333333333', jobName: '内部归集', jobStatus: 'completed', position: 0, direction: 'in', counterpartyAddress: walletA.address, counterpartyWalletId: walletA.id, asset: 'USDT', amountMode: 'fixed', amountMin: '2', amountMax: null, frozenAmountDisplay: '2', status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, gasFeeBaseUnits: '507000', error: null, createdAt: now, updatedAt: now },
-        { id: '77777777-7777-4777-8777-777777777777', jobId: '44444444-4444-4444-8444-444444444444', jobName: '外部付款', jobStatus: 'paused', position: 0, direction: 'out', counterpartyAddress: `0x${'3'.repeat(64)}`, counterpartyWalletId: null, asset: 'USDT', amountMode: 'fixed', amountMin: '0.5', amountMax: null, frozenAmountDisplay: '0.5', status: 'failed', txHash: null, gasFeeBaseUnits: null, error: 'APT 手续费不足', createdAt: now, updatedAt: now },
+        { id: '66666666-6666-4666-8666-666666666666', source: 'local', jobId: '33333333-3333-4333-8333-333333333333', jobName: '内部归集', jobStatus: 'completed', position: 0, direction: 'in', counterpartyAddress: walletA.address, counterpartyWalletId: walletA.id, asset: 'USDT', amountMode: 'fixed', amountMin: '2', amountMax: null, frozenAmountDisplay: '2', status: 'confirmed', txHash: `0x${'a'.repeat(64)}`, gasFeeBaseUnits: '507000', error: null, createdAt: now, updatedAt: now },
+        { id: '77777777-7777-4777-8777-777777777777', source: 'local', jobId: '44444444-4444-4444-8444-444444444444', jobName: '外部付款', jobStatus: 'paused', position: 0, direction: 'out', counterpartyAddress: `0x${'3'.repeat(64)}`, counterpartyWalletId: null, asset: 'USDT', amountMode: 'fixed', amountMin: '0.5', amountMax: null, frozenAmountDisplay: '0.5', status: 'failed', txHash: null, gasFeeBaseUnits: null, error: 'APT 手续费不足', createdAt: now, updatedAt: now },
       ]
       const direction = url.searchParams.get('direction') ?? 'all'
       const items = direction === 'all' ? logs : logs.filter((item) => item.direction === direction)
-      return route.fulfill({ json: { items, total: items.length, counts: { all: 2, in: 1, out: 1 } } })
+      return route.fulfill({ json: { items, total: items.length, counts: { all: 2, in: 1, out: 1 }, sync: { hasMore: false, syncedAt: now, added: 0, error: null } } })
     }
     if (path === '/api/v1/wallets/groups/create') return route.fulfill({ json: walletGroup })
     if (path.endsWith('/accounts')) return route.fulfill({ json: { ...walletGroup, nextAccountIndex: 3 } })

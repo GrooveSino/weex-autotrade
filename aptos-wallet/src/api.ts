@@ -60,10 +60,19 @@ export async function loadWorkspace(): Promise<{ wallets: WalletRecord[]; groups
   return { wallets, groups, jobs, addressBook }
 }
 
-export async function saveAndPreviewJob(draft: JobDraftInput, id?: string): Promise<JobPreflight> {
+export interface PreflightProgress {
+  jobId: string
+  phase: 'prepare' | 'asset' | 'balances' | 'simulation' | 'finalizing' | 'complete' | 'failed'
+  message: string
+  completed: number
+  total: number
+}
+
+export async function saveAndPreviewJob(draft: JobDraftInput, id?: string, onCheckStarted?: (jobId: string) => void): Promise<JobPreflight> {
   const job = id
     ? await put<TransferJob>(`/api/v1/jobs/${id}`, draft)
     : await post<TransferJob>('/api/v1/jobs', draft)
+  onCheckStarted?.(job.id)
   return post<JobPreflight>(`/api/v1/jobs/${job.id}/check`)
 }
 
@@ -78,9 +87,13 @@ export async function download(path: string, filename: string): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-export function subscribe(onSnapshot: (value: { wallets: WalletRecord[]; groups: WalletGroup[]; jobs: TransferJob[]; addressBook: AddressBookEntry[] }) => void): () => void {
+export function subscribe(
+  onSnapshot: (value: { wallets: WalletRecord[]; groups: WalletGroup[]; jobs: TransferJob[]; addressBook: AddressBookEntry[] }) => void,
+  onPreflightProgress?: (value: PreflightProgress) => void,
+): () => void {
   const source = new EventSource('/api/v1/events')
   source.addEventListener('snapshot', (event) => onSnapshot(JSON.parse((event as MessageEvent).data)))
+  source.addEventListener('preflight-progress', (event) => onPreflightProgress?.(JSON.parse((event as MessageEvent).data) as PreflightProgress))
   source.addEventListener('vault-locked', () => window.location.reload())
   source.addEventListener('session-replaced', () => window.location.reload())
   return () => source.close()

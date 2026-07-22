@@ -15,6 +15,7 @@ import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { formatAmount } from '../shared/amounts.js'
 import type {
   AssetBalance,
+  AssetId,
   DerivedAccountPreview,
   EncryptedSecretResponse,
   WalletAccountStatus,
@@ -37,7 +38,10 @@ export const BALANCE_REFRESH_MAX_ATTEMPTS = 3
 export const BALANCE_REFRESH_RETRY_DELAY_MS = 250
 export const APTOS_HD_PATH = (index: number) => `m/44'/637'/${index}'/0'/0'`
 const APTOS_HD_PATH_PATTERN = /^m\/44'\/637'\/(\d+)'\/0'\/0'$/
-const ACTIVE_JOB_STATUSES = ['draft', 'previewed', 'running', 'paused', 'uncertain'] as const
+// Only jobs that can still execute or require reconciliation may block archiving.
+// Drafts and previews have no on-chain effect and are removed when their wallet
+// is archived, so stale editor state cannot hold an account hostage.
+const ARCHIVE_BLOCKING_JOB_STATUSES = ['running', 'paused', 'uncertain'] as const
 
 interface WalletRow {
   id: string
@@ -72,6 +76,7 @@ interface WalletGroupRow {
 
 export interface BalanceReader {
   getBalances(address: string, priority?: ReadPriority): Promise<AssetBalance[]>
+  getBalance(address: string, asset: AssetId, priority?: ReadPriority): Promise<bigint>
   accountExists(address: string, priority?: ReadPriority): Promise<boolean>
 }
 
@@ -280,7 +285,10 @@ export class WalletService {
     if (row.archived_at) return project(row)
     this.assertNoActiveJobForWallet(id)
     const now = new Date().toISOString()
-    this.db.prepare('UPDATE wallets SET archived_at = ?, updated_at = ? WHERE id = ?').run(now, now, id)
+    this.db.transaction(() => {
+      this.deleteUnexecutedJobsForWallet(id)
+      this.db.prepare('UPDATE wallets SET archived_at = ?, updated_at = ? WHERE id = ?').run(now, now, id)
+    })()
     this.audit('wallet.archived', id, {})
     return this.get(id)
   }
@@ -300,6 +308,8 @@ export class WalletService {
     this.assertNoActiveJobForGroup(id)
     const now = new Date().toISOString()
     this.db.transaction(() => {
+      const walletIds = (this.db.prepare('SELECT id FROM wallets WHERE group_id = ?').all(id) as Array<{ id: string }>).map((row) => row.id)
+      for (const walletId of walletIds) this.deleteUnexecutedJobsForWallet(walletId)
       this.db.prepare('UPDATE wallet_groups SET archived_at = ?, updated_at = ? WHERE id = ?').run(now, now, id)
       this.db.prepare('UPDATE wallets SET archived_at = COALESCE(archived_at, ?), updated_at = ? WHERE group_id = ?').run(now, now, id)
     })()
@@ -329,6 +339,25 @@ export class WalletService {
     } finally {
       if (this.activeRefreshes.get(id) === operation) this.activeRefreshes.delete(id)
     }
+  }
+
+  async refreshAsset(id: string, asset: AssetId, priority: ReadPriority = 'normal'): Promise<WalletRecord> {
+    const wallet = this.get(id)
+    try {
+      const baseUnits = await retryBalanceRead(() => this.balanceReader.getBalance(wallet.address, asset, priority))
+      const balances = wallet.balances.map((balance) => balance.asset === asset
+        ? { asset, baseUnits: baseUnits.toString(), display: formatAmount(baseUnits, asset) }
+        : balance)
+      const exists = wallet.groupId ? (isFunded(balances) || await this.balanceReader.accountExists(wallet.address, priority)) : true
+      const now = new Date().toISOString()
+      const status: WalletAccountStatus = wallet.groupId ? (isFunded(balances) ? 'funded' : exists ? 'used' : 'unused') : 'standalone'
+      this.db.prepare(`UPDATE wallets SET balances_json = ?, account_status = ?, balance_error = NULL, balance_updated_at = ?, updated_at = ? WHERE id = ?`)
+        .run(JSON.stringify(balances), status, now, now, id)
+    } catch (error) {
+      const now = new Date().toISOString()
+      this.db.prepare('UPDATE wallets SET balance_error = ?, balance_updated_at = ?, updated_at = ? WHERE id = ?').run(safeError(error), now, now, id)
+    }
+    return this.get(id)
   }
 
   private async refreshOnce(id: string, priority: ReadPriority): Promise<WalletRecord> {
@@ -589,19 +618,33 @@ export class WalletService {
   }
 
   private assertNoActiveJobForWallet(id: string): void {
-    const placeholders = ACTIVE_JOB_STATUSES.map(() => '?').join(',')
+    const placeholders = ARCHIVE_BLOCKING_JOB_STATUSES.map(() => '?').join(',')
     const referenced = this.db.prepare(`
       SELECT 1 FROM jobs WHERE status IN (${placeholders}) AND gas_payer_wallet_id = ?
       UNION SELECT 1 FROM job_steps JOIN jobs ON jobs.id = job_steps.job_id
         WHERE jobs.status IN (${placeholders}) AND (source_wallet_id = ? OR target_wallet_id = ?)
       LIMIT 1
-    `).get(...ACTIVE_JOB_STATUSES, id, ...ACTIVE_JOB_STATUSES, id, id)
+    `).get(...ARCHIVE_BLOCKING_JOB_STATUSES, id, ...ARCHIVE_BLOCKING_JOB_STATUSES, id, id)
     if (referenced) throw new Error('账户仍被活动任务引用，不能归档')
   }
 
   private assertNoActiveJobForGroup(id: string): void {
     const walletIds = (this.db.prepare('SELECT id FROM wallets WHERE group_id = ?').all(id) as Array<{ id: string }>).map((row) => row.id)
     for (const walletId of walletIds) this.assertNoActiveJobForWallet(walletId)
+  }
+
+  private deleteUnexecutedJobsForWallet(walletId: string): void {
+    const jobs = this.db.prepare(`
+      SELECT DISTINCT jobs.id
+      FROM jobs
+      LEFT JOIN job_steps ON job_steps.job_id = jobs.id
+      WHERE jobs.status IN ('draft', 'previewed')
+        AND (jobs.gas_payer_wallet_id = ? OR job_steps.source_wallet_id = ? OR job_steps.target_wallet_id = ?)
+    `).all(walletId, walletId, walletId) as Array<{ id: string }>
+    for (const job of jobs) {
+      this.db.prepare("DELETE FROM audit_events WHERE entity_id = ? AND kind LIKE 'job.%'").run(job.id)
+      this.db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id)
+    }
   }
 
   private bumpNextIndex(groupId: string, nextIndex: number, now = new Date().toISOString()): void {

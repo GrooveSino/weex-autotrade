@@ -166,6 +166,7 @@ export interface TransactionAttempt {
 
 export interface AccountTransferLog {
   id: string
+  source: 'local' | 'chain'
   jobId: string
   jobName: string
   jobStatus: JobStatus
@@ -190,6 +191,12 @@ export interface AccountTransferLogPage {
   items: AccountTransferLog[]
   total: number
   counts: { all: number; in: number; out: number }
+  sync: {
+    hasMore: boolean
+    syncedAt: string | null
+    added: number
+    error: string | null
+  }
 }
 
 export interface VaultStatus {

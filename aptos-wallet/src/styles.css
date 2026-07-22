@@ -1793,6 +1793,47 @@ textarea {
     padding: 20px;
     background: #101815a8;
 }
+.preflight-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: #101815b8;
+}
+.preflight-progress-dialog {
+    width: min(540px, 100%);
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 28px 90px #07110c66;
+    padding: 26px;
+}
+.preflight-progress-icon {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    border-radius: 50%;
+    background: #e4f4ed;
+    color: var(--green-dark);
+}
+.preflight-progress-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: baseline;
+    margin-top: 18px;
+}
+.preflight-progress-heading span { font-size: 18px; font-weight: 750; color: #17201d; }
+.preflight-progress-heading strong { font-size: 12px; font-weight: 700; color: var(--green-dark); }
+.preflight-progress-dialog > p { min-height: 20px; margin: 10px 0 16px; color: var(--muted); font-size: 13px; }
+.preflight-progress-track { height: 6px; overflow: hidden; background: #e7eeea; border-radius: 4px; }
+.preflight-progress-track > span { display: block; height: 100%; background: var(--green); border-radius: inherit; transition: width 220ms ease; }
+.preflight-progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.preflight-log-toggle { margin-top: 20px; padding: 0; border: 0; background: transparent; color: var(--green-dark); font-size: 12px; font-weight: 700; }
+.preflight-log { max-height: 180px; overflow: auto; margin: 12px 0 0; padding: 10px 12px 10px 29px; border: 1px solid var(--line); background: #f7faf8; color: #52615a; font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.preflight-log li + li { margin-top: 3px; }
 .dialog {
     width: min(460px, 100%);
     max-height: calc(100vh - 40px);
@@ -1899,6 +1940,33 @@ textarea {
 }
 .history-tools a {
     text-decoration: none;
+}
+.chain-sync-button {
+    color: var(--green-dark);
+    border-color: #b8d7c8;
+    background: #f3faf6;
+}
+.chain-sync-status {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: -2px 0 12px;
+    padding: 9px 11px;
+    border: 1px solid #cde1d6;
+    border-radius: 5px;
+    background: #f4faf7;
+    color: var(--green-dark);
+}
+.chain-sync-status > div {
+    display: grid;
+    gap: 2px;
+}
+.chain-sync-status strong {
+    font-size: 11px;
+}
+.chain-sync-status span {
+    color: #5d6f67;
+    font-size: 9px;
 }
 .history-loading {
     min-height: 210px;

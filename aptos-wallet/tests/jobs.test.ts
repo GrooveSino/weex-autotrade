@@ -1,9 +1,9 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, type SqliteDatabase } from '../server/database.js'
-import { JobService } from '../server/jobs.js'
+import { JobService, type JobPreflightProgress } from '../server/jobs.js'
 import { EncryptedVault } from '../server/vault.js'
 import { WalletService } from '../server/wallets.js'
 import { FakeGateway } from './fakes.js'
@@ -46,10 +46,10 @@ describe('transfer jobs', () => {
   it('uses a fee payer and permits a full USDt transfer', async () => {
     const { jobs, gateway, wallets, source, target, payer } = await setup()
     const refreshes: Array<{ id: string; priority: string | undefined }> = []
-    const refresh = wallets.refresh.bind(wallets)
-    wallets.refresh = async (id, priority) => {
+    const refresh = wallets.refreshAsset.bind(wallets)
+    wallets.refreshAsset = async (id, asset, priority) => {
       refreshes.push({ id, priority })
-      return refresh(id, priority)
+      return refresh(id, asset, priority)
     }
     const draft = jobs.createDraft({ name: 'max', gasPayerWalletId: payer.id, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'max', amountMin: null, amountMax: null }] })
@@ -83,6 +83,56 @@ describe('transfer jobs', () => {
     expect(incoming.counts).toEqual({ all: 1, in: 1, out: 0 })
     expect(incoming.items[0]).toMatchObject({ direction: 'in', counterpartyWalletId: source.id, counterpartyAddress: source.address, status: 'confirmed', gasFeeBaseUnits: '10' })
     expect(jobs.accountTransfers(payer.id).items).toEqual([])
+  })
+
+  it('syncs external chain transfers five at a time and continues only on request', async () => {
+    const { jobs, gateway, target } = await setup()
+    const external = `0x${'a'.repeat(64)}`
+    const record = (version: number) => ({
+      transactionVersion: String(version), eventIndex: 1, direction: 'in' as const,
+      counterpartyAddress: external, asset: 'USDT' as const, amountBaseUnits: `${version}000000`,
+      chainTimestamp: `2026-07-21T12:00:${String(version - 100).padStart(2, '0')}`, gasFeeBaseUnits: null,
+    })
+    gateway.chainHistoryPages.push(
+      { records: [106, 105, 104, 103, 102].map(record), hasMore: true, nextBeforeVersion: '102' },
+      { records: [101].map(record), hasMore: false, nextBeforeVersion: '101' },
+    )
+
+    const first = await jobs.accountTransfersWithGasBackfill(target.id)
+    expect(first.items).toHaveLength(5)
+    expect(first.items[0]).toMatchObject({ source: 'chain', direction: 'in', counterpartyAddress: external, jobName: '链上交易' })
+    expect(first.sync).toMatchObject({ added: 5, hasMore: true })
+    expect(gateway.chainHistoryCalls).toHaveLength(1)
+
+    const unchanged = await jobs.accountTransfersWithGasBackfill(target.id)
+    expect(unchanged.sync).toMatchObject({ added: 0, hasMore: true })
+    expect(gateway.chainHistoryCalls).toHaveLength(1)
+
+    const continued = await jobs.syncAccountTransfers(target.id, true)
+    expect(continued).toMatchObject({ added: 1, hasMore: false })
+    expect(gateway.chainHistoryCalls[1]).toMatchObject({ beforeVersion: '102', limit: 5 })
+    expect(jobs.accountTransfers(target.id).counts).toEqual({ all: 6, in: 6, out: 0 })
+  })
+
+  it('does not duplicate a locally recorded transfer during chain sync', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'dedupe', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    const transactionHash = jobs.get(draft.id).steps[0].txHash!
+    gateway.transactionHashes.set('500', transactionHash)
+    gateway.chainHistoryPages.push({ records: [{
+      transactionVersion: '500', eventIndex: 0, direction: 'out', counterpartyAddress: target.address,
+      asset: 'USDT', amountBaseUnits: '1000000', chainTimestamp: '2026-07-21T12:00:00', gasFeeBaseUnits: '10',
+    }], hasMore: false, nextBeforeVersion: '500' })
+
+    const history = await jobs.accountTransfersWithGasBackfill(source.id)
+    expect(history.items).toHaveLength(1)
+    expect(history.items[0].source).toBe('local')
+    expect(history.sync).toMatchObject({ added: 0, hasMore: false })
+    expect(db!.prepare('SELECT COUNT(*) AS count FROM chain_transfer_logs WHERE wallet_id = ?').get(source.id)).toEqual({ count: 0 })
   })
 
   it('backfills a missing historical gas fee when its job is inspected', async () => {
@@ -192,6 +242,26 @@ describe('transfer jobs', () => {
     expect(jobs.get(draft.id).status).toBe('draft')
   })
 
+  it('reads only balances needed by the transfer and reports preflight progress', async () => {
+    const { jobs, gateway, source, target, payer } = await setup()
+    const getBalance = vi.spyOn(gateway, 'getBalance')
+    const progress: JobPreflightProgress[] = []
+    jobs.on('preflight-progress', (event: JobPreflightProgress) => progress.push(event))
+    const draft = jobs.createDraft({ name: 'focused preflight', gasPayerWalletId: payer.id, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+
+    await jobs.checkAndPreview(draft.id)
+
+    expect(getBalance.mock.calls.map(([address, asset]) => `${address}:${asset}`)).toEqual(expect.arrayContaining([
+      `${source.address}:USDT`,
+      `${payer.address}:APT`,
+    ]))
+    expect(getBalance.mock.calls.map(([address]) => address)).not.toContain(target.address)
+    expect(progress.map((event) => event.phase)).toContain('balances')
+    expect(progress.map((event) => event.phase)).toContain('simulation')
+    expect(progress.at(-1)?.phase).toBe('complete')
+  })
+
   it('rejects random ranges with more than two decimal places', async () => {
     const { jobs, source, target } = await setup()
     expect(() => jobs.createDraft({ name: 'precision', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
@@ -282,6 +352,22 @@ describe('transfer jobs', () => {
     await waitFor(() => jobs.get(draft.id).status === 'uncertain', 6_000)
     expect(gateway.submissions).toBe(1)
     expect(() => jobs.resume(draft.id)).toThrow()
+  })
+
+  it('lets the user explicitly resolve an uncertain transaction that never reached chain', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    gateway.submitError = true
+    const draft = jobs.createDraft({ name: 'manual reconcile', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'APT', amountMode: 'fixed', amountMin: '0.01', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'uncertain', 6_000)
+
+    const resolved = await jobs.reconcileUncertain(draft.id)
+
+    expect(resolved.status).toBe('failed')
+    expect(resolved.steps[0].status).toBe('failed')
+    expect(gateway.submissions).toBe(1)
   })
 
   it('keeps execution disabled by default', async () => {
