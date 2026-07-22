@@ -23,7 +23,10 @@ const MAINNET_READ_WINDOW_LIMIT = 180
 const MAINNET_RATE_LIMIT_COOLDOWN_MS = 2_000
 const ACCOUNT_EXISTS_CACHE_TTL_MS = 5 * 60_000
 const USDT_METADATA_CACHE_TTL_MS = 6 * 60 * 60_000
-const PREVIEW_NETWORK_ATTEMPTS = 2
+// Building and simulating a preview are read-only operations. Give a transient
+// Fullnode connection drop one extra bounded retry, but never apply this policy
+// to transaction submission.
+const PREVIEW_NETWORK_ATTEMPTS = 3
 const APTOS_COIN_TYPE = '0x1::aptos_coin::AptosCoin'
 export type ReadPriority = 'normal' | 'high'
 
@@ -338,6 +341,8 @@ export class AptosMainnetGateway implements ChainGateway {
     this.usdtValidationInFlight = validation
     try {
       await validation
+    } catch (error) {
+      throw redactChainError(error)
     } finally {
       this.usdtValidationInFlight = null
     }
@@ -584,6 +589,7 @@ function isNotFound(error: unknown): boolean {
 
 function redactChainError(error: unknown): Error {
   if (isRateLimited(error)) return new Error('主网公共节点暂时限流，程序已自动降速并退避，请稍后重试')
+  if (isTransientReadFailure(error)) return new Error('Aptos 主网连接暂时中断，已自动重试仍未恢复；请稍后重新预览。')
   const message = error instanceof Error ? error.message : String(error)
   return new Error(message
     .replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]')
@@ -598,8 +604,11 @@ async function retryRead<T>(action: () => Promise<T>, maxAttempts = 4): Promise<
       return await action()
     } catch (error) {
       lastError = error
-      if (!isRateLimited(error) || attempt === maxAttempts) throw error
-      await sleep(Math.max(getRetryAfterMs(error, 1_000), Math.min(10_000, attempt * 1_000) + Math.floor(Math.random() * 250)))
+      if ((!isRateLimited(error) && !isTransientReadFailure(error)) || attempt === maxAttempts) throw error
+      const retryDelay = isRateLimited(error)
+        ? Math.max(getRetryAfterMs(error, 1_000), Math.min(10_000, attempt * 1_000) + Math.floor(Math.random() * 250))
+        : Math.min(4_000, 500 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 200))
+      await sleep(retryDelay)
     }
   }
   throw lastError
@@ -608,6 +617,14 @@ async function retryRead<T>(action: () => Promise<T>, maxAttempts = 4): Promise<
 function isRateLimited(error: unknown): boolean {
   const candidate = error as { status?: number; statusCode?: number; response?: { status?: number }; message?: string }
   return candidate?.status === 429 || candidate?.statusCode === 429 || candidate?.response?.status === 429 || /(?:HTTP 429|Too Many Requests)/i.test(candidate?.message ?? '')
+}
+
+function isTransientReadFailure(error: unknown): boolean {
+  const candidate = error as { code?: string; cause?: { code?: string; message?: string }; message?: string }
+  const code = `${candidate?.code ?? ''} ${candidate?.cause?.code ?? ''}`.toUpperCase()
+  const message = `${candidate?.message ?? ''} ${candidate?.cause?.message ?? ''}`.toUpperCase()
+  return /(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|UND_ERR)/.test(code)
+    || /(?:FETCH FAILED|NETWORK ERROR|NETWORK REQUEST FAILED|SOCKET HANG UP|OTHER SIDE CLOSED)/.test(message)
 }
 
 function parseRetryAfter(value: string | null): number | undefined {

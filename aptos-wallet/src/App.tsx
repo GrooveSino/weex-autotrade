@@ -20,7 +20,7 @@ function defaultTransferPlanName(date = new Date()) {
 }
 
 type View = 'wallets' | 'addressBook' | 'transfer' | 'jobs'
-type Modal = 'create' | 'restore' | 'private' | 'confirm' | 'secret' | 'password' | 'accounts' | 'archiveGroup' | 'secretAuth' | 'archived' | 'receive' | 'accountDetails' | 'accountAlias' | 'accountHistory' | null
+type Modal = 'create' | 'restore' | 'private' | 'confirm' | 'retryFailed' | 'secret' | 'password' | 'accounts' | 'archiveGroup' | 'secretAuth' | 'archived' | 'receive' | 'accountDetails' | 'accountAlias' | 'accountHistory' | null
 type SecretTarget = { kind: 'mnemonic'; group: WalletGroup } | { kind: 'privateKey'; wallet: WalletRecord }
 const statusLabels: Record<string, string> = {
   draft: '草稿', previewed: '待确认', running: '运行中', paused: '已暂停', cancelled: '已取消',
@@ -203,6 +203,7 @@ export function App() {
       {modal === 'restore' && <RestoreWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'private' && <ImportPrivateKeyDialog close={() => setModal(null)} run={run} reload={reload} />}
       {modal === 'confirm' && previewJob && <ConfirmDialog job={previewJob} wallets={wallets} addressBook={addressBook} initialPreflight={previewPreflight} executionEnabled={status.executionEnabled} close={() => { setModal(null); setPreviewPreflight(null) }} run={run} onChanged={(result) => { setPreviewPreflight(result); setPreviewJob(result.job) }} onStarted={(started) => { setJobs((current) => [started, ...current.filter((job) => job.id !== started.id)]); setFocusedJobId(started.id); setModal(null); setPreviewPreflight(null); setView('jobs') }} />}
+      {modal === 'retryFailed' && previewJob && <RetryFailedDialog job={previewJob} executionEnabled={status.executionEnabled} close={() => setModal(null)} run={run} onStarted={(started) => { setJobs((current) => [started, ...current.filter((job) => job.id !== started.id)]); setFocusedJobId(started.id); setModal(null); setView('jobs') }} />}
       {modal === 'secret' && <SecretDialog title={secretTitle} secret={secret} close={() => { setSecret(''); setModal(null) }} />}
       {modal === 'password' && <PasswordDialog close={() => setModal(null)} run={run} />}
       {modal === 'accounts' && selectedGroup && <AccountDialog group={selectedGroup} close={() => { setSelectedGroup(null); setModal(null) }} run={run} reload={reload} />}
@@ -699,14 +700,40 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
   inspectJob: (id: string) => Promise<void>; focusedJobId: string | null; onFocusedJobHandled: (id: string) => void
   setPreviewJob: (job: TransferJob) => void; setModal: (value: Modal) => void
 }) {
+  const pageSize = 10
   const [selectedId, setSelectedId] = useState<string | null>(jobs[0]?.id ?? null)
-  const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0]
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [pageIndex, setPageIndex] = useState(1)
+  const dateFromTime = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : null
+  const dateToTime = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : null
+  const filteredJobs = useMemo(() => jobs.filter((job) => {
+    const createdAt = Date.parse(job.createdAt)
+    return Number.isFinite(createdAt)
+      && (dateFromTime === null || !Number.isFinite(dateFromTime) || createdAt >= dateFromTime)
+      && (dateToTime === null || !Number.isFinite(dateToTime) || createdAt <= dateToTime)
+  }), [dateFromTime, dateToTime, jobs])
+  const pageCount = Math.max(1, Math.ceil(filteredJobs.length / pageSize))
+  const currentPage = Math.min(pageIndex, pageCount)
+  const visibleJobs = filteredJobs.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  const selected = filteredJobs.find((job) => job.id === selectedId) ?? filteredJobs[0]
   const [clock, setClock] = useState(() => Date.now())
   useEffect(() => {
     if (!focusedJobId || !jobs.some((job) => job.id === focusedJobId)) return
+    setDateFrom('')
+    setDateTo('')
+    setPageIndex(Math.floor(jobs.findIndex((job) => job.id === focusedJobId) / pageSize) + 1)
     setSelectedId(focusedJobId)
     onFocusedJobHandled(focusedJobId)
   }, [focusedJobId, jobs, onFocusedJobHandled])
+  useEffect(() => { setPageIndex(1) }, [dateFrom, dateTo])
+  useEffect(() => {
+    if (pageIndex !== currentPage) setPageIndex(currentPage)
+  }, [currentPage, pageIndex])
+  useEffect(() => {
+    if (selectedId && filteredJobs.some((job) => job.id === selectedId)) return
+    setSelectedId(filteredJobs[0]?.id ?? null)
+  }, [filteredJobs, selectedId])
   useEffect(() => {
     if (selected?.status !== 'running') return
     const timer = window.setInterval(() => setClock(Date.now()), 250)
@@ -733,17 +760,37 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
       : activeStep ? `${activeStep.status === 'submitting' ? '正在提交' : '正在准备'}第 ${activeStep.position + 1} 笔`
         : confirmedCount >= (selected?.steps.length ?? 0) ? '正在收尾' : '正在检查下一笔'
   return <>
-    <PageHeader title="执行记录" subtitle={`${jobs.length} 个任务`} />
+    <PageHeader title="执行记录" subtitle={filteredJobs.length === jobs.length ? `${jobs.length} 个任务` : `筛选结果 ${filteredJobs.length} / ${jobs.length} 个任务`} />
     <div className="jobs-layout"><section className="job-list">
-      {jobs.length === 0 ? <Empty icon={<FileClock size={28} />} text="还没有转账任务。" /> : jobs.map((job) => <button key={job.id} className={`job-item ${selected?.id === job.id ? 'selected' : ''}`} onClick={() => setSelectedId(job.id)}>
-        <div><strong>{job.name}</strong><span>{new Date(job.createdAt).toLocaleString()}</span></div><div><Status value={job.status} /><ChevronRight size={16} /></div>
-      </button>)}
+      <div className="job-list-filter">
+        <div className="job-date-fields">
+          <label><span>开始日期</span><input aria-label="执行记录开始日期" type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} /></label>
+          <span className="job-date-separator">至</span>
+          <label><span>结束日期</span><input aria-label="执行记录结束日期" type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} /></label>
+        </div>
+        <button className="text-button job-date-clear" disabled={!dateFrom && !dateTo} onClick={() => { setDateFrom(''); setDateTo('') }}>清空日期</button>
+      </div>
+      {filteredJobs.length === 0 ? <Empty icon={<FileClock size={28} />} text={jobs.length ? '这个日期范围内没有转账记录。' : '还没有转账任务。'} /> : <>
+        <div className="job-list-items">{visibleJobs.map((job) => <button key={job.id} className={`job-item ${selected?.id === job.id ? 'selected' : ''}`} onClick={() => setSelectedId(job.id)}>
+          <div><strong>{job.name}</strong><span>{new Date(job.createdAt).toLocaleString()}</span></div><div><Status value={job.status} /><ChevronRight size={16} /></div>
+        </button>)}</div>
+        <div className="job-list-pagination" aria-label="执行记录分页">
+          <button className="secondary small" disabled={currentPage <= 1} onClick={() => setPageIndex((page) => Math.max(1, page - 1))}>上一页</button>
+          <span>第 {currentPage} / {pageCount} 页</span>
+          <label className="job-page-jump"><span>跳至</span><input aria-label="跳转执行记录页码" type="number" min="1" max={pageCount} value={currentPage} onChange={(event) => {
+            const next = Number(event.target.value)
+            if (Number.isInteger(next)) setPageIndex(Math.min(pageCount, Math.max(1, next)))
+          }} /><span>页</span></label>
+          <button className="secondary small" disabled={currentPage >= pageCount} onClick={() => setPageIndex((page) => Math.min(pageCount, page + 1))}>下一页</button>
+        </div>
+      </>}
     </section>{selected && <section className="job-detail">
       <div className="job-detail-head"><div><h2>{selected.name}</h2><Status value={selected.status} /></div><div className="header-actions">
         {selected.status === 'previewed' && <button className="primary" onClick={() => { setPreviewJob(selected); setModal('confirm') }}><Check size={16} />确认执行</button>}
         {selected.status === 'running' && <button className="secondary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/pause`) })}>暂停</button>}
         {selected.status === 'paused' && <button className="primary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/resume`) })}>恢复</button>}
         {selected.status === 'uncertain' && <button className="secondary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/reconcile`) }, '已重新核对链上状态')}>重新核对</button>}
+        {selected.status === 'failed' && selected.steps.find((step) => step.status === 'failed') && <button className="primary" onClick={() => { setPreviewJob(selected); setModal('retryFailed') }}><RotateCcw size={16} />从第 {selected.steps.find((step) => step.status === 'failed')!.position + 1} 笔重试</button>}
         {['draft', 'previewed', 'running', 'paused'].includes(selected.status) && <button className="danger-button" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/cancel`) })}>取消</button>}
       </div></div>
       {selected.error && <div className="error-banner"><ShieldAlert size={17} />{presentError(selected.error)}</div>}
@@ -1125,6 +1172,29 @@ function ConfirmDialog({ job, wallets, addressBook, initialPreflight, executionE
       const started = await post<TransferJob>(`/api/v1/jobs/${currentJob.id}/confirm`, { confirmation })
       onStarted(started)
     }, '任务已开始')}>{preview.valid ? '发送并执行' : '修正后再发送'}</button></div>
+  </div></Dialog>
+}
+
+function RetryFailedDialog({ job, executionEnabled, close, run, onStarted }: {
+  job: TransferJob; executionEnabled: boolean; close: () => void; run: DialogProps['run']; onStarted: (job: TransferJob) => void
+}) {
+  const [confirmation, setConfirmation] = useState('')
+  const [liveExecutionEnabled, setLiveExecutionEnabled] = useState(executionEnabled)
+  const failedStep = job.steps.find((step) => step.status === 'failed')
+  if (!failedStep) return null
+  const confirmedCount = job.steps.filter((step) => step.status === 'confirmed').length
+  return <Dialog title="从失败位置继续" close={close}><div className="retry-failed-dialog">
+    <div className="warning-box"><ShieldAlert size={17} /><div><strong>原失败交易不会重发</strong><span>系统只会从第 {failedStep.position + 1} 笔重新构建一笔新交易。已确认的 {confirmedCount} 笔保持不变，原失败哈希会留在记录中。</span></div></div>
+    <div className="retry-step-summary"><span>重新开始位置</span><strong>第 {failedStep.position + 1} 笔 · {failedStep.asset === 'USDT' ? 'USDt' : 'APT'} · {failedStep.amountMode === 'max' ? '全部余额' : failedStep.frozenAmountDisplay ?? failedStep.amountMin}</strong><small>{presentError(failedStep.error ?? job.error ?? '链上执行失败')}</small></div>
+    <label>再次输入完整确认短语<div className="phrase-row"><code className="phrase">{job.confirmationPhrase}</code><button type="button" className="secondary small phrase-copy" title="复制确认短语" aria-label="复制确认短语" onClick={() => void navigator.clipboard.writeText(job.confirmationPhrase ?? '')}><Copy size={14} />复制</button></div><input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+    {!liveExecutionEnabled && <div className="error-banner"><Lock size={17} />本机服务未开启真实转账，不能从失败位置继续。</div>}
+    <div className="dialog-actions"><button className="secondary" onClick={close}>暂不重试</button><button className="danger-primary" disabled={confirmation !== job.confirmationPhrase} onClick={() => void run(async () => {
+      const latestStatus = await getStatus()
+      setLiveExecutionEnabled(latestStatus.executionEnabled)
+      if (!latestStatus.unlocked) throw new Error('保险库已锁定，请重新解锁')
+      if (!latestStatus.executionEnabled) throw new Error('本机服务未开启真实转账')
+      onStarted(await post<TransferJob>(`/api/v1/jobs/${job.id}/retry-failed`, { confirmation }))
+    }, `已从第 ${failedStep.position + 1} 笔重新开始`)}><RotateCcw size={16} />确认并继续执行</button></div>
   </div></Dialog>
 }
 

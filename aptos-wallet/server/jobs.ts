@@ -343,7 +343,7 @@ export class JobService extends EventEmitter {
     this.setJobStatus(id, 'running', null)
     this.pauseRequested = false
     this.cancelRequested = false
-    this.worker = this.run(id).finally(() => { this.worker = null })
+    this.startWorker(id)
     return this.get(id)
   }
 
@@ -365,7 +365,44 @@ export class JobService extends EventEmitter {
     this.setJobStatus(id, 'running', null)
     this.pauseRequested = false
     this.cancelRequested = false
-    this.worker = this.run(id).finally(() => { this.worker = null })
+    this.startWorker(id)
+    return this.get(id)
+  }
+
+  retryFailed(id: string, confirmation: string): TransferJob {
+    if (!this.executionEnabled) throw new Error('主网执行门禁未开启：APTOS_MAINNET_EXECUTION_ENABLED 必须为 true')
+    const job = this.get(id)
+    if (job.status !== 'failed') throw new Error('只有链上已失败的任务可以从错误位置重试')
+    if (!job.confirmationPhrase || confirmation !== job.confirmationPhrase) throw new Error('确认短语不匹配')
+    if (job.steps.some((step) => step.status === 'uncertain')) throw new Error('存在结果不确定的交易，必须先重新核对，禁止重试')
+    const failedStep = job.steps.find((step) => step.status === 'failed')
+    if (!failedStep) throw new Error('任务没有可重试的失败条目')
+    if (job.steps.some((step) => step.position < failedStep.position && step.status !== 'confirmed')) {
+      throw new Error('错误位置之前存在未确认条目，禁止跳过重试')
+    }
+    const failedAttempt = this.db.prepare(`
+      SELECT id FROM transaction_attempts
+      WHERE job_id = ? AND step_id = ? AND state = 'failed'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(id, failedStep.id)
+    if (!failedAttempt) throw new Error('未找到已确定失败的链上交易，禁止重试')
+    const active = this.db.prepare(`SELECT id FROM jobs WHERE status IN ('running','paused','uncertain') AND id <> ? LIMIT 1`).get(id)
+    if (active) throw new Error('当前已有其他活动任务')
+
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE job_steps SET status = 'pending', tx_hash = NULL, error = NULL, updated_at = ? WHERE id = ?`)
+        .run(now, failedStep.id)
+      this.db.prepare(`UPDATE jobs SET status = 'running', error = NULL, updated_at = ? WHERE id = ?`).run(now, id)
+      this.audit('job.retry_from_failed_step', id, { stepId: failedStep.id, position: failedStep.position })
+    })()
+    this.pauseRequested = false
+    this.cancelRequested = false
+    this.emitChange()
+    // The failed item is retried immediately. Normal randomized waits resume
+    // from the following pair, so the rest of the frozen schedule is intact.
+    this.startWorker(id, failedStep.id)
     return this.get(id)
   }
 
@@ -612,7 +649,15 @@ export class JobService extends EventEmitter {
     return result
   }
 
-  private async run(jobId: string): Promise<void> {
+  private startWorker(jobId: string, skipInitialWaitForStepId?: string): void {
+    const worker = this.run(jobId, skipInitialWaitForStepId)
+    this.worker = worker
+    void worker.finally(() => {
+      if (this.worker === worker) this.worker = null
+    })
+  }
+
+  private async run(jobId: string, skipInitialWaitForStepId?: string): Promise<void> {
     const job = this.get(jobId)
     for (const step of job.steps.filter((candidate) => candidate.status === 'pending' || candidate.status === 'waiting')) {
       if (this.cancelRequested) {
@@ -620,7 +665,7 @@ export class JobService extends EventEmitter {
         return
       }
       if (this.pauseRequested) return this.setJobStatus(jobId, 'paused', '用户暂停')
-      if (step.position > 0) {
+      if (step.position > 0 && step.id !== skipInitialWaitForStepId) {
         const previous = this.get(jobId).steps[step.position - 1]
         if (previous?.waitAfterSeconds) {
           this.setStepStatus(step.id, 'waiting', null)
@@ -1132,6 +1177,9 @@ function safeError(error: unknown, feePayerLabel?: string): string {
   const normalized = message.toUpperCase()
   if (normalized.includes('TOO MANY REQUESTS') || normalized.includes('HTTP 429')) {
     return 'Aptos 公共节点暂时限流，程序已自动降速并等待；这笔交易没有自动重发。'
+  }
+  if (normalized.includes('FETCH FAILED') || normalized.includes('NETWORK ERROR') || normalized.includes('SOCKET HANG UP')) {
+    return 'Aptos 主网连接暂时中断，已自动重试仍未恢复；请稍后重新预览。'
   }
   if (normalized.includes('INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE') || normalized.includes('OUT_OF_GAS') || normalized.includes('MAX_GAS_UNITS_BELOW_MIN')) {
     if (feePayerLabel) return `手续费账户“${feePayerLabel}”的 APT 余额不足，请充值或改用其他手续费账户。`

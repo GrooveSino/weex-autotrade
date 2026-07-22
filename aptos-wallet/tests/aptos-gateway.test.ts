@@ -45,6 +45,23 @@ describe('Aptos mainnet balance reader', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('retries a transient Fullnode fetch failure before surfacing it', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response('30000000', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(new AptosMainnetGateway(config).getBalance(`0x${'4'.repeat(64)}`, 'APT')).resolves.toBe(30_000_000n)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('redacts an exhausted transient Fullnode failure into an actionable preview message', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
+
+    await expect(new AptosMainnetGateway(config).getBalance(`0x${'6'.repeat(64)}`, 'APT'))
+      .rejects.toThrow('Aptos 主网连接暂时中断，已自动重试仍未恢复；请稍后重新预览。')
+  })
+
   it('reuses account existence learned from a successful APT balance response', async () => {
     const gateway = new AptosMainnetGateway(config)
     const address = `0x${'5'.repeat(64)}`

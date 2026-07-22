@@ -43,6 +43,30 @@ describe('transfer jobs', () => {
     expect(jobs.attempts(draft.id)[0]).toMatchObject({ state: 'confirmed', gas_fee_base_units: '10' })
   })
 
+  it('retries only a definitely failed step with a fresh signed transaction', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'retry from failure', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    gateway.failNextTransaction = true
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'failed')
+
+    const failedHash = jobs.get(draft.id).steps[0].txHash
+    expect(jobs.attempts(draft.id)).toHaveLength(1)
+    expect(jobs.attempts(draft.id)[0]).toMatchObject({ state: 'failed', tx_hash: failedHash })
+    expect(() => jobs.retryFailed(draft.id, 'wrong confirmation')).toThrow('确认短语不匹配')
+
+    jobs.retryFailed(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    const attempts = jobs.attempts(draft.id)
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]).toMatchObject({ state: 'failed', tx_hash: failedHash })
+    expect(attempts[1]).toMatchObject({ state: 'confirmed' })
+    expect(attempts[1].tx_hash).not.toBe(failedHash)
+    expect(gateway.submissions).toBe(2)
+  })
+
   it('uses a fee payer and permits a full USDt transfer', async () => {
     const { jobs, gateway, wallets, source, target, payer } = await setup()
     const refreshes: Array<{ id: string; priority: string | undefined }> = []

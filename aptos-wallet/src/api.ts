@@ -16,7 +16,12 @@ async function refreshCsrfToken(): Promise<VaultStatus> {
   } catch {
     throw new Error(`无法连接本地钱包服务，请打开 ${PRODUCTION_WALLET_URL}`)
   }
-  const body = await response.json() as VaultStatus & { error?: string }
+  let body: VaultStatus & { error?: string }
+  try {
+    body = await response.json() as VaultStatus & { error?: string }
+  } catch {
+    throw new Error('本地钱包服务连接在收到响应前中断；请刷新页面确认当前状态。')
+  }
   if (!response.ok) throw new Error(body.error ?? `请求失败 (${response.status})`)
   csrfToken = body.csrfToken
   return body
@@ -28,13 +33,14 @@ export async function request<T>(path: string, init: RequestInit = {}, retriedAf
   const method = (init.method ?? 'GET').toUpperCase()
   if (!['GET', 'HEAD'].includes(method)) headers.set('x-csrf-token', csrfToken)
   let response: Response
+  let body: unknown
   try {
     response = await fetch(path, { ...init, headers, credentials: 'same-origin' })
+    const contentType = response.headers.get('content-type') ?? ''
+    body = contentType.includes('application/json') ? await response.json() : await response.text()
   } catch {
-    throw new Error(`无法连接本地钱包服务，请打开 ${PRODUCTION_WALLET_URL}`)
+    throw new Error('本地钱包服务连接在收到响应前中断；请刷新页面确认当前状态。系统不会自动重复提交交易。')
   }
-  const contentType = response.headers.get('content-type') ?? ''
-  const body = contentType.includes('application/json') ? await response.json() : await response.text()
   if (response.status === 403 && !retriedAfterCsrf && method !== 'GET' && method !== 'HEAD'
     && typeof body === 'object' && body?.error === 'CSRF 校验失败') {
     const status = await refreshCsrfToken()
@@ -73,7 +79,14 @@ export async function saveAndPreviewJob(draft: JobDraftInput, id?: string, onChe
     ? await put<TransferJob>(`/api/v1/jobs/${id}`, draft)
     : await post<TransferJob>('/api/v1/jobs', draft)
   onCheckStarted?.(job.id)
-  return post<JobPreflight>(`/api/v1/jobs/${job.id}/check`)
+  try {
+    return await post<JobPreflight>(`/api/v1/jobs/${job.id}/check`)
+  } catch (error) {
+    // A preview is read-only. Keep its failed draft out of the local execution
+    // history, while leaving any attempted transaction categorically untouched.
+    try { await post(`/api/v1/jobs/${job.id}/cancel`) } catch { /* best-effort cleanup */ }
+    throw error
+  }
 }
 
 export async function download(path: string, filename: string): Promise<void> {

@@ -124,6 +124,45 @@ test('account archive requires a second click in the same place', async ({ page 
   await expect.poll(() => archiveRequests).toBe(1)
 })
 
+test('execution records stay paginated and support date-range filtering', async ({ page }) => {
+  const executionJobs = Array.from({ length: 25 }, (_, index) => ({
+    id: `record-${index + 1}`,
+    name: `执行记录 ${index + 1}`,
+    status: 'completed',
+    steps: [],
+    gasPayerWalletId: null,
+    intervalMinSeconds: 0,
+    intervalMaxSeconds: 0,
+    shuffle: false,
+    confirmationPhrase: null,
+    summary: null,
+    createdAt: new Date(Date.now() - index * 60_000).toISOString(),
+    updatedAt: now,
+    error: null,
+  }))
+  await page.route('**/api/v1/jobs**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/jobs' && route.request().method() === 'GET') return route.fulfill({ json: executionJobs })
+    const job = executionJobs.find((item) => path === `/api/v1/jobs/${item.id}`)
+    if (job && route.request().method() === 'GET') return route.fulfill({ json: job })
+    return route.fallback()
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: '执行记录' }).click()
+  const visibleRecords = page.locator('.job-list-items .job-item')
+  await expect(visibleRecords).toHaveCount(10)
+  await expect(page.getByText('第 1 / 3 页', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '下一页' }).click()
+  await expect(page.getByText('执行记录 11', { exact: true })).toBeVisible()
+  await page.getByLabel('跳转执行记录页码').fill('3')
+  await expect(page.getByText('第 3 / 3 页', { exact: true })).toBeVisible()
+  await expect(visibleRecords).toHaveCount(5)
+  await page.getByLabel('执行记录开始日期').fill('2099-01-01')
+  await expect(page.getByText('这个日期范围内没有转账记录。')).toBeVisible()
+  await page.getByRole('button', { name: '清空日期' }).click()
+  await expect(visibleRecords).toHaveCount(10)
+})
+
 test('transfer interval can be disabled for continuous execution', async ({ page }) => {
   let submitted: Record<string, unknown> | null = null
   await page.route('**/api/v1/jobs', async (route) => {

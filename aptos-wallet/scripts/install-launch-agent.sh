@@ -54,7 +54,10 @@ print -r -- '  <key>EnvironmentVariables</key><dict>' >> "$PLIST"
 print -r -- '    <key>NODE_ENV</key><string>production</string>' >> "$PLIST"
 print -r -- '    <key>APTOS_WALLET_HOST</key><string>127.0.0.1</string>' >> "$PLIST"
 print -r -- '    <key>APTOS_WALLET_API_PORT</key><string>48271</string>' >> "$PLIST"
-print -r -- '    <key>APTOS_WALLET_WEB_ORIGIN</key><string>http://127.0.0.1:48272</string>' >> "$PLIST"
+# Production serves the React app from the wallet process itself. Keep the
+# configured origin identical to that listener instead of allowing a dormant
+# development port.
+print -r -- '    <key>APTOS_WALLET_WEB_ORIGIN</key><string>http://127.0.0.1:48271</string>' >> "$PLIST"
 print -r -- "    <key>APTOS_MAINNET_EXECUTION_ENABLED</key><string>${EXECUTION_ENABLED}</string>" >> "$PLIST"
 print -r -- '  </dict>' >> "$PLIST"
 print -r -- '  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' >> "$PLIST"

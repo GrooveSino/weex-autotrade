@@ -37,6 +37,49 @@ async function setup(executionEnabled = false) {
 }
 
 describe('local API safety', () => {
+  it('returns a clear mainnet connectivity error instead of a raw fetch failure', async () => {
+    const { app, headers, gateway, wallets } = await setup()
+    const source = wallets.importPrivateKey('转出账户', Account.generate().privateKey.toString())
+    const target = wallets.importPrivateKey('收款账户', Account.generate().privateKey.toString())
+    gateway.setBalance(source.address, 'APT', 100_000_000n)
+    gateway.estimateError = 'fetch failed'
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/jobs',
+      headers,
+      payload: {
+        name: '连接检查', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+        steps: [{ sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'APT', amountMode: 'fixed', amountMin: '0.01', amountMax: null }],
+      },
+    })
+    const jobId = response.json().id as string
+    const preview = await app.inject({ method: 'POST', url: `/api/v1/jobs/${jobId}/check`, headers })
+
+    expect(preview.statusCode).toBe(200)
+    expect(preview.json().checks[0]).toMatchObject({ valid: false, error: 'Aptos 主网连接暂时中断，已自动重试仍未恢复；请稍后重新预览。' })
+  })
+
+  it('requires a fresh exact confirmation before retrying a definitely failed step', async () => {
+    const { app, config, headers, gateway, wallets, jobs } = await setup(true)
+    const source = wallets.importPrivateKey('转出账户', Account.generate().privateKey.toString())
+    const target = wallets.importPrivateKey('收款账户', Account.generate().privateKey.toString())
+    gateway.setBalance(source.address, 'APT', 100_000_000n)
+    gateway.setBalance(source.address, 'USDT', 5_000_000n)
+    const draft = jobs.createDraft({ name: '失败后继续', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    gateway.failNextTransaction = true
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'failed')
+
+    expect((await app.inject({ method: 'POST', url: `/api/v1/jobs/${draft.id}/retry-failed`, headers: { origin: config.webOrigin }, payload: { confirmation: preview.confirmationPhrase } })).statusCode).toBe(403)
+    expect((await app.inject({ method: 'POST', url: `/api/v1/jobs/${draft.id}/retry-failed`, headers, payload: { confirmation: 'wrong' } })).statusCode).toBe(400)
+    const retried = await app.inject({ method: 'POST', url: `/api/v1/jobs/${draft.id}/retry-failed`, headers, payload: { confirmation: preview.confirmationPhrase } })
+    expect(retried.statusCode).toBe(200)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    expect(jobs.attempts(draft.id)).toHaveLength(2)
+  })
+
   it('serves frontend assets created after startup without returning the SPA HTML fallback', async () => {
     const root = mkdtempSync(join(tmpdir(), 'aptos-web-'))
     mkdirSync(join(root, 'assets'))

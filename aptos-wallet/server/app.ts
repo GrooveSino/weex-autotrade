@@ -440,6 +440,10 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     const { confirmation } = z.object({ confirmation: z.string().min(1).max(500) }).parse(request.body)
     return jobs.confirm(jobIdParams.parse(request.params).id, confirmation)
   })
+  app.post('/api/v1/jobs/:id/retry-failed', { preHandler: requireSession }, async (request) => {
+    const { confirmation } = z.object({ confirmation: z.string().min(1).max(500) }).parse(request.body)
+    return jobs.retryFailed(jobIdParams.parse(request.params).id, confirmation)
+  })
   app.post('/api/v1/jobs/:id/pause', { preHandler: requireSession }, async (request) => jobs.pause(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs/:id/resume', { preHandler: requireSession }, async (request) => jobs.resume(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs/:id/reconcile', { preHandler: requireSession }, async (request) => jobs.reconcileUncertain(jobIdParams.parse(request.params).id))
@@ -490,6 +494,9 @@ function safeMessage(error: Error): string {
     if (field === 'confirmationName') return '请手动输入完整钱包名称或账户名称'
     if (field === 'password') return '主密码长度必须至少为 12 个字符'
     return error.issues[0]?.message ?? '请求参数无效'
+  }
+  if (/(?:fetch failed|network error|network request failed|socket hang up)/i.test(error.message)) {
+    return 'Aptos 主网连接暂时中断，已自动重试仍未恢复；请稍后重新预览。'
   }
   return error.message
     .replace(/ed25519-priv-[^\s"']+/gi, '[REDACTED]')

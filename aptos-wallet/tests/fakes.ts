@@ -10,6 +10,7 @@ export class FakeGateway implements ChainGateway {
   submissions = 0
   submitError = false
   commitBeforeError = false
+  failNextTransaction = false
   validationError = false
   estimateError: string | null = null
   findTransactionCalls = 0
@@ -57,13 +58,15 @@ export class FakeGateway implements ChainGateway {
     request.sender.privateKey.clear()
     request.feePayer?.privateKey.clear()
     const commit = () => {
+      const failed = this.failNextTransaction
+      this.failNextTransaction = false
       const sourceKey = `${sender}:${request.asset}`
       this.balances.set(sourceKey, (this.balances.get(sourceKey) ?? 0n) - request.amount)
       const targetKey = `${request.recipient}:${request.asset}`
       this.balances.set(targetKey, (this.balances.get(targetKey) ?? 0n) + request.amount)
       const gasKey = `${feePayer ?? sender}:APT`
       this.balances.set(gasKey, (this.balances.get(gasKey) ?? 0n) - 10n)
-      this.outcomes.set(hash, { success: true, vmStatus: 'Executed successfully', gasFeeBaseUnits: '10' })
+      this.outcomes.set(hash, { success: !failed, vmStatus: failed ? 'Move abort: test failure' : 'Executed successfully', gasFeeBaseUnits: '10' })
     }
     return {
       txHash: hash,
