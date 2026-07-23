@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Copy, LoaderCircle, Play, ShieldCheck, Square, X } from 'lucide-react'
 import type { AccountInstance, BetaCampaign, BetaCampaignPreview } from '../types'
 import {
@@ -30,6 +30,19 @@ const statusLabel: Record<BetaCampaign['status'], string> = {
   uncertain: '待人工对账',
 }
 
+type PreparationStage = 'checking' | 'preflight' | null
+
+const preparationCopy: Record<Exclude<PreparationStage, null>, { title: string; detail: string }> = {
+  checking: {
+    title: '正在检查当前策略任务',
+    detail: '读取该账号已有授权状态，不会提交订单。',
+  },
+  preflight: {
+    title: '正在生成启动确认',
+    detail: '正在读取 Final Beta、余额、持仓与挂单。',
+  },
+}
+
 function copy(value: string, onToast: (message: string) => void) {
   void navigator.clipboard?.writeText(value).then(
     () => onToast('已复制精确确认短语'),
@@ -47,62 +60,82 @@ function launchErrorMessage(reason: unknown, fallback: string): string {
 
 export function BoundStrategyExecutionDialog({ account, queuePosition, queueLength, enabled, onClose, onChanged, onStarted, onToast }: BoundStrategyExecutionDialogProps) {
   const [execution, setExecution] = useState<BetaCampaign | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [preparationStage, setPreparationStage] = useState<PreparationStage>('checking')
   const [busy, setBusy] = useState(false)
   const [riskAcknowledged, setRiskAcknowledged] = useState(false)
   const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const autoPreviewedAccountId = useRef<string | null>(null)
+  const accountRef = useRef(account)
+  const onChangedRef = useRef(onChanged)
+  const onStartedRef = useRef(onStarted)
+  const onToastRef = useRef(onToast)
+  const preparationRequestRef = useRef(0)
+  const dialogKey = `${account.id}:${account.strategy.id}:${account.strategy.version}`
 
-  const update = (next: BetaCampaign) => {
+  useEffect(() => { accountRef.current = account }, [account])
+  useEffect(() => { onChangedRef.current = onChanged }, [onChanged])
+  useEffect(() => { onStartedRef.current = onStarted }, [onStarted])
+  useEffect(() => { onToastRef.current = onToast }, [onToast])
+
+  const update = useCallback((next: BetaCampaign) => {
     setExecution(next)
     setConfirmation('')
-    onChanged(next)
-  }
+    onChangedRef.current(next)
+  }, [])
 
   useEffect(() => {
-    let active = true
+    let cancelled = false
+    const requestId = ++preparationRequestRef.current
+    const targetAccount = accountRef.current
+    const current = () => !cancelled && preparationRequestRef.current === requestId
+
     const load = async () => {
+      setPreparationStage('checking')
+      setExecution(null)
+      setRiskAcknowledged(false)
+      setConfirmation('')
+      setError(null)
       try {
-        const items = await listBoundStrategyExecutions(account)
-        if (!active) return
+        const items = await listBoundStrategyExecutions(targetAccount)
+        if (!current()) return
         const latest = items.find((item) => ['planned', 'executing', 'stopping', 'uncertain'].includes(item.status)) ?? null
         if (latest) {
           setExecution(latest)
           return
         }
-        if (!enabled || autoPreviewedAccountId.current === account.id) return
+        if (!enabled) return
 
-        // Opening the launch dialog is an explicit start intent. Fetch the
-        // read-only preflight automatically so the only user step left is the
-        // exact confirmation that actually authorizes a live submission.
-        autoPreviewedAccountId.current = account.id
-        setBusy(true)
-        const preview = await previewBoundStrategyExecution(account)
-        if (!active) return
+        // Opening this dialog is an explicit start intent. The preview remains
+        // read-only; the exact phrase below is still required to submit orders.
+        setPreparationStage('preflight')
+        const preview = await previewBoundStrategyExecution(targetAccount)
+        if (!current()) return
         update(preview)
       } catch (reason) {
-        if (active) setError(launchErrorMessage(reason, '无法读取启动确认'))
+        if (current()) setError(launchErrorMessage(reason, '无法读取启动确认'))
       } finally {
-        if (active) {
-          setBusy(false)
-          setLoading(false)
-        }
+        if (current()) setPreparationStage(null)
       }
     }
     void load()
-    return () => { active = false }
-  }, [account, enabled, onChanged])
+    return () => { cancelled = true }
+  }, [dialogKey, enabled, update])
 
   const preview = async () => {
-    setBusy(true)
+    const requestId = ++preparationRequestRef.current
+    const targetAccount = accountRef.current
+    setPreparationStage('preflight')
+    setExecution(null)
+    setRiskAcknowledged(false)
+    setConfirmation('')
     setError(null)
     try {
-      update(await previewBoundStrategyExecution(account))
+      const next = await previewBoundStrategyExecution(targetAccount)
+      if (preparationRequestRef.current === requestId) update(next)
     } catch (reason) {
-      setError(launchErrorMessage(reason, '预览失败'))
+      if (preparationRequestRef.current === requestId) setError(launchErrorMessage(reason, '预览失败'))
     } finally {
-      setBusy(false)
+      if (preparationRequestRef.current === requestId) setPreparationStage(null)
     }
   }
 
@@ -112,14 +145,14 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setError(null)
     try {
       const started = await executeBoundStrategyExecution(
-        account,
+        accountRef.current,
         execution.campaignId,
         confirmation,
         riskAcknowledged,
       )
       update(started)
-      onToast(`${account.name} 的已绑定策略已提交执行；不会自动重试任何订单命令`)
-      if (started.status === 'executing') onStarted(started)
+      onToastRef.current(`${accountRef.current.name} 的已绑定策略已提交执行；不会自动重试任何订单命令`)
+      if (started.status === 'executing') onStartedRef.current(started)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '启动失败')
     } finally {
@@ -132,8 +165,8 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setBusy(true)
     setError(null)
     try {
-      update(await stopBoundStrategyExecution(account, execution, confirmation))
-      onToast(`${account.name} 正在安全停止；撤单、仓位和成交将继续核验`)
+      update(await stopBoundStrategyExecution(accountRef.current, execution, confirmation))
+      onToastRef.current(`${accountRef.current.name} 正在安全停止；撤单、仓位和成交将继续核验`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '安全停止请求失败')
     } finally {
@@ -146,8 +179,8 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setBusy(true)
     setError(null)
     try {
-      update(await reconcileBoundStrategyExecution(account, execution, confirmation))
-      onToast('已完成一次人工对账请求')
+      update(await reconcileBoundStrategyExecution(accountRef.current, execution, confirmation))
+      onToastRef.current('已完成一次人工对账请求')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '对账失败')
     } finally {
@@ -199,9 +232,24 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
           {!enabled && <div className="execution-warning"><AlertTriangle size={16} /><p>执行器不可用或实盘门禁未启用。不会把普通策略启动当作实盘交易。</p></div>}
           {error && <div className="execution-warning"><AlertTriangle size={16} /><p>{error}</p></div>}
 
-          {loading || busy && !execution ? <div className="execution-state"><LoaderCircle className="spin" size={16} />{busy ? '正在生成启动确认' : '正在读取该账号的执行状态'}</div> : !execution ? (
+          {preparationStage ? <section className="bound-preparation" aria-live="polite" aria-busy="true">
+            <div className="bound-preparation-header">
+              <LoaderCircle className="spin" size={17} />
+              <div>
+                <strong>{preparationCopy[preparationStage].title}</strong>
+                <p>{preparationCopy[preparationStage].detail}</p>
+              </div>
+            </div>
+            <div className="bound-preparation-steps">
+              <div className={`bound-preparation-step ${preparationStage === 'checking' ? 'active' : 'done'}`}><span>1</span><div><strong>检查当前任务状态</strong><small>确认没有未结束的授权任务</small></div></div>
+              <div className={`bound-preparation-step ${preparationStage === 'preflight' ? 'active' : ''}`}><span>2</span><div><strong>读取 Final Beta 与账户边界</strong><small>余额、持仓、挂单均为只读检查</small></div></div>
+              <div className="bound-preparation-step"><span>3</span><div><strong>生成精确确认短语</strong><small>完成后一次性展示最终确认</small></div></div>
+            </div>
+            <div className="bound-preparation-progress" aria-hidden="true"><span /></div>
+            <p className="bound-preparation-note">这是只读预检，通常需要数秒；完成前不会提交订单。</p>
+          </section> : !execution ? (
             <div className="bound-strategy-empty-actions">
-              <p>启动确认尚未生成。重新读取时不会提交订单。</p>
+              <p>{error ? '启动确认未能生成。重新读取只会执行只读预检，不会提交订单。' : '当前没有可用的启动确认。重新读取时不会提交订单。'}</p>
               <button className="button primary" type="button" disabled={busy || !enabled} onClick={() => void preview()}><Play size={15} />重新获取确认</button>
             </div>
           ) : (

@@ -960,7 +960,7 @@ class CampaignWorkerManager:
                 max_auto_leverage=campaign.max_auto_leverage,
                 margin_buffer=campaign.margin_buffer,
             )
-            available = _available_quote(gateway)
+            available = _available_quote_from_readiness(readiness)
             blockers: list[str] = []
             if not readiness.get("available_sufficient", False):
                 blockers.append("available_balance_insufficient")
@@ -1036,7 +1036,7 @@ class CampaignWorkerManager:
                 max_auto_leverage=campaign.max_auto_leverage,
                 margin_buffer=campaign.margin_buffer,
             )
-            available = _available_quote(gateway)
+            available = _available_quote_from_readiness(readiness)
             blockers: list[str] = []
             if not readiness.get("available_sufficient", False):
                 blockers.append("available_balance_insufficient")
@@ -1576,6 +1576,17 @@ def _available_quote(gateway: WeexGateway) -> Decimal:
                 raise ValidationFailed("WEEX available balance is invalid")
             return value
     raise ValidationFailed("WEEX account balance has no USDT row")
+
+
+def _available_quote_from_readiness(readiness: Mapping[str, Any]) -> Decimal:
+    """Reuse the validated balance from the just-completed account boundary check."""
+    try:
+        value = Decimal(str(readiness["available_quote"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ValidationFailed("WEEX available balance is invalid") from exc
+    if not value.is_finite() or value < 0:
+        raise ValidationFailed("WEEX available balance is invalid")
+    return value
 
 
 def _normalize_proxy_url(value: str | None) -> str | None:

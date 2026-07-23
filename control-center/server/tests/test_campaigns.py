@@ -38,6 +38,7 @@ class FakeGateway:
         self.positions_non_empty = positions
         self.children: list[FakeGateway] = []
         self.closed = False
+        self.balance_reads = 0
 
     def order_book(self, symbol: str, _limit: int = 5) -> dict[str, object]:
         return {"bids": [["100", "10"]], "asks": [["101", "10"]] if symbol == "BTC" else [["101", "10"]]}
@@ -49,6 +50,7 @@ class FakeGateway:
         return amount.quantize(Decimal("0.001"))
 
     def account_balance_rows(self, _mode: str) -> list[dict[str, str]]:
+        self.balance_reads += 1
         return [{"asset": "USDT", "availableBalance": self.available}]
 
     def positions(self, _mode: str, _symbol: str) -> list[dict[str, str]]:
@@ -974,6 +976,7 @@ def test_bound_strategy_preview_uses_persisted_range_and_read_only_snapshot(tmp_
     assert Decimal("220") <= selected <= Decimal("480")
     assert selected == _selected_round_turnover(record.campaign, Decimal("1250"), 2)
     assert "STRATEGY" in preview.confirmation
+    assert gateway.balance_reads == 1
     manager.close()
 
 
