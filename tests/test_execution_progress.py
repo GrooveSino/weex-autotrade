@@ -134,3 +134,40 @@ def test_projector_exposes_and_clears_hold_and_round_gap_countdowns() -> None:
     assert gap.remaining_ms == 77_600
     projector.apply({"event": "round_gap_completed", "round": 1, "seconds": "77.6"}, at_ms=122_600)
     assert projector.active_waits == {}
+
+
+def test_projector_snapshot_restores_dedupe_counts_and_absolute_wait_deadline() -> None:
+    projector = ExecutionProgressProjector()
+    projector.apply({"event": "campaign_run_started", "run": 1}, at_ms=1_000)
+    projector.apply(
+        {
+            "event": "leg_completed",
+            "run": 1,
+            "round": 1,
+            "sequence": 1,
+            "symbol": "BTCUSDT",
+            "action": "open",
+            "quote_volume": "33.10",
+        },
+        at_ms=2_000,
+    )
+    projector.apply({"event": "round_gap_started", "round": 1, "seconds": "10"}, at_ms=3_000)
+
+    restored = ExecutionProgressProjector.from_snapshot(projector.snapshot())
+    restored.apply(
+        {
+            "event": "leg_completed",
+            "run": 1,
+            "round": 1,
+            "sequence": 1,
+            "symbol": "BTCUSDT",
+            "action": "open",
+            "quote_volume": "33.10",
+        },
+        at_ms=4_000,
+    )
+
+    assert restored.snapshot()["btc_quote_volume"] == "33.10"
+    wait = restored.active_waits["round-gap"]
+    assert wait.started_at_ms == 3_000
+    assert wait.deadline_at_ms == 13_000

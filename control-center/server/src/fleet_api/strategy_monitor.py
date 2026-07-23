@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import time
 from decimal import Decimal
+from threading import RLock
 from typing import Any
 
-from weex_cli.execution_progress import ExecutionProgressProjector, event_name
-
-from .campaigns import CampaignJournal, CampaignRecord
-from .models import (
-    ActiveExecutionWait,
-    ExecutionTimelineEntry,
-    LogLevel,
-    StrategyMonitorSnapshot,
+from weex_cli.execution_progress import (
+    EXECUTION_PROGRESS_PROJECTION_VERSION,
+    ExecutionProgressProjector,
+    event_name,
 )
+
+from .campaigns import CampaignJournal, CampaignRecord, ExecutionMonitorProjection
+from .models import ActiveExecutionWait, ExecutionTimelineEntry, LogLevel, StrategyMonitorSnapshot
+from .ownership import LEGACY_OWNER_USER_ID
 from .volume_history import TradeVolumeLedger
 
 
@@ -20,6 +22,9 @@ class StrategyMonitorService:
         self.journal = journal
         self.ledger = ledger
         self.executor_generation = executor_generation
+        self._subscriber_count = 0
+        self._reset_count = 0
+        self._metrics_lock = RLock()
 
     def snapshot(
         self,
@@ -29,7 +34,9 @@ class StrategyMonitorService:
         before_sequence: int | None = None,
         limit: int = 200,
         event_rows: list[dict[str, Any]] | None = None,
+        owner_user_id: str | None = None,
     ) -> StrategyMonitorSnapshot:
+        server_time_ms = time.time_ns() // 1_000_000
         record = self.journal.monitor_record(instance_id, session_id)
         if record is None:
             return StrategyMonitorSnapshot(
@@ -37,47 +44,58 @@ class StrategyMonitorService:
                 executor_generation=self.executor_generation,
                 status="idle",
                 phase="暂无策略运行记录",
+                server_time_ms=server_time_ms,
+                updated_at_ms=server_time_ms,
             )
+
+        projection = self._ensure_projection(record)
+        projection, stored_rows, latest_sequence = self.journal.monitor_read(
+            record.campaign_id,
+            before_sequence,
+            max(limit * 5, limit),
+        )
+        if projection is not None and owner_user_id is not None and projection.owner_user_id != owner_user_id:
+            raise KeyError(record.campaign_id)
+        state = projection.state if projection is not None else ExecutionProgressProjector().snapshot()
+        projected_sequence = projection.projected_sequence if projection is not None else 0
+        projection_version = projection.projection_version if projection is not None else 0
+        projection_lag = max(0, latest_sequence - projected_sequence)
+
         selected_session_id = _text_or_none(record.metadata.get("session_id"))
         session = self.ledger.session_projection(selected_session_id) if selected_session_id else None
         started_at_ms = int(session.get("started_at_ms") or 0) if session else 0
-        fills = [
-            fill
-            for fill in self.ledger.fills_for_account(instance_id, "live", started_at_ms)
-            if fill.authoritative and fill.executed_at_ms >= started_at_ms
-        ]
+        fills = (
+            [
+                fill
+                for fill in self.ledger.fills_for_account(instance_id, "live", started_at_ms)
+                if fill.authoritative and fill.executed_at_ms >= started_at_ms
+            ]
+            if session
+            else []
+        )
         btc_quote = sum((fill.quote_volume for fill in fills if fill.symbol.upper().startswith("BTC")), Decimal(0))
         eth_quote = sum((fill.quote_volume for fill in fills if fill.symbol.upper().startswith("ETH")), Decimal(0))
-        monitor_state = record.metadata.get("monitor_state")
-        state = (
-            monitor_state
-            if isinstance(monitor_state, dict) and monitor_state.get("schema_version") == 2
-            else _reconstruct_state(self.journal, record)
-        )
         target_quote = _decimal(session, "target_quote_volume", record.campaign.target_turnover_quote)
         ledger_verified = _decimal(session, "verified_quote_volume")
-        execution_verified = _decimal(state, "execution_verified_quote_volume")
-        ledger_is_current = bool(session) and bool(session.get("source_complete")) and not bool(
-            session.get("stale") or session.get("reconciliation_required")
-        )
-        verified_quote = ledger_verified if ledger_is_current else max(ledger_verified, execution_verified)
-        remaining_quote = max(target_quote - verified_quote, Decimal(0))
-        projected_btc_quote = _decimal(state, "btc_quote_volume")
-        projected_eth_quote = _decimal(state, "eth_quote_volume")
-        if ledger_is_current:
-            volume_source = "ledger"
-        elif execution_verified > 0:
-            volume_source = "execution_journal"
-        else:
-            volume_source = "pending"
-        rows = event_rows
-        if rows is None:
-            rows = self.journal.events_before(record.campaign_id, before_sequence, max(limit * 5, limit))
+        remaining_quote = max(target_quote - ledger_verified, Decimal(0))
+        rows = event_rows if event_rows is not None else stored_rows
         timeline = _timeline(record.campaign_id, rows)[-limit:]
-        latest = self.journal.events_before(record.campaign_id, None, 1)
-        last_sequence = int(latest[-1].get("sequence") or 0) if latest else 0
         first_sequence = int(rows[0].get("sequence") or 0) if rows else 0
-        cursor = self.cursor(record.campaign_id, last_sequence) if last_sequence else None
+        cursor = self.cursor(record.campaign_id, projected_sequence) if projected_sequence else None
+        session_stale = bool(session.get("stale", True)) if session else True
+        reconciliation_required = bool(session.get("reconciliation_required", False)) if session else False
+        freshness = (
+            "rebuilding"
+            if projection_lag
+            else "stale"
+            if session_stale or reconciliation_required
+            else "current"
+        )
+        volume_source = (
+            "ledger"
+            if session and (fills or ledger_verified > 0 or session.get("source_complete"))
+            else "pending"
+        )
 
         return StrategyMonitorSnapshot(
             instance_id=instance_id,
@@ -93,15 +111,15 @@ class StrategyMonitorService:
             current_run=int(state.get("current_run") or record.metadata.get("current_run") or 0),
             current_round=int(state.get("current_round") or 0),
             target_quote_volume=target_quote,
-            verified_quote_volume=verified_quote,
+            verified_quote_volume=ledger_verified,
             ledger_verified_quote_volume=ledger_verified,
             remaining_quote_volume=remaining_quote,
             volume_source=volume_source,
             source_complete=bool(session.get("source_complete", False)) if session else False,
-            stale=bool(session.get("stale", True)) if session else True,
-            reconciliation_required=bool(session.get("reconciliation_required", False)) if session else False,
-            btc_quote_volume=btc_quote if ledger_is_current else max(btc_quote, projected_btc_quote),
-            eth_quote_volume=eth_quote if ledger_is_current else max(eth_quote, projected_eth_quote),
+            stale=session_stale,
+            reconciliation_required=reconciliation_required,
+            btc_quote_volume=btc_quote,
+            eth_quote_volume=eth_quote,
             maker_fill_count=sum(1 for fill in fills if fill.maker is True),
             taker_fill_count=sum(1 for fill in fills if fill.maker is False),
             unknown_fill_count=sum(1 for fill in fills if fill.maker is None),
@@ -110,6 +128,13 @@ class StrategyMonitorService:
             requotes=int(state.get("requotes") or 0),
             active_waits=[ActiveExecutionWait.model_validate(wait) for wait in state.get("active_waits", [])],
             timeline=timeline,
+            projection_sequence=projected_sequence,
+            projection_version=projection_version,
+            ledger_revision=len(fills),
+            server_time_ms=server_time_ms,
+            updated_at_ms=projection.updated_at_ms if projection is not None else server_time_ms,
+            freshness=freshness,
+            stream_state="catching_up" if projection_lag else "ready",
             cursor=cursor,
             has_more=first_sequence > 1,
         )
@@ -126,12 +151,72 @@ class StrategyMonitorService:
         except (TypeError, ValueError):
             return None
 
+    def subscriber_opened(self) -> None:
+        with self._metrics_lock:
+            self._subscriber_count += 1
 
-def _reconstruct_state(journal: CampaignJournal, record: CampaignRecord) -> dict[str, Any]:
-    projector = ExecutionProgressProjector()
-    for event in journal.events_before(record.campaign_id, None, 2_000):
-        projector.apply(event, at_ms=int(event.get("at_ms") or 0))
-    return projector.snapshot()
+    def subscriber_closed(self) -> None:
+        with self._metrics_lock:
+            self._subscriber_count = max(0, self._subscriber_count - 1)
+
+    def reset_recorded(self) -> None:
+        with self._metrics_lock:
+            self._reset_count += 1
+
+    def metrics(self) -> dict[str, int]:
+        with self._metrics_lock:
+            return {"subscriber_count": self._subscriber_count, "reset_count": self._reset_count}
+
+    def rebuild_all(self) -> int:
+        rebuilt = 0
+        for record in self.journal.list_all():
+            before = self.journal.monitor_projection(record.campaign_id)
+            projection = self._ensure_projection(record)
+            if projection is not None and (
+                before is None
+                or before.projected_sequence != projection.projected_sequence
+                or before.projection_version != projection.projection_version
+            ):
+                rebuilt += 1
+        return rebuilt
+
+    def _ensure_projection(self, record: CampaignRecord) -> ExecutionMonitorProjection | None:
+        projection, _rows, latest_sequence = self.journal.monitor_read(record.campaign_id, None, 1)
+        if (
+            projection is not None
+            and projection.projection_version == EXECUTION_PROGRESS_PROJECTION_VERSION
+            and projection.projected_sequence == latest_sequence
+        ):
+            return projection
+        projector = ExecutionProgressProjector()
+        sequence = 0
+        last_event_at_ms = time.time_ns() // 1_000_000
+        while True:
+            batch = self.journal.events_after(record.campaign_id, sequence, 1_000)
+            if not batch:
+                break
+            first = int(batch[0].get("sequence") or 0)
+            if first != sequence + 1:
+                return projection
+            for event in batch:
+                projector.apply(event, at_ms=int(event.get("at_ms") or 0))
+            sequence = int(batch[-1].get("sequence") or sequence)
+            last_event_at_ms = int(batch[-1].get("at_ms") or last_event_at_ms)
+        if sequence == 0:
+            return projection
+        rebuilt = ExecutionMonitorProjection(
+            owner_user_id=str(record.metadata.get("owner_user_id") or LEGACY_OWNER_USER_ID),
+            account_id=record.instance_id,
+            execution_id=record.campaign_id,
+            session_id=_text_or_none(record.metadata.get("session_id")),
+            executor_generation=self.executor_generation,
+            projected_sequence=sequence,
+            projection_version=EXECUTION_PROGRESS_PROJECTION_VERSION,
+            state=projector.snapshot(),
+            updated_at_ms=last_event_at_ms,
+        )
+        self.journal.replace_monitor_projection(rebuilt)
+        return self.journal.monitor_projection(record.campaign_id)
 
 
 def _timeline(campaign_id: str, rows: list[dict[str, Any]]) -> list[ExecutionTimelineEntry]:

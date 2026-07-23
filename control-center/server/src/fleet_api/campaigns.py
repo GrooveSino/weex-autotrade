@@ -28,7 +28,10 @@ from weex_cli.beta_campaign import (
 )
 from weex_cli.beta_volume import BetaVolumePlanStore
 from weex_cli.config import Credentials, Settings
-from weex_cli.execution_progress import ExecutionProgressProjector
+from weex_cli.execution_progress import (
+    EXECUTION_PROGRESS_PROJECTION_VERSION,
+    ExecutionProgressProjector,
+)
 from weex_cli.gateway import WeexGateway
 from weex_cli.live_profile import LiveProfile
 from weex_cli.live_websocket import WeexCampaignWebSocketRuntime
@@ -42,6 +45,7 @@ from .models import (
     BetaCampaignView,
     VolumeStrategy,
 )
+from .ownership import LEGACY_OWNER_USER_ID
 from .service import BetaSourceUnavailable, UnsafeOperation, ValidationFailed
 from .vault import CredentialMaterial, CredentialVault
 
@@ -71,6 +75,29 @@ class CampaignJournal(Protocol):
 
     def add_event(self, campaign_id: str, event: dict[str, Any]) -> int: ...
 
+    def append_and_project(
+        self,
+        campaign_id: str,
+        event: dict[str, Any],
+        *,
+        owner_user_id: str,
+        account_id: str,
+        session_id: str | None,
+        executor_generation: str,
+        projection_version: int,
+        state: dict[str, Any] | None = None,
+    ) -> int: ...
+
+    def monitor_projection(self, campaign_id: str) -> ExecutionMonitorProjection | None: ...
+
+    def replace_monitor_projection(self, projection: ExecutionMonitorProjection) -> None: ...
+
+    def monitor_read(
+        self, campaign_id: str, before_sequence: int | None, limit: int
+    ) -> tuple[ExecutionMonitorProjection | None, list[dict[str, Any]], int]: ...
+
+    def monitor_metrics(self) -> dict[str, int | None]: ...
+
     def recover_incomplete(self) -> int: ...
 
     def remove(self, instance_id: str) -> None: ...
@@ -87,6 +114,19 @@ class CampaignRecord:
     metadata: dict[str, Any]
     result: dict[str, Any] | None
     events: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ExecutionMonitorProjection:
+    owner_user_id: str
+    account_id: str
+    execution_id: str
+    session_id: str | None
+    executor_generation: str
+    projected_sequence: int
+    projection_version: int
+    state: dict[str, Any]
+    updated_at_ms: int
 
 
 class _AccountLease:
@@ -136,6 +176,8 @@ ACTIVE_STATUSES = {
 class InMemoryCampaignJournal:
     def __init__(self) -> None:
         self._records: dict[str, CampaignRecord] = {}
+        self._monitor_projections: dict[str, ExecutionMonitorProjection] = {}
+        self._monitor_transaction_failures = 0
         self._lock = RLock()
 
     def create(self, instance_id: str, campaign: BetaVolumeCampaign, metadata: dict[str, Any]) -> None:
@@ -220,6 +262,120 @@ class InMemoryCampaignJournal:
             )
             return sequence
 
+    def append_and_project(
+        self,
+        campaign_id: str,
+        event: dict[str, Any],
+        *,
+        owner_user_id: str,
+        account_id: str,
+        session_id: str | None,
+        executor_generation: str,
+        projection_version: int,
+        state: dict[str, Any] | None = None,
+    ) -> int:
+        with self._lock:
+            try:
+                current = self._records[campaign_id.lower()]
+                sequence = len(current.events) + 1
+                stored_event = json.loads(json.dumps({**event, "sequence": sequence}, separators=(",", ":")))
+                projected_state = state
+                if projected_state is None:
+                    existing_projection = self._monitor_projections.get(current.campaign_id)
+                    projector = ExecutionProgressProjector.from_snapshot(
+                        existing_projection.state if existing_projection is not None else None
+                    )
+                    projector.apply(stored_event, at_ms=int(stored_event.get("at_ms") or 0))
+                    projected_state = projector.snapshot()
+                stored_state = json.loads(json.dumps(projected_state, separators=(",", ":")))
+                now_ms = int(event.get("at_ms") or time.time() * 1000)
+                projection = ExecutionMonitorProjection(
+                    owner_user_id=owner_user_id,
+                    account_id=account_id,
+                    execution_id=current.campaign_id,
+                    session_id=session_id,
+                    executor_generation=executor_generation,
+                    projected_sequence=sequence,
+                    projection_version=projection_version,
+                    state=stored_state,
+                    updated_at_ms=now_ms,
+                )
+                existing = self._monitor_projections.get(current.campaign_id)
+                if existing is not None and existing.owner_user_id != owner_user_id:
+                    raise UnsafeOperation("execution monitor owner mismatch")
+                metadata = {
+                    **current.metadata,
+                    "monitor_state": stored_state,
+                    "phase": stored_state.get("phase", current.metadata.get("phase")),
+                    "current_run": stored_state.get("current_run", current.metadata.get("current_run")),
+                }
+                self._records[current.campaign_id] = CampaignRecord(
+                    current.campaign_id,
+                    current.instance_id,
+                    current.campaign,
+                    current.status,
+                    metadata,
+                    current.result,
+                    (*current.events, stored_event),
+                )
+                self._monitor_projections[current.campaign_id] = projection
+                return sequence
+            except Exception:
+                self._monitor_transaction_failures += 1
+                raise
+
+    def monitor_projection(self, campaign_id: str) -> ExecutionMonitorProjection | None:
+        with self._lock:
+            return self._monitor_projections.get(campaign_id.lower())
+
+    def replace_monitor_projection(self, projection: ExecutionMonitorProjection) -> None:
+        with self._lock:
+            current = self._monitor_projections.get(projection.execution_id.lower())
+            if current is not None and current.owner_user_id != projection.owner_user_id:
+                raise UnsafeOperation("execution monitor owner mismatch")
+            if current is not None and current.projected_sequence > projection.projected_sequence:
+                return
+            self._monitor_projections[projection.execution_id.lower()] = projection
+
+    def monitor_read(
+        self, campaign_id: str, before_sequence: int | None, limit: int
+    ) -> tuple[ExecutionMonitorProjection | None, list[dict[str, Any]], int]:
+        with self._lock:
+            record = self._records.get(campaign_id.lower())
+            if record is None:
+                return None, [], 0
+            rows = [
+                dict(event)
+                for event in record.events
+                if before_sequence is None or int(event.get("sequence") or 0) < before_sequence
+            ][-limit:]
+            return self._monitor_projections.get(campaign_id.lower()), rows, len(record.events)
+
+    def monitor_metrics(self) -> dict[str, int | None]:
+        with self._lock:
+            lag = max(
+                (
+                    len(record.events)
+                    - (
+                        self._monitor_projections[record.campaign_id].projected_sequence
+                        if record.campaign_id in self._monitor_projections
+                        else 0
+                    )
+                    for record in self._records.values()
+                    if record.events
+                ),
+                default=0,
+            )
+            latest = max(
+                (int(event.get("at_ms") or 0) for record in self._records.values() for event in record.events),
+                default=None,
+            )
+            return {
+                "projection_lag": lag,
+                "transaction_failures": self._monitor_transaction_failures,
+                "last_event_at_ms": latest,
+            }
+
     def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool:
         with self._lock:
             current = self._records[campaign_id.lower()]
@@ -250,6 +406,7 @@ class InMemoryCampaignJournal:
                 record.campaign_id for record in self._records.values() if record.instance_id == instance_id
             ]:
                 self._records.pop(campaign_id, None)
+                self._monitor_projections.pop(campaign_id, None)
 
     def close(self) -> None:
         return None
@@ -283,9 +440,24 @@ class SQLiteCampaignJournal:
                 PRIMARY KEY(campaign_id, sequence),
                 FOREIGN KEY(campaign_id) REFERENCES beta_campaigns(campaign_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS execution_monitor_projections (
+                owner_user_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                execution_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                executor_generation TEXT NOT NULL,
+                projected_sequence INTEGER NOT NULL,
+                projection_version INTEGER NOT NULL,
+                state_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY(execution_id) REFERENCES beta_campaigns(campaign_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_monitor_owner_account
+                ON execution_monitor_projections(owner_user_id, account_id, updated_at_ms DESC);
             """
         )
         self._connection.commit()
+        self._monitor_transaction_failures = 0
         self._lock = RLock()
 
     def create(self, instance_id: str, campaign: BetaVolumeCampaign, metadata: dict[str, Any]) -> None:
@@ -419,23 +591,227 @@ class SQLiteCampaignJournal:
             )
 
     def add_event(self, campaign_id: str, event: dict[str, Any]) -> int:
-        with self._lock, self._connection:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
+                    (campaign_id.lower(),),
+                ).fetchone()
+                sequence = int(row[0]) + 1
+                stored_event = {**event, "sequence": sequence}
+                self._connection.execute(
+                    "INSERT INTO beta_campaign_events(campaign_id, sequence, payload, created_at_ms) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        campaign_id.lower(),
+                        sequence,
+                        json.dumps(stored_event, separators=(",", ":")),
+                        int(time.time() * 1000),
+                    ),
+                )
+            except Exception:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+                return sequence
+
+    def append_and_project(
+        self,
+        campaign_id: str,
+        event: dict[str, Any],
+        *,
+        owner_user_id: str,
+        account_id: str,
+        session_id: str | None,
+        executor_generation: str,
+        projection_version: int,
+        state: dict[str, Any] | None = None,
+    ) -> int:
+        normalized_campaign_id = campaign_id.lower()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign_row = self._connection.execute(
+                    "SELECT instance_id, metadata_json FROM beta_campaigns WHERE campaign_id = ?",
+                    (normalized_campaign_id,),
+                ).fetchone()
+                if campaign_row is None:
+                    raise KeyError(campaign_id)
+                if str(campaign_row[0]) != account_id:
+                    raise UnsafeOperation("execution monitor account mismatch")
+                existing = self._connection.execute(
+                    "SELECT owner_user_id, state_json FROM execution_monitor_projections WHERE execution_id = ?",
+                    (normalized_campaign_id,),
+                ).fetchone()
+                if existing is not None and str(existing[0]) != owner_user_id:
+                    raise UnsafeOperation("execution monitor owner mismatch")
+                sequence_row = self._connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
+                    (normalized_campaign_id,),
+                ).fetchone()
+                sequence = int(sequence_row[0]) + 1
+                stored_event = {**event, "sequence": sequence}
+                event_json = json.dumps(stored_event, separators=(",", ":"))
+                projected_state = state
+                if projected_state is None:
+                    projector = ExecutionProgressProjector.from_snapshot(
+                        json.loads(str(existing[1])) if existing is not None else None
+                    )
+                    projector.apply(stored_event, at_ms=int(stored_event.get("at_ms") or 0))
+                    projected_state = projector.snapshot()
+                state_json = json.dumps(projected_state, separators=(",", ":"))
+                now_ms = int(event.get("at_ms") or time.time() * 1000)
+                self._connection.execute(
+                    "INSERT INTO beta_campaign_events(campaign_id, sequence, payload, created_at_ms) "
+                    "VALUES (?, ?, ?, ?)",
+                    (normalized_campaign_id, sequence, event_json, now_ms),
+                )
+                self._connection.execute(
+                    """INSERT INTO execution_monitor_projections(
+                        owner_user_id, account_id, execution_id, session_id, executor_generation,
+                        projected_sequence, projection_version, state_json, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(execution_id) DO UPDATE SET
+                        owner_user_id=excluded.owner_user_id,
+                        account_id=excluded.account_id,
+                        session_id=excluded.session_id,
+                        executor_generation=excluded.executor_generation,
+                        projected_sequence=excluded.projected_sequence,
+                        projection_version=excluded.projection_version,
+                        state_json=excluded.state_json,
+                        updated_at_ms=excluded.updated_at_ms""",
+                    (
+                        owner_user_id,
+                        account_id,
+                        normalized_campaign_id,
+                        session_id,
+                        executor_generation,
+                        sequence,
+                        projection_version,
+                        state_json,
+                        now_ms,
+                    ),
+                )
+                metadata = {
+                    **json.loads(str(campaign_row[1])),
+                    "monitor_state": projected_state,
+                    "phase": projected_state.get("phase"),
+                    "current_run": projected_state.get("current_run"),
+                }
+                self._connection.execute(
+                    "UPDATE beta_campaigns SET metadata_json = ?, updated_at_ms = ? WHERE campaign_id = ?",
+                    (json.dumps(metadata, separators=(",", ":")), now_ms, normalized_campaign_id),
+                )
+            except Exception:
+                self._connection.rollback()
+                self._monitor_transaction_failures += 1
+                raise
+            else:
+                self._connection.commit()
+                return sequence
+
+    def monitor_projection(self, campaign_id: str) -> ExecutionMonitorProjection | None:
+        with self._lock:
             row = self._connection.execute(
-                "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
+                "SELECT owner_user_id, account_id, execution_id, session_id, executor_generation, "
+                "projected_sequence, projection_version, state_json, updated_at_ms "
+                "FROM execution_monitor_projections WHERE execution_id = ?",
                 (campaign_id.lower(),),
             ).fetchone()
-            sequence = int(row[0]) + 1
-            stored_event = {**event, "sequence": sequence}
+        return self._projection(row) if row else None
+
+    def replace_monitor_projection(self, projection: ExecutionMonitorProjection) -> None:
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT owner_user_id FROM execution_monitor_projections WHERE execution_id = ?",
+                (projection.execution_id.lower(),),
+            ).fetchone()
+            if existing is not None and str(existing[0]) != projection.owner_user_id:
+                raise UnsafeOperation("execution monitor owner mismatch")
+            sequence_row = self._connection.execute(
+                "SELECT projected_sequence FROM execution_monitor_projections WHERE execution_id = ?",
+                (projection.execution_id.lower(),),
+            ).fetchone()
+            if sequence_row is not None and int(sequence_row[0]) > projection.projected_sequence:
+                return
             self._connection.execute(
-                "INSERT INTO beta_campaign_events(campaign_id, sequence, payload, created_at_ms) VALUES (?, ?, ?, ?)",
+                """INSERT INTO execution_monitor_projections(
+                    owner_user_id, account_id, execution_id, session_id, executor_generation,
+                    projected_sequence, projection_version, state_json, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(execution_id) DO UPDATE SET
+                    owner_user_id=excluded.owner_user_id,
+                    account_id=excluded.account_id,
+                    session_id=excluded.session_id,
+                    executor_generation=excluded.executor_generation,
+                    projected_sequence=excluded.projected_sequence,
+                    projection_version=excluded.projection_version,
+                    state_json=excluded.state_json,
+                    updated_at_ms=excluded.updated_at_ms""",
                 (
-                    campaign_id.lower(),
-                    sequence,
-                    json.dumps(stored_event, separators=(",", ":")),
-                    int(time.time() * 1000),
+                    projection.owner_user_id,
+                    projection.account_id,
+                    projection.execution_id.lower(),
+                    projection.session_id,
+                    projection.executor_generation,
+                    projection.projected_sequence,
+                    projection.projection_version,
+                    json.dumps(projection.state, separators=(",", ":")),
+                    projection.updated_at_ms,
                 ),
             )
-            return sequence
+
+    def monitor_read(
+        self, campaign_id: str, before_sequence: int | None, limit: int
+    ) -> tuple[ExecutionMonitorProjection | None, list[dict[str, Any]], int]:
+        normalized_campaign_id = campaign_id.lower()
+        with self._lock:
+            self._connection.execute("BEGIN")
+            try:
+                projection_row = self._connection.execute(
+                    "SELECT owner_user_id, account_id, execution_id, session_id, executor_generation, "
+                    "projected_sequence, projection_version, state_json, updated_at_ms "
+                    "FROM execution_monitor_projections WHERE execution_id = ?",
+                    (normalized_campaign_id,),
+                ).fetchone()
+                latest_row = self._connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
+                    (normalized_campaign_id,),
+                ).fetchone()
+                query = "SELECT payload FROM beta_campaign_events WHERE campaign_id = ?"
+                parameters: list[object] = [normalized_campaign_id]
+                if before_sequence is not None:
+                    query += " AND sequence < ?"
+                    parameters.append(before_sequence)
+                query += " ORDER BY sequence DESC LIMIT ?"
+                parameters.append(limit)
+                rows = self._connection.execute(query, parameters).fetchall()
+            finally:
+                self._connection.rollback()
+        projection = self._projection(projection_row) if projection_row else None
+        return projection, [json.loads(str(row[0])) for row in reversed(rows)], int(latest_row[0])
+
+    def monitor_metrics(self) -> dict[str, int | None]:
+        with self._lock:
+            lag_row = self._connection.execute(
+                """SELECT COALESCE(MAX(latest_sequence - COALESCE(projected_sequence, 0)), 0)
+                FROM (
+                    SELECT campaign_id, MAX(sequence) AS latest_sequence
+                    FROM beta_campaign_events GROUP BY campaign_id
+                ) latest
+                LEFT JOIN execution_monitor_projections projection
+                    ON projection.execution_id = latest.campaign_id"""
+            ).fetchone()
+            last_row = self._connection.execute(
+                "SELECT MAX(created_at_ms) FROM beta_campaign_events"
+            ).fetchone()
+        return {
+            "projection_lag": int(lag_row[0] or 0),
+            "transaction_failures": self._monitor_transaction_failures,
+            "last_event_at_ms": None if last_row[0] is None else int(last_row[0]),
+        }
 
     def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool:
         with self._lock, self._connection:
@@ -489,6 +865,20 @@ class SQLiteCampaignJournal:
             events=tuple(json.loads(str(event[0])) for event in events),
         )
 
+    @staticmethod
+    def _projection(row: tuple[object, ...]) -> ExecutionMonitorProjection:
+        return ExecutionMonitorProjection(
+            owner_user_id=str(row[0]),
+            account_id=str(row[1]),
+            execution_id=str(row[2]),
+            session_id=None if row[3] is None else str(row[3]),
+            executor_generation=str(row[4]),
+            projected_sequence=int(row[5]),
+            projection_version=int(row[6]),
+            state=json.loads(str(row[7])),
+            updated_at_ms=int(row[8]),
+        )
+
 
 class CampaignWorkerManager:
     def __init__(
@@ -501,6 +891,7 @@ class CampaignWorkerManager:
         on_change: Callable[[str], None] | None = None,
         on_progress: Callable[[str, Mapping[str, Any]], None] | None = None,
         on_execution_claim: Callable[[CampaignRecord, int], None] | None = None,
+        executor_generation: str = "local",
     ) -> None:
         self.settings = settings
         self.vault = vault
@@ -509,6 +900,7 @@ class CampaignWorkerManager:
         self.on_change = on_change or (lambda _instance_id: None)
         self.on_progress = on_progress or (lambda _instance_id, _event: None)
         self.on_execution_claim = on_execution_claim or (lambda _record, _started_at_ms: None)
+        self.executor_generation = executor_generation
         self._executor = ThreadPoolExecutor(
             max_workers=settings.live_campaign_worker_count, thread_name_prefix="weex-campaign"
         )
@@ -526,7 +918,12 @@ class CampaignWorkerManager:
         return count
 
     def preview(
-        self, instance_id: str, request: BetaCampaignPreviewRequest, material: CredentialMaterial | None
+        self,
+        instance_id: str,
+        request: BetaCampaignPreviewRequest,
+        material: CredentialMaterial | None,
+        *,
+        owner_user_id: str = LEGACY_OWNER_USER_ID,
     ) -> BetaCampaignPreview:
         self._require_live_gate()
         if material is None:
@@ -576,6 +973,7 @@ class CampaignWorkerManager:
             if blockers:
                 raise UnsafeOperation(f"campaign preview blocked: {','.join(blockers)}")
             metadata = _preview_metadata(campaign, available, readiness)
+            metadata["owner_user_id"] = owner_user_id
             self.journal.create(instance_id, campaign, metadata)
             BetaVolumeCampaignStore(self.settings.campaign_data_directory / instance_id).create(campaign)
             return _view(self.journal.get(campaign.campaign_id), include_events=False)  # type: ignore[arg-type]
@@ -594,6 +992,7 @@ class CampaignWorkerManager:
         run_disposition: str = "new_incremental",
         strategy_target_quote: Decimal | None = None,
         baseline_lifetime_quote: Decimal = Decimal(0),
+        owner_user_id: str = LEGACY_OWNER_USER_ID,
     ) -> BetaCampaignPreview:
         """Create an executable Live preview solely from a persisted strategy binding."""
         self._require_live_gate()
@@ -665,6 +1064,7 @@ class CampaignWorkerManager:
                     "run_disposition": run_disposition,
                     "strategy_target_quote": str(strategy_target_quote or target_quote),
                     "baseline_lifetime_quote": str(baseline_lifetime_quote),
+                    "owner_user_id": owner_user_id,
                 }
             )
             self.journal.create(instance_id, campaign, metadata)
@@ -867,7 +1267,7 @@ class CampaignWorkerManager:
             reconciliation_boundary="btc_eth_flat_no_regular_or_trigger_orders",
         )
         event = _sanitize_event({"event": "campaign_reconciliation_acknowledged"})
-        event["sequence"] = self.journal.add_event(campaign_id, event)
+        event["sequence"] = self._append_monitor_event(record, event)
         self._notify(instance_id)
         return _view(self.journal.get(campaign_id))  # type: ignore[arg-type]
 
@@ -895,7 +1295,6 @@ class CampaignWorkerManager:
 
     def _run(self, record: CampaignRecord, material: CredentialMaterial, stop: threading.Event) -> None:
         campaign_id = record.campaign_id
-        progress_projector = ExecutionProgressProjector()
         profile: LiveProfile | None = None
         gateway: WeexGateway | None = None
         snapshot_gateway: WeexGateway | None = None
@@ -904,16 +1303,8 @@ class CampaignWorkerManager:
 
         def event_sink(payload: dict[str, Any]) -> None:
             event = _sanitize_event(payload)
-            progress_projector.apply(payload, at_ms=int(event["at_ms"]))
-            sequence = self.journal.add_event(campaign_id, event)
+            sequence = self._append_monitor_event(record, event)
             event["sequence"] = sequence
-            metadata: dict[str, Any] = {
-                "phase": _phase_for_event(str(event["name"])),
-                "monitor_state": progress_projector.snapshot(),
-            }
-            if event.get("run") is not None:
-                metadata["current_run"] = event["run"]
-            self.journal.update(campaign_id, **metadata)
             self._notify_progress(record.instance_id, event)
             if _publishes_fleet_snapshot(str(event["name"])):
                 self._notify(record.instance_id)
@@ -972,7 +1363,7 @@ class CampaignWorkerManager:
                 reason=f"worker_exception:{type(exc).__name__.lower()}",
             )
             event = _sanitize_event({"event": "campaign_uncertain", "error": type(exc).__name__})
-            event["sequence"] = self.journal.add_event(campaign_id, event)
+            event["sequence"] = self._append_monitor_event(record, event)
             self._notify_progress(record.instance_id, event)
         finally:
             if websocket_runtime is not None:
@@ -1021,6 +1412,21 @@ class CampaignWorkerManager:
             self.on_progress(instance_id, event)
         except Exception:
             return
+
+    def _append_monitor_event(
+        self,
+        record: CampaignRecord,
+        event: dict[str, Any],
+    ) -> int:
+        return self.journal.append_and_project(
+            record.campaign_id,
+            event,
+            owner_user_id=str(record.metadata.get("owner_user_id") or LEGACY_OWNER_USER_ID),
+            account_id=record.instance_id,
+            session_id=str(record.metadata["session_id"]) if record.metadata.get("session_id") else None,
+            executor_generation=self.executor_generation,
+            projection_version=EXECUTION_PROGRESS_PROJECTION_VERSION,
+        )
 
     def _invalidate_stale_preview_for_current_strategy(self, instance_id: str, strategy: VolumeStrategy) -> bool:
         with self._lock:
@@ -1081,15 +1487,15 @@ class CampaignWorkerManager:
             invalidated_at_ms=invalidated_at_ms,
             invalidation_reason=reason,
         )
-        self.journal.add_event(
-            record.campaign_id,
+        self._append_monitor_event(
+            record,
             _sanitize_event(
                 {
                     "event": "bound_strategy_preview_invalidated",
                     "reason": reason,
                     "strategy_id": record.metadata.get("strategy_id"),
                     "strategy_version": record.metadata.get("strategy_version"),
-                }
+                },
             ),
         )
 

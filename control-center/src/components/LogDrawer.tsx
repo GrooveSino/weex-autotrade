@@ -57,13 +57,24 @@ function mergeMonitor(
   incoming: StrategyMonitorSnapshot,
   replace: boolean,
 ): StrategyMonitorSnapshot {
-  if (replace || !current || current.executionId !== incoming.executionId) return incoming
+  if (!current) return incoming
+  const currentKey = `${current.executorGeneration}:${current.executionId ?? 'idle'}`
+  const incomingKey = `${incoming.executorGeneration}:${incoming.executionId ?? 'idle'}`
+  if (currentKey !== incomingKey) return incoming
   const entries = new Map(current.timeline.map((entry) => [entry.id, entry]))
   incoming.timeline.forEach((entry) => entries.set(entry.id, entry))
+  const incomingIsNewer = incoming.projectionSequence > current.projectionSequence
+    || (incoming.projectionSequence === current.projectionSequence && incoming.ledgerRevision > current.ledgerRevision)
+    || (
+      incoming.projectionSequence === current.projectionSequence
+      && incoming.ledgerRevision === current.ledgerRevision
+      && incoming.serverTimeMs >= current.serverTimeMs
+    )
+  const summary = incomingIsNewer ? incoming : current
   return {
-    ...incoming,
+    ...summary,
     timeline: [...entries.values()].sort((left, right) => left.sequence - right.sequence).slice(-500),
-    hasMore: current.hasMore || incoming.hasMore,
+    hasMore: replace ? incoming.hasMore : current.hasMore || incoming.hasMore,
   }
 }
 
@@ -71,6 +82,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
   const accountId = account?.id ?? ''
   const [tab, setTab] = useState<'monitor' | 'system'>('monitor')
   const [clockMs, setClockMs] = useState(() => Date.now())
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0)
   const [monitor, setMonitor] = useState<StrategyMonitorSnapshot | null>(null)
   const [monitorLoading, setMonitorLoading] = useState(false)
   const [monitorError, setMonitorError] = useState<string | null>(null)
@@ -85,45 +97,89 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
   const bodyRef = useRef<HTMLDivElement>(null)
   const followTailRef = useRef(true)
   const accountRef = useRef(account)
+  const monitorRef = useRef<StrategyMonitorSnapshot | null>(null)
 
   useEffect(() => {
     accountRef.current = account
   }, [account])
 
   useEffect(() => {
+    monitorRef.current = monitor
+  }, [monitor])
+
+  useEffect(() => {
     const selectedAccount = accountRef.current
     if (!selectedAccount) return
     let active = true
     let unsubscribe: () => void = () => undefined
+    let retryTimer: number | undefined
     setMonitorLoading(true)
     setMonitorConnection('connecting')
-    void fetchStrategyMonitor(selectedAccount, null, sessionId)
-      .then((initial) => {
+    const bootstrap = async () => {
+      try {
+        const initial = await fetchStrategyMonitor(selectedAccount, null, sessionId)
         if (!active) return
-        setMonitor(initial)
+        setServerClockOffsetMs(initial.serverTimeMs - Date.now())
+        setMonitor((current) => mergeMonitor(current, initial, true))
         setMonitorError(null)
         setMonitorLoading(false)
+        unsubscribe()
         unsubscribe = subscribeToStrategyMonitor(
           selectedAccount,
           initial.cursor,
           sessionId,
           (event) => {
             if (!active) return
-            setMonitor((current) => mergeMonitor(current, event.snapshot, event.type !== 'delta'))
+            if (event.serverTimeMs) setServerClockOffsetMs(event.serverTimeMs - Date.now())
+            if (event.snapshot) {
+              setServerClockOffsetMs(event.snapshot.serverTimeMs - Date.now())
+              setMonitor((current) => mergeMonitor(current, event.snapshot!, event.type !== 'delta'))
+            }
             setMonitorError(null)
           },
           setMonitorConnection,
         )
-      })
-      .catch((reason: unknown) => {
+      } catch (reason: unknown) {
         if (!active) return
         setMonitorLoading(false)
         setMonitorConnection('retrying')
         setMonitorError(reason instanceof Error ? reason.message : '执行监控加载失败')
-      })
+        retryTimer = window.setTimeout(() => void bootstrap(), 2_000)
+      }
+    }
+    void bootstrap()
     return () => {
       active = false
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
       unsubscribe()
+    }
+  }, [accountId, sessionId])
+
+  useEffect(() => {
+    const selectedAccount = accountRef.current
+    if (!selectedAccount) return
+    let active = true
+    let inFlight = false
+    const reconcileSnapshot = async () => {
+      const current = monitorRef.current
+      if (!current || !['planned', 'executing', 'stopping'].includes(current.status) || inFlight) return
+      inFlight = true
+      try {
+        const latest = await fetchStrategyMonitor(selectedAccount, null, sessionId)
+        if (!active) return
+        setServerClockOffsetMs(latest.serverTimeMs - Date.now())
+        setMonitor((existing) => mergeMonitor(existing, latest, true))
+        setMonitorError(null)
+      } catch (reason: unknown) {
+        if (active) setMonitorError(reason instanceof Error ? reason.message : '监控快照核对失败')
+      } finally {
+        inFlight = false
+      }
+    }
+    const timer = window.setInterval(() => void reconcileSnapshot(), 5_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
     }
   }, [accountId, sessionId])
 
@@ -244,10 +300,16 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
   const primaryWait = monitor?.activeWaits.find((wait) => wait.key === 'hold' || wait.key === 'round-gap')
     ?? monitor?.activeWaits[0]
     ?? null
-  const primaryWaitDelta = primaryWait ? Math.max(0, clockMs - primaryWait.updatedAtMs) : 0
+  const serverNowMs = clockMs + serverClockOffsetMs
+  const primaryWaitDelta = primaryWait ? Math.max(0, serverNowMs - primaryWait.updatedAtMs) : 0
   const primaryWaitRemaining = primaryWait?.remainingMs === null || primaryWait?.remainingMs === undefined
     ? null
-    : Math.max(0, primaryWait.remainingMs - primaryWaitDelta)
+    : Math.max(
+      0,
+      primaryWait.deadlineAtMs !== null && primaryWait.deadlineAtMs !== undefined
+        ? primaryWait.deadlineAtMs - serverNowMs
+        : primaryWait.remainingMs - primaryWaitDelta,
+    )
   const volumeState = monitor?.volumeSource === 'ledger'
     ? '权威成交账本已同步'
     : monitor?.volumeSource === 'execution_journal'
@@ -276,14 +338,14 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
         </div>
 
         <div className={`terminal-statusbar ${connection}`}>
-          <span><CircleDot size={12} />{connection === 'connecting' ? '正在建立连接' : connection === 'retrying' ? '连接中断，自动恢复' : '本地执行器实时连接'}</span>
+          <span><CircleDot size={12} />{connection === 'connecting' ? '正在建立连接' : connection === 'retrying' ? '监控同步恢复中' : '本地执行器实时连接'}</span>
           <span>{tab === 'monitor' ? '事件驱动 / 倒计时 8 fps' : '仅当前实例 / 1s 增量读取'}</span>
         </div>
 
         <section className={`runtime-stage-strip ${primaryWait ? 'waiting' : ''}`} aria-label="当前运行阶段">
           <div className="runtime-stage-main">
             {primaryWait ? <LoaderCircle className="spin" size={15} /> : <CircleDot size={13} />}
-            <span><small>当前阶段</small><strong>{primaryWait?.label ?? monitor?.phase ?? '等待执行状态'}</strong></span>
+            <span><small>{primaryWait?.label ?? '当前阶段'}</small><strong>{monitor?.phase ?? '等待执行状态'}</strong></span>
           </div>
           <div className="runtime-stage-context">
             <span>运行 <strong>{monitor?.currentRun || '-'}</strong></span>
@@ -316,9 +378,18 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
                 <section className="active-waits" aria-label="当前等待">
                   <header><span>当前活动</span><small>{monitor.activeWaits.length ? `${monitor.activeWaits.length} 项并行等待` : '无活动等待'}</small></header>
                   {monitor.activeWaits.map((wait) => {
-                    const delta = Math.max(0, clockMs - wait.updatedAtMs)
-                    const elapsed = wait.elapsedMs + delta
-                    const remaining = wait.remainingMs === null ? null : Math.max(0, wait.remainingMs - delta)
+                    const delta = Math.max(0, serverNowMs - wait.updatedAtMs)
+                    const elapsed = wait.startedAtMs !== null && wait.startedAtMs !== undefined
+                      ? Math.max(0, serverNowMs - wait.startedAtMs)
+                      : wait.elapsedMs + delta
+                    const remaining = wait.remainingMs === null
+                      ? null
+                      : Math.max(
+                        0,
+                        wait.deadlineAtMs !== null && wait.deadlineAtMs !== undefined
+                          ? wait.deadlineAtMs - serverNowMs
+                          : wait.remainingMs - delta,
+                      )
                     const total = remaining === null ? 0 : Math.max(1, elapsed + remaining)
                     return <div className="active-wait-row" key={wait.key}>
                       <LoaderCircle className="spin" size={14} />

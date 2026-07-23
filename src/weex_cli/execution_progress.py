@@ -28,6 +28,8 @@ WAITING_LABELS_ZH = {
     "open_order_clearance": "确认无残留挂单",
 }
 
+EXECUTION_PROGRESS_PROJECTION_VERSION = 3
+
 _ACTION_ZH = {"open": "开仓", "close": "平仓", "buy": "买入", "sell": "卖出"}
 _STATUS_ZH = {
     "completed": "已完成",
@@ -48,6 +50,8 @@ class ActiveWait:
     detail: str = ""
     symbol: str | None = None
     action: str | None = None
+    started_at_ms: int | None = None
+    deadline_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -305,7 +309,7 @@ class ExecutionProgressProjector:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            "schema_version": EXECUTION_PROGRESS_PROJECTION_VERSION,
             "phase": self.phase,
             "current_run": self.current_run,
             "current_round": self.current_round,
@@ -316,10 +320,85 @@ class ExecutionProgressProjector:
             "btc_quote_volume": format(self.btc_quote_volume, "f"),
             "eth_quote_volume": format(self.eth_quote_volume, "f"),
             "active_waits": [asdict(wait) for wait in self.active_waits.values()],
+            "current_run_base_quote": format(self._current_run_base_quote, "f"),
+            "completed_leg_quotes": {
+                key: format(value, "f") for key, value in self._completed_leg_quotes.items()
+            },
         }
 
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, Any] | None) -> "ExecutionProgressProjector":
+        projector = cls()
+        if not isinstance(snapshot, Mapping):
+            return projector
+        projector.phase = str(snapshot.get("phase") or projector.phase)
+        projector.current_run = _nonnegative_int(snapshot.get("current_run"))
+        projector.current_round = _nonnegative_int(snapshot.get("current_round"))
+        projector.submissions = _nonnegative_int(snapshot.get("submissions"))
+        projector.cancels = _nonnegative_int(snapshot.get("cancels"))
+        projector.requotes = _nonnegative_int(snapshot.get("requotes"))
+        projector.execution_verified_quote_volume = _decimal_or_zero(
+            snapshot.get("execution_verified_quote_volume")
+        )
+        projector.btc_quote_volume = _decimal_or_zero(snapshot.get("btc_quote_volume"))
+        projector.eth_quote_volume = _decimal_or_zero(snapshot.get("eth_quote_volume"))
+        projector._current_run_base_quote = _decimal_or_zero(snapshot.get("current_run_base_quote"))
+        completed = snapshot.get("completed_leg_quotes")
+        if isinstance(completed, Mapping):
+            projector._completed_leg_quotes = {
+                str(key): parsed
+                for key, value in completed.items()
+                if (parsed := _nonnegative_decimal(value)) is not None
+            }
+        waits = snapshot.get("active_waits")
+        if isinstance(waits, list):
+            for raw in waits:
+                if not isinstance(raw, Mapping) or not raw.get("key"):
+                    continue
+                try:
+                    wait = ActiveWait(
+                        key=str(raw["key"]),
+                        label=str(raw.get("label") or raw["key"]),
+                        updated_at_ms=int(raw.get("updated_at_ms") or 0),
+                        elapsed_ms=_nonnegative_int(raw.get("elapsed_ms")),
+                        remaining_ms=(
+                            None if raw.get("remaining_ms") is None else _nonnegative_int(raw.get("remaining_ms"))
+                        ),
+                        detail=str(raw.get("detail") or ""),
+                        symbol=str(raw["symbol"]) if raw.get("symbol") else None,
+                        action=str(raw["action"]) if raw.get("action") else None,
+                        started_at_ms=(
+                            None if raw.get("started_at_ms") is None else int(raw["started_at_ms"])
+                        ),
+                        deadline_at_ms=(
+                            None if raw.get("deadline_at_ms") is None else int(raw["deadline_at_ms"])
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                projector.active_waits[wait.key] = wait
+        return projector
+
     def _set_wait(self, wait: ActiveWait) -> None:
-        self.active_waits[wait.key] = wait
+        previous = self.active_waits.get(wait.key)
+        if wait.started_at_ms is None:
+            started_at_ms = (
+                previous.started_at_ms
+                if previous is not None and previous.started_at_ms is not None
+                else max(0, wait.updated_at_ms - wait.elapsed_ms)
+            )
+        else:
+            started_at_ms = wait.started_at_ms
+        deadline_at_ms = wait.deadline_at_ms
+        if deadline_at_ms is None and wait.remaining_ms is not None:
+            deadline_at_ms = wait.updated_at_ms + wait.remaining_ms
+        self.active_waits[wait.key] = ActiveWait(
+            **{
+                **asdict(wait),
+                "started_at_ms": started_at_ms,
+                "deadline_at_ms": deadline_at_ms,
+            }
+        )
 
     def _update_volume(self, event: Mapping[str, Any]) -> None:
         name = event_name(event)
@@ -525,3 +604,15 @@ def _nonnegative_decimal(value: Any) -> Decimal | None:
     except Exception:  # noqa: BLE001 - malformed observability values are ignored.
         return None
     return parsed if parsed.is_finite() and parsed >= 0 else None
+
+
+def _decimal_or_zero(value: Any) -> Decimal:
+    return _nonnegative_decimal(value) or Decimal(0)
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)

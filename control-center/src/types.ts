@@ -201,6 +201,8 @@ export interface ActiveExecutionWait {
   detail: string
   symbol: string | null
   action: string | null
+  startedAtMs: number | null
+  deadlineAtMs: number | null
 }
 
 export interface ExecutionTimelineEntry {
@@ -241,13 +243,25 @@ export interface StrategyMonitorSnapshot {
   requotes: number
   activeWaits: ActiveExecutionWait[]
   timeline: ExecutionTimelineEntry[]
+  projectionSequence: number
+  projectionVersion: number
+  ledgerRevision: number
+  serverTimeMs: number
+  updatedAtMs: number
+  freshness: 'current' | 'stale' | 'rebuilding'
+  streamState: 'ready' | 'catching_up' | 'reset_required'
   cursor: string | null
   hasMore: boolean
 }
 
 export interface StrategyMonitorEvent {
-  type: 'snapshot' | 'delta' | 'reset'
-  snapshot: StrategyMonitorSnapshot
+  type: 'snapshot' | 'delta' | 'reset' | 'heartbeat'
+  snapshot?: StrategyMonitorSnapshot
+  fromSequence?: number
+  toSequence?: number
+  journalSequence?: number
+  projectionSequence?: number
+  serverTimeMs?: number
 }
 
 export interface ExecutionCycle {

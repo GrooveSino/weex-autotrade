@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -331,7 +332,7 @@ def test_monitor_uses_authoritative_session_ledger_not_planned_event_amounts() -
     assert all("999999" not in entry.title for entry in snapshot.timeline)
 
 
-def test_monitor_uses_authoritative_execution_journal_while_session_ledger_is_pending() -> None:
+def test_monitor_never_promotes_execution_event_totals_while_session_ledger_is_pending() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()
     details = metadata(campaign)
@@ -374,14 +375,136 @@ def test_monitor_uses_authoritative_execution_journal_while_session_ledger_is_pe
 
     snapshot = StrategyMonitorService(journal, ledger, "generation-1").snapshot("ins-1")
 
-    assert snapshot.verified_quote_volume == Decimal("82.00")
+    assert snapshot.verified_quote_volume == Decimal("0")
     assert snapshot.ledger_verified_quote_volume == 0
-    assert snapshot.remaining_quote_volume == Decimal("18.00")
-    assert snapshot.btc_quote_volume == Decimal("30.25")
-    assert snapshot.eth_quote_volume == Decimal("10.75")
-    assert snapshot.volume_source == "execution_journal"
+    assert snapshot.remaining_quote_volume == Decimal("100")
+    assert snapshot.btc_quote_volume == Decimal("0")
+    assert snapshot.eth_quote_volume == Decimal("0")
+    assert snapshot.volume_source == "pending"
     assert snapshot.source_complete is False
     assert snapshot.stale is True
+
+
+def test_sqlite_event_and_projection_commit_atomically(tmp_path) -> None:
+    journal = SQLiteCampaignJournal(tmp_path / "fleet.db")
+    campaign = sample_campaign()
+    details = metadata(campaign)
+    details.update({"owner_user_id": "gg", "session_id": "session-1"})
+    journal.create("ins-1", campaign, details)
+
+    with pytest.raises(TypeError):
+        journal.append_and_project(
+            campaign.campaign_id,
+            {"name": "campaign_run_started", "at_ms": 1_000},
+            owner_user_id="gg",
+            account_id="ins-1",
+            session_id="session-1",
+            executor_generation="generation-1",
+            state={"not_json": object()},
+            projection_version=3,
+        )
+
+    projection, rows, latest = journal.monitor_read(campaign.campaign_id, None, 10)
+    assert projection is None
+    assert rows == []
+    assert latest == 0
+
+    sequence = journal.append_and_project(
+        campaign.campaign_id,
+        {"name": "campaign_run_started", "at_ms": 1_001, "run": 1},
+        owner_user_id="gg",
+        account_id="ins-1",
+        session_id="session-1",
+        executor_generation="generation-1",
+        state={"schema_version": 3, "phase": "运行开始", "current_run": 1, "active_waits": []},
+        projection_version=3,
+    )
+
+    projection, rows, latest = journal.monitor_read(campaign.campaign_id, None, 10)
+    assert sequence == latest == 1
+    assert projection is not None
+    assert projection.projected_sequence == 1
+    assert projection.owner_user_id == "gg"
+    assert rows[0]["sequence"] == 1
+    assert journal.monitor_metrics()["transaction_failures"] == 1
+    journal.close()
+
+
+def test_monitor_replays_complete_legacy_journal_without_event_cap() -> None:
+    journal = InMemoryCampaignJournal()
+    campaign = sample_campaign()
+    journal.create("ins-1", campaign, metadata(campaign))
+    for round_number in range(1, 2_105):
+        journal.add_event(campaign.campaign_id, _sanitize_event({"event": "cycle_started", "round": round_number}))
+
+    snapshot = StrategyMonitorService(
+        journal,
+        InMemoryTradeVolumeLedger(),
+        "generation-1",
+    ).snapshot("ins-1", limit=20)
+
+    assert snapshot.current_round == 2_104
+    assert snapshot.projection_sequence == 2_104
+    assert snapshot.projection_version == 3
+    assert snapshot.stream_state == "ready"
+
+
+def test_sqlite_monitor_sequences_remain_monotonic_across_connections(tmp_path) -> None:
+    path = tmp_path / "fleet.db"
+    first = SQLiteCampaignJournal(path)
+    second = SQLiteCampaignJournal(path)
+    campaign = sample_campaign()
+    first.create("ins-1", campaign, {**metadata(campaign), "owner_user_id": "gg"})
+
+    def append(index: int) -> int:
+        journal = first if index % 2 else second
+        return journal.append_and_project(
+            campaign.campaign_id,
+            _sanitize_event({"event": "cycle_started", "round": index + 1}),
+            owner_user_id="gg",
+            account_id="ins-1",
+            session_id=None,
+            executor_generation="generation-1",
+            projection_version=3,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        sequences = sorted(pool.map(append, range(20)))
+
+    projection, rows, latest = first.monitor_read(campaign.campaign_id, None, 50)
+    assert sequences == list(range(1, 21))
+    assert [row["sequence"] for row in rows] == sequences
+    assert latest == 20
+    assert projection is not None
+    assert projection.projected_sequence == latest
+    first.close()
+    second.close()
+
+
+def test_sqlite_projection_restores_wait_deadline_after_reopen(tmp_path) -> None:
+    path = tmp_path / "fleet.db"
+    journal = SQLiteCampaignJournal(path)
+    campaign = sample_campaign()
+    journal.create("ins-1", campaign, {**metadata(campaign), "owner_user_id": "gg"})
+    journal.append_and_project(
+        campaign.campaign_id,
+        _sanitize_event({"event": "hold_started", "round": 1, "seconds": "10"}),
+        owner_user_id="gg",
+        account_id="ins-1",
+        session_id=None,
+        executor_generation="generation-1",
+        projection_version=3,
+    )
+    projection = journal.monitor_projection(campaign.campaign_id)
+    assert projection is not None
+    expected_deadline = projection.state["active_waits"][0]["deadline_at_ms"]
+    journal.close()
+
+    reopened = SQLiteCampaignJournal(path)
+    snapshot = StrategyMonitorService(reopened, InMemoryTradeVolumeLedger(), "generation-2").snapshot("ins-1")
+    assert snapshot.projection_sequence == 1
+    assert snapshot.active_waits[0].deadline_at_ms == expected_deadline
+    reopened.close()
 
 
 def test_monitor_complete_ledger_wins_over_execution_journal_projection() -> None:

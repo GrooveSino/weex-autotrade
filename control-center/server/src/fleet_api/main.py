@@ -5,8 +5,9 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignB
 
 from .beta_allocation import HttpBetaAllocationProvider
 from .beta_source import BetaSourceRuntime, InMemoryBetaSourceStore, SQLiteBetaSourceStore
+from .campaign_log import campaign_event_log
 from .campaigns import (
     CampaignWorkerManager,
     InMemoryCampaignJournal,
@@ -339,12 +341,6 @@ def create_app(
             ),
         )
 
-    def record_campaign_progress(instance_id: str, event: Mapping[str, object]) -> None:
-        try:
-            service.record_campaign_progress(instance_id, event)
-        except Exception:
-            return
-
     campaign_manager = CampaignWorkerManager(
         selected,
         vault,
@@ -355,8 +351,8 @@ def create_app(
             allow_low_confidence=True,
         ),
         on_change=notify_campaign_change,
-        on_progress=record_campaign_progress,
         on_execution_claim=establish_bound_strategy_session,
+        executor_generation=executor_generation,
     )
     campaign_manager.recover()
     campaign_manager.invalidate_stale_planned_bound_strategy_previews(
@@ -393,6 +389,7 @@ def create_app(
     )
     session_volume = SessionVolumeService(volume_ledger)
     strategy_monitor = StrategyMonitorService(campaign_journal, volume_ledger, executor_generation)
+    strategy_monitor.rebuild_all()
     app_state_campaign_manager = campaign_manager
     if had_persisted_instances:
         ensure_mock_volume_baselines(
@@ -608,6 +605,62 @@ def create_app(
     def projected_instances() -> list[AccountInstance]:
         return [project_instance_session(instance) for instance in service.list_instances()]
 
+    def combined_log_updates(instance_id: str, limit: int, after: str | None) -> LogBatch:
+        service.get_instance(instance_id)
+        system = service.log_updates(instance_id, 500, None).lines
+        ranked: list[tuple[int, int, LogLine]] = []
+        for index, line in enumerate(system):
+            try:
+                at_ms = int(datetime.fromisoformat(line.timestamp.replace("Z", "+00:00")).timestamp() * 1000)
+            except ValueError:
+                at_ms = index
+            ranked.append((at_ms, index, line))
+        rank = len(ranked)
+        for record in campaign_journal.list_for_instance(instance_id):
+            for event in campaign_journal.events_before(record.campaign_id, None, 500):
+                rendered = campaign_event_log(event)
+                if rendered is None:
+                    continue
+                level, message = rendered
+                sequence = int(event.get("sequence") or 0)
+                at_ms = int(event.get("at_ms") or 0)
+                # Releases before the single-journal architecture copied this
+                # same rendered row into instance_logs. Prefer the audit row
+                # when the legacy copy is adjacent in time.
+                ranked = [
+                    item
+                    for item in ranked
+                    if not (item[2].message == message and abs(item[0] - at_ms) <= 2_000)
+                ]
+                ranked.append(
+                    (
+                        at_ms,
+                        rank,
+                        LogLine(
+                            id=f"execution:{record.campaign_id}:{sequence}",
+                            timestamp=datetime.fromtimestamp(at_ms / 1000, tz=UTC).isoformat(),
+                            level=level,
+                            message=message,
+                        ),
+                    )
+                )
+                rank += 1
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        combined = [item[2] for item in ranked]
+        window = combined[-500:]
+        reset = False
+        if after is None:
+            lines = window[-limit:]
+        else:
+            cursor_index = next((index for index, line in enumerate(window) if line.id == after), None)
+            if cursor_index is None:
+                lines = window[-limit:]
+                reset = True
+            else:
+                lines = window[cursor_index + 1 : cursor_index + 1 + limit]
+        cursor = lines[-1].id if lines else (None if reset else after)
+        return LogBatch(lines=lines, cursor=cursor, reset=reset)
+
     def strategy_run_plan(instance: AccountInstance):
         try:
             return resolve_strategy_run_plan(
@@ -628,7 +681,21 @@ def create_app(
 
     @app.get("/api/v1/health", response_model=HealthResponse)
     def health() -> HealthResponse:
+        journal_metrics = campaign_journal.monitor_metrics()
+        stream_metrics = strategy_monitor.metrics()
+        ledger_lag = 0
+        for record in campaign_journal.list_all():
+            session_id = record.metadata.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            try:
+                session = volume_ledger.session_projection(session_id)
+            except KeyError:
+                continue
+            if session and session.get("pending_sync"):
+                ledger_lag += 1
         return HealthResponse(
+            status="degraded" if int(journal_metrics.get("projection_lag") or 0) else "ok",
             adapter=selected.adapter,
             storage=selected.storage,
             live_trading_enabled=selected.live_trading_enabled,
@@ -642,6 +709,16 @@ def create_app(
             api_release_id=executor_release_id,
             executor_connected=True,
             executor_generation=executor_generation,
+            monitor_projection_lag=int(journal_metrics.get("projection_lag") or 0),
+            monitor_ledger_lag=ledger_lag,
+            monitor_sse_subscriber_count=stream_metrics["subscriber_count"],
+            monitor_sse_reset_count=stream_metrics["reset_count"],
+            monitor_transaction_failure_count=int(journal_metrics.get("transaction_failures") or 0),
+            monitor_last_event_at_ms=(
+                None
+                if journal_metrics.get("last_event_at_ms") is None
+                else int(journal_metrics["last_event_at_ms"])
+            ),
         )
 
     @app.get("/_internal/executor-health", response_model=HealthResponse, include_in_schema=False)
@@ -772,6 +849,7 @@ def create_app(
             run_disposition=plan.run_disposition,
             strategy_target_quote=plan.strategy_target_quote_volume,
             baseline_lifetime_quote=plan.baseline_lifetime_quote_volume,
+            owner_user_id=instance.owner_user_id,
         )
         return BetaCampaignPreview.model_validate(
             {
@@ -938,12 +1016,13 @@ def create_app(
         before_sequence: int | None = Query(default=None, alias="beforeSequence", ge=1),
         limit: int = Query(default=200, ge=1, le=500),
     ) -> StrategyMonitorSnapshot:
-        service.get_instance(instance_id)
+        instance = service.get_instance(instance_id)
         return strategy_monitor.snapshot(
             instance_id,
             session_id=session_id,
             before_sequence=before_sequence,
             limit=limit,
+            owner_user_id=instance.owner_user_id,
         )
 
     @app.get("/api/v1/instances/{instance_id}/strategy-monitor/events")
@@ -953,86 +1032,170 @@ def create_app(
         session_id: str | None = Query(default=None, alias="sessionId", max_length=128),
         after: str | None = Query(default=None, max_length=256),
     ) -> StreamingResponse:
-        service.get_instance(instance_id)
+        instance = service.get_instance(instance_id)
+        owner_user_id = instance.owner_user_id
         requested_cursor = request.headers.get("last-event-id") or after
 
         async def stream() -> AsyncIterator[str]:
-            last_cursor = requested_cursor
-            last_campaign_id: str | None = None
-            last_sequence = 0
-            keepalive_at = time.monotonic()
-            initial = await asyncio.to_thread(
-                strategy_monitor.snapshot,
-                instance_id,
-                session_id=session_id,
-                limit=200,
-            )
-            parsed = strategy_monitor.parse_cursor(last_cursor)
-            event_type = "snapshot"
-            if parsed is not None:
-                generation, campaign_id, sequence = parsed
-                if generation == executor_generation and campaign_id == initial.execution_id:
-                    last_campaign_id = campaign_id
-                    last_sequence = sequence
-                else:
-                    event_type = "reset"
-            if last_campaign_id is None:
+            strategy_monitor.subscriber_opened()
+            try:
+                heartbeat_at = time.monotonic()
+                initial = await asyncio.to_thread(
+                    strategy_monitor.snapshot,
+                    instance_id,
+                    session_id=session_id,
+                    limit=200,
+                    owner_user_id=owner_user_id,
+                )
+                parsed = strategy_monitor.parse_cursor(requested_cursor)
+                event_type = "snapshot"
+                if parsed is not None:
+                    generation, campaign_id, sequence = parsed
+                    if (
+                        generation != executor_generation
+                        or campaign_id != initial.execution_id
+                        or sequence > initial.projection_sequence
+                    ):
+                        event_type = "reset"
+                        strategy_monitor.reset_recorded()
                 last_campaign_id = initial.execution_id
-                parsed_initial = strategy_monitor.parse_cursor(initial.cursor)
-                last_sequence = parsed_initial[2] if parsed_initial is not None else 0
-            yield _monitor_sse(event_type, initial.cursor, {"type": event_type, "snapshot": initial})
+                last_sequence = initial.projection_sequence
+                yield _monitor_sse(
+                    event_type,
+                    initial.cursor,
+                    {
+                        "type": event_type,
+                        "snapshot": initial,
+                        "fromSequence": last_sequence,
+                        "toSequence": last_sequence,
+                    },
+                )
 
-            while not await request.is_disconnected():
-                await asyncio.sleep(0.25)
-                record = await asyncio.to_thread(campaign_journal.monitor_record, instance_id, session_id)
-                campaign_id = record.campaign_id if record is not None else None
-                if campaign_id != last_campaign_id:
-                    reset = await asyncio.to_thread(
-                        strategy_monitor.snapshot,
-                        instance_id,
-                        session_id=session_id,
-                        limit=200,
-                    )
-                    parsed_reset = strategy_monitor.parse_cursor(reset.cursor)
-                    last_campaign_id = campaign_id
-                    last_sequence = parsed_reset[2] if parsed_reset is not None else 0
-                    yield _monitor_sse("reset", reset.cursor, {"type": "reset", "snapshot": reset})
-                    continue
-                if campaign_id is not None:
-                    rows = await asyncio.to_thread(campaign_journal.events_after, campaign_id, last_sequence, 200)
-                    if rows:
-                        first_sequence = int(rows[0].get("sequence") or 0)
-                        if first_sequence != last_sequence + 1:
+                while not await request.is_disconnected():
+                    await asyncio.sleep(0.25)
+                    record = await asyncio.to_thread(campaign_journal.monitor_record, instance_id, session_id)
+                    campaign_id = record.campaign_id if record is not None else None
+                    if campaign_id != last_campaign_id:
+                        reset = await asyncio.to_thread(
+                            strategy_monitor.snapshot,
+                            instance_id,
+                            session_id=session_id,
+                            limit=200,
+                            owner_user_id=owner_user_id,
+                        )
+                        last_campaign_id = reset.execution_id
+                        last_sequence = reset.projection_sequence
+                        strategy_monitor.reset_recorded()
+                        yield _monitor_sse(
+                            "reset",
+                            reset.cursor,
+                            {"type": "reset", "snapshot": reset, "toSequence": last_sequence},
+                        )
+                        heartbeat_at = time.monotonic()
+                        continue
+                    journal_sequence = 0
+                    projection_sequence = 0
+                    if campaign_id is not None:
+                        projection, _unused, journal_sequence = await asyncio.to_thread(
+                            campaign_journal.monitor_read,
+                            campaign_id,
+                            None,
+                            1,
+                        )
+                        projection_sequence = projection.projected_sequence if projection is not None else 0
+                        if journal_sequence != projection_sequence or journal_sequence - last_sequence > 200:
                             reset = await asyncio.to_thread(
                                 strategy_monitor.snapshot,
                                 instance_id,
                                 session_id=session_id,
                                 limit=200,
+                                owner_user_id=owner_user_id,
                             )
-                            parsed_reset = strategy_monitor.parse_cursor(reset.cursor)
-                            last_sequence = parsed_reset[2] if parsed_reset is not None else 0
-                            yield _monitor_sse("reset", reset.cursor, {"type": "reset", "snapshot": reset})
+                            last_sequence = reset.projection_sequence
+                            strategy_monitor.reset_recorded()
+                            yield _monitor_sse(
+                                "reset",
+                                reset.cursor,
+                                {"type": "reset", "snapshot": reset, "toSequence": last_sequence},
+                            )
+                            heartbeat_at = time.monotonic()
                             continue
-                        last_sequence = int(rows[-1].get("sequence") or last_sequence)
-                        delta = await asyncio.to_thread(
-                            strategy_monitor.snapshot,
-                            instance_id,
-                            session_id=session_id,
-                            limit=200,
-                            event_rows=rows,
+                        if journal_sequence > last_sequence:
+                            rows = await asyncio.to_thread(
+                                campaign_journal.events_after,
+                                campaign_id,
+                                last_sequence,
+                                200,
+                            )
+                            if (
+                                not rows
+                                or int(rows[0].get("sequence") or 0) != last_sequence + 1
+                                or int(rows[-1].get("sequence") or 0) != journal_sequence
+                            ):
+                                reset = await asyncio.to_thread(
+                                    strategy_monitor.snapshot,
+                                    instance_id,
+                                    session_id=session_id,
+                                    limit=200,
+                                    owner_user_id=owner_user_id,
+                                )
+                                last_sequence = reset.projection_sequence
+                                strategy_monitor.reset_recorded()
+                                yield _monitor_sse(
+                                    "reset",
+                                    reset.cursor,
+                                    {"type": "reset", "snapshot": reset, "toSequence": last_sequence},
+                                )
+                                heartbeat_at = time.monotonic()
+                                continue
+                            from_sequence = last_sequence + 1
+                            last_sequence = journal_sequence
+                            delta = await asyncio.to_thread(
+                                strategy_monitor.snapshot,
+                                instance_id,
+                                session_id=session_id,
+                                limit=200,
+                                event_rows=rows,
+                                owner_user_id=owner_user_id,
+                            )
+                            delta_cursor = strategy_monitor.cursor(campaign_id, last_sequence)
+                            yield _monitor_sse(
+                                "delta",
+                                delta_cursor,
+                                {
+                                    "type": "delta",
+                                    "snapshot": delta,
+                                    "fromSequence": from_sequence,
+                                    "toSequence": last_sequence,
+                                },
+                            )
+                            heartbeat_at = time.monotonic()
+                            continue
+                    if time.monotonic() - heartbeat_at >= 5:
+                        now_ms = time.time_ns() // 1_000_000
+                        cursor = (
+                            strategy_monitor.cursor(campaign_id, last_sequence)
+                            if campaign_id and last_sequence
+                            else None
                         )
-                        delta_cursor = strategy_monitor.cursor(campaign_id, last_sequence)
-                        yield _monitor_sse("delta", delta_cursor, {"type": "delta", "snapshot": delta})
-                        keepalive_at = time.monotonic()
-                        continue
-                if time.monotonic() - keepalive_at >= 15:
-                    yield ": keepalive\n\n"
-                    keepalive_at = time.monotonic()
+                        yield _monitor_sse(
+                            "heartbeat",
+                            cursor,
+                            {
+                                "type": "heartbeat",
+                                "journalSequence": journal_sequence,
+                                "projectionSequence": projection_sequence,
+                                "serverTimeMs": now_ms,
+                            },
+                        )
+                        heartbeat_at = time.monotonic()
+            finally:
+                strategy_monitor.subscriber_closed()
 
         return StreamingResponse(
             stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     @app.post(
@@ -1048,6 +1211,7 @@ def create_app(
             instance_id,
             payload,
             vault.get(instance_id),
+            owner_user_id=instance.owner_user_id,
         )
         return BetaCampaignPreview.model_validate(
             {
@@ -1325,7 +1489,7 @@ def create_app(
 
     @app.get("/api/v1/instances/{instance_id}/logs", response_model=list[LogLine])
     def instance_logs(instance_id: str, limit: int = Query(default=200, ge=1, le=500)) -> list[LogLine]:
-        return service.logs(instance_id, limit)
+        return combined_log_updates(instance_id, limit, None).lines
 
     @app.get("/api/v1/instances/{instance_id}/log-updates", response_model=LogBatch)
     def instance_log_updates(
@@ -1333,7 +1497,7 @@ def create_app(
         limit: int = Query(default=200, ge=1, le=500),
         after: str | None = Query(default=None, min_length=1, max_length=128),
     ) -> LogBatch:
-        return service.log_updates(instance_id, limit, after)
+        return combined_log_updates(instance_id, limit, after)
 
     @app.delete("/api/v1/instances/{instance_id}/log-updates", status_code=status.HTTP_204_NO_CONTENT)
     def clear_instance_logs(instance_id: str) -> Response:

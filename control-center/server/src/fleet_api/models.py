@@ -380,6 +380,8 @@ class ActiveExecutionWait(CamelModel):
     detail: str = ""
     symbol: str | None = None
     action: str | None = None
+    started_at_ms: int | None = None
+    deadline_at_ms: int | None = None
 
 
 class ExecutionTimelineEntry(CamelModel):
@@ -393,7 +395,7 @@ class ExecutionTimelineEntry(CamelModel):
 
 
 class StrategyMonitorSnapshot(CamelModel):
-    schema_version: int = 2
+    schema_version: int = 3
     instance_id: str
     session_id: str | None = None
     execution_id: str | None = None
@@ -420,6 +422,13 @@ class StrategyMonitorSnapshot(CamelModel):
     requotes: int = 0
     active_waits: list[ActiveExecutionWait] = Field(default_factory=list)
     timeline: list[ExecutionTimelineEntry] = Field(default_factory=list)
+    projection_sequence: int = 0
+    projection_version: int = 0
+    ledger_revision: int = 0
+    server_time_ms: int = 0
+    updated_at_ms: int = 0
+    freshness: Literal["current", "stale", "rebuilding"] = "current"
+    stream_state: Literal["ready", "catching_up", "reset_required"] = "ready"
     cursor: str | None = None
     has_more: bool = False
 
@@ -428,6 +437,11 @@ class StrategyMonitorEvent(CamelModel):
     type: str
     cursor: str | None = None
     snapshot: StrategyMonitorSnapshot | None = None
+    from_sequence: int | None = None
+    to_sequence: int | None = None
+    journal_sequence: int | None = None
+    projection_sequence: int | None = None
+    server_time_ms: int | None = None
     timeline: list[ExecutionTimelineEntry] = Field(default_factory=list)
     active_waits: list[ActiveExecutionWait] = Field(default_factory=list)
 
@@ -627,6 +641,12 @@ class HealthResponse(CamelModel):
     api_release_id: str | None = None
     executor_connected: bool = True
     executor_generation: str | None = None
+    monitor_projection_lag: int = Field(default=0, ge=0)
+    monitor_ledger_lag: int = Field(default=0, ge=0)
+    monitor_sse_subscriber_count: int = Field(default=0, ge=0)
+    monitor_sse_reset_count: int = Field(default=0, ge=0)
+    monitor_transaction_failure_count: int = Field(default=0, ge=0)
+    monitor_last_event_at_ms: int | None = None
 
 
 class BetaCampaignStatus(StrEnum):

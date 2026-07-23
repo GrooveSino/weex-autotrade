@@ -365,37 +365,61 @@ export function subscribeToStrategyMonitor(
   onConnectionChange: (state: 'connected' | 'retrying') => void,
 ): () => void {
   if (!configuredBaseUrl) return () => undefined
+  let closed = false
   let retryTimer: number | undefined
-  const query = new URLSearchParams()
-  if (cursor) query.set('after', cursor)
-  if (sessionId) query.set('sessionId', sessionId)
-  const suffix = query.size ? `?${query}` : ''
-  const source = new EventSource(`${configuredBaseUrl}/instances/${account.id}/strategy-monitor/events${suffix}`)
-  source.onopen = () => {
-    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
-    retryTimer = undefined
-    onConnectionChange('connected')
-  }
-  source.onerror = () => {
-    if (retryTimer !== undefined) return
-    retryTimer = window.setTimeout(() => {
-      retryTimer = undefined
-      if (source.readyState !== EventSource.OPEN) onConnectionChange('retrying')
-    }, 1_500)
-  }
+  let source: EventSource | null = null
+  let resumeCursor = cursor
+  let lastMessageAt = Date.now()
   const receive = (message: Event) => {
     try {
-      onEvent(JSON.parse((message as MessageEvent<string>).data) as StrategyMonitorEvent)
+      const event = message as MessageEvent<string>
+      if (event.lastEventId) resumeCursor = event.lastEventId
+      lastMessageAt = Date.now()
+      onEvent(JSON.parse(event.data) as StrategyMonitorEvent)
+      onConnectionChange('connected')
     } catch {
       onConnectionChange('retrying')
     }
   }
-  source.addEventListener('snapshot', receive)
-  source.addEventListener('delta', receive)
-  source.addEventListener('reset', receive)
+  const connect = () => {
+    if (closed) return
+    const query = new URLSearchParams()
+    if (resumeCursor) query.set('after', resumeCursor)
+    if (sessionId) query.set('sessionId', sessionId)
+    const suffix = query.size ? `?${query}` : ''
+    source = new EventSource(`${configuredBaseUrl}/instances/${account.id}/strategy-monitor/events${suffix}`)
+    source.onopen = () => {
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+      retryTimer = undefined
+      lastMessageAt = Date.now()
+      onConnectionChange('connected')
+    }
+    source.onerror = () => {
+      if (retryTimer !== undefined) return
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined
+        if (source?.readyState !== EventSource.OPEN) onConnectionChange('retrying')
+      }, 1_500)
+    }
+    source.addEventListener('snapshot', receive)
+    source.addEventListener('delta', receive)
+    source.addEventListener('reset', receive)
+    source.addEventListener('heartbeat', receive)
+  }
+  connect()
+  const watchdog = window.setInterval(() => {
+    if (Date.now() - lastMessageAt <= 12_000) return
+    source?.close()
+    source = null
+    onConnectionChange('retrying')
+    lastMessageAt = Date.now()
+    window.setTimeout(connect, 750)
+  }, 1_000)
   return () => {
+    closed = true
     if (retryTimer !== undefined) window.clearTimeout(retryTimer)
-    source.close()
+    window.clearInterval(watchdog)
+    source?.close()
   }
 }
 

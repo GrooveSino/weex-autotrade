@@ -183,7 +183,7 @@ def create_app(
         return StreamingResponse(
             stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     @app.get("/api/v1/instances/{instance_id}/strategy-monitor/events")
@@ -210,7 +210,7 @@ def create_app(
         return StreamingResponse(
             stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     @app.api_route("/api/v1/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
