@@ -22,6 +22,11 @@ trap cleanup_stage EXIT
 cd "${control_center_dir}"
 build_source="${FLEET_WEB_DIST_SOURCE:-${control_center_dir}/dist}"
 if [[ -z "${FLEET_WEB_DIST_SOURCE:-}" ]]; then
+  # The public Fleet console is mounted below a reverse-proxy prefix. Keep
+  # this distinct from the loopback static server root so Vite emits asset and
+  # API URLs that work on the public route.
+  web_public_base_path="${FLEET_WEB_PUBLIC_BASE_PATH:-${VITE_PUBLIC_BASE_PATH:-/}}"
+  web_api_base_url="${FLEET_WEB_API_BASE_URL:-${VITE_API_BASE_URL:-/api/v1}}"
   # LaunchAgent and remote SSH shells do not load interactive fnm/nvm setup.
   # Resolve npm explicitly so a normal release does not depend on shell rc files.
   npm_bin="${FLEET_NPM_BIN:-}"
@@ -45,7 +50,9 @@ if [[ -z "${FLEET_WEB_DIST_SOURCE:-}" ]]; then
     exit 69
   }
   export PATH="${npm_bin:h}:${PATH}"
-  "${npm_bin}" run build
+  VITE_PUBLIC_BASE_PATH="${web_public_base_path}" \
+    VITE_API_BASE_URL="${web_api_base_url}" \
+    "${npm_bin}" run build
 fi
 [[ -f "${build_source}/index.html" ]] || { print -u2 "missing built frontend: ${build_source}/index.html"; exit 1; }
 mkdir "${stage_dir}"

@@ -240,7 +240,7 @@ function App() {
     let timer: number | undefined
     const pollWebRelease = async () => {
       try {
-        const response = await fetch('/__fleet/version.json', { cache: 'no-store' })
+        const response = await fetch(`${import.meta.env.BASE_URL}__fleet/version.json`, { cache: 'no-store' })
         if (!response.ok) return
         const payload = await response.json() as { release_id?: unknown; releaseId?: unknown }
         const releaseId = typeof payload.release_id === 'string'

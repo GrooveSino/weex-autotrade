@@ -115,6 +115,18 @@ else
 fi
 chmod 600 "${stable_env}"
 
+# The public Caddy deployment serves this console at /fleet/ while the API is
+# mounted below /fleet/api/v1. Existing operators may override either value in
+# their explicitly provisioned environment file.
+if ! /usr/bin/grep -q '^FLEET_WEB_PUBLIC_BASE_PATH=' "${stable_env}"; then
+  print 'FLEET_WEB_PUBLIC_BASE_PATH=/fleet/' >> "${stable_env}"
+  export FLEET_WEB_PUBLIC_BASE_PATH='/fleet/'
+fi
+if ! /usr/bin/grep -q '^FLEET_WEB_API_BASE_URL=' "${stable_env}"; then
+  print 'FLEET_WEB_API_BASE_URL=/fleet/api/v1' >> "${stable_env}"
+  export FLEET_WEB_API_BASE_URL='/fleet/api/v1'
+fi
+
 FLEET_ENV_FILE="${stable_env}" "${script_dir}/deploy-service-release.zsh"
 FLEET_ENV_FILE="${stable_env}" "${script_dir}/deploy-web-release.zsh"
 FLEET_STABLE_ROOT="${release_root}" "${script_dir}/install-launch-agents.zsh" --install
