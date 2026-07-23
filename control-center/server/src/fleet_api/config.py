@@ -29,6 +29,8 @@ class ControlPlaneSettings:
     weex_request_timeout_ms: int = 15_000
     weex_history_lookback_days: int = 365
     weex_history_pages_per_poll: int = 1
+    weex_history_active_fallback_seconds: float = 15
+    weex_history_max_concurrency: int = 1
     max_parallel_polls: int = 12
     # Wallet, positions, and one bounded history page are independent private
     # reads. Leave room for their request timeouts without cancelling a valid
@@ -76,6 +78,10 @@ class ControlPlaneSettings:
             raise ValueError("FLEET_WEEX_HISTORY_LOOKBACK_DAYS must be between 1 and 365")
         if self.weex_history_pages_per_poll < 1:
             raise ValueError("FLEET_WEEX_HISTORY_PAGES_PER_POLL must be at least 1")
+        if self.weex_history_active_fallback_seconds <= 0:
+            raise ValueError("FLEET_WEEX_HISTORY_ACTIVE_FALLBACK_SECONDS must be greater than 0")
+        if self.weex_history_max_concurrency < 1:
+            raise ValueError("FLEET_WEEX_HISTORY_MAX_CONCURRENCY must be at least 1")
         if self.max_parallel_polls < 1:
             raise ValueError("FLEET_MAX_PARALLEL_POLLS must be at least 1")
         if self.account_poll_timeout_seconds <= 0:
@@ -116,6 +122,10 @@ class ControlPlaneSettings:
             weex_request_timeout_ms=int(os.environ.get("FLEET_WEEX_REQUEST_TIMEOUT_MS", "5000")),
             weex_history_lookback_days=int(os.environ.get("FLEET_WEEX_HISTORY_LOOKBACK_DAYS", "365")),
             weex_history_pages_per_poll=int(os.environ.get("FLEET_WEEX_HISTORY_PAGES_PER_POLL", "1")),
+            weex_history_active_fallback_seconds=float(
+                os.environ.get("FLEET_WEEX_HISTORY_ACTIVE_FALLBACK_SECONDS", "15")
+            ),
+            weex_history_max_concurrency=int(os.environ.get("FLEET_WEEX_HISTORY_MAX_CONCURRENCY", "1")),
             max_parallel_polls=int(os.environ.get("FLEET_MAX_PARALLEL_POLLS", "12")),
             account_poll_timeout_seconds=float(os.environ.get("FLEET_ACCOUNT_POLL_TIMEOUT_SECONDS", "10")),
             mock_cycle_total_quote=Decimal(os.environ.get("FLEET_MOCK_CYCLE_TOTAL_QUOTE", "20")),

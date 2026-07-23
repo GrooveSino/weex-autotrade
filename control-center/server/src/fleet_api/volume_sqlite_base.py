@@ -100,6 +100,11 @@ class SQLiteLedgerBase:
                 pending_sync INTEGER NOT NULL DEFAULT 0,
                 source_complete INTEGER NOT NULL DEFAULT 0,
                 stale INTEGER NOT NULL DEFAULT 1,
+                scan_state_json TEXT,
+                sync_reason TEXT,
+                next_sync_at_ms INTEGER,
+                last_success_at_ms INTEGER,
+                initial_baseline_state TEXT NOT NULL DEFAULT 'not_requested',
                 updated_at_ms INTEGER NOT NULL,
                 PRIMARY KEY(account_id, mode)
             );
@@ -110,6 +115,16 @@ class SQLiteLedgerBase:
             self._connection.execute(
                 "ALTER TABLE volume_sync_checkpoints ADD COLUMN coverage_complete INTEGER NOT NULL DEFAULT 0"
             )
+        checkpoint_migrations = {
+            "scan_state_json": "TEXT",
+            "sync_reason": "TEXT",
+            "next_sync_at_ms": "INTEGER",
+            "last_success_at_ms": "INTEGER",
+            "initial_baseline_state": "TEXT NOT NULL DEFAULT 'not_requested'",
+        }
+        for name, definition in checkpoint_migrations.items():
+            if name not in checkpoint_columns:
+                self._connection.execute(f"ALTER TABLE volume_sync_checkpoints ADD COLUMN {name} {definition}")
         columns = {row[1] for row in self._connection.execute("PRAGMA table_info(trade_volume_fills)")}
         migrations = {
             "mode": "TEXT NOT NULL DEFAULT 'legacy'",

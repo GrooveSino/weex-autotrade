@@ -142,6 +142,29 @@ class SessionVolumeProjection(CamelModel):
     retry_allowed: bool = False
 
 
+class HistorySyncProjection(CamelModel):
+    """Safe, durable account-history synchronization state for read-only views."""
+
+    state: Literal[
+        "not_requested",
+        "initial_baseline_queued",
+        "initial_baseline_running",
+        "initial_baseline_pending",
+        "incremental_queued",
+        "syncing",
+        "fresh",
+        "stale",
+    ] = "not_requested"
+    reason: str | None = Field(default=None, max_length=40)
+    initial_baseline_state: Literal["not_requested", "queued", "running", "complete", "pending"] = "not_requested"
+    pending: bool = False
+    source_complete: bool = False
+    stale: bool = False
+    last_success_at_ms: int | None = Field(default=None, ge=0)
+    next_sync_at_ms: int | None = Field(default=None, ge=0)
+    high_watermark_ms: int | None = Field(default=None, ge=0)
+
+
 class VolumeSnapshot(CamelModel):
     lifetime: float = 0
     today: float = 0
@@ -162,6 +185,7 @@ class VolumeSnapshot(CamelModel):
         exclude_if=lambda value: value is None,
     )
     strategy_progress_updated_at_ms: int | None = Field(default=None, exclude_if=lambda value: value is None)
+    history_sync: HistorySyncProjection | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ExposureSnapshot(CamelModel):

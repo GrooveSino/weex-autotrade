@@ -31,6 +31,7 @@ from .service import FleetControlService
 from .strategy_monitor import StrategyMonitorService
 from .strategy_run_lifecycle import StrategyRunLifecycleService
 from .telemetry import AccountTelemetryAdapterFactory, MockAccountTelemetryAdapterFactory
+from .trade_history_scheduler import TradeHistorySyncScheduler
 from .vault import EncryptedSQLiteCredentialVault, EphemeralCredentialVault
 from .volume_history import InMemoryTradeVolumeLedger, SessionVolumeService, SQLiteTradeVolumeLedger
 from .weex_readonly import WeexReadonlyAccountTelemetryAdapterFactory
@@ -159,6 +160,14 @@ def finish_context(
         ctx.service,
         ctx.vault,
     )
+    ctx.trade_history_scheduler = TradeHistorySyncScheduler(
+        ctx.service,
+        ctx.runtime,
+        ctx.volume_ledger,
+        is_active=lambda instance: _needs_history_sync(ctx, instance),
+        active_fallback_seconds=settings.weex_history_active_fallback_seconds,
+        max_concurrent_requests=settings.weex_history_max_concurrency,
+    )
     ctx.strategy_monitor = StrategyMonitorService(ctx.campaign_journal, ctx.volume_ledger, ctx.executor_generation)
     ctx.strategy_monitor.rebuild_all()
     if ctx.had_persisted_instances:
@@ -183,3 +192,10 @@ def _live_campaign_provider(ctx: FleetAppContext) -> LiveCampaignBetaAllocationP
         timeout_seconds=ctx.beta_source_runtime.settings.timeout_seconds,
         allow_low_confidence=True,
     )
+
+
+def _needs_history_sync(ctx: FleetAppContext, instance) -> bool:
+    if instance.mode.value != "live":
+        return instance.status.value == "running"
+    lifecycle = ctx.strategy_run_lifecycle.projection(instance.id, instance.mode.value)
+    return lifecycle.state in {"running", "stopping", "cleanup_required"}

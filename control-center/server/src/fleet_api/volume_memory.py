@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import sqlite3
 from dataclasses import replace
 from decimal import Decimal
@@ -186,7 +187,12 @@ class InMemoryTradeVolumeLedger:
 
     def save_sync_checkpoint(self, account_id: str, mode: str, **values: object) -> None:
         with self._lock:
-            self._checkpoints[(account_id, mode)] = dict(values)
+            current = self._checkpoints.get((account_id, mode), {})
+            self._checkpoints[(account_id, mode)] = {
+                **current,
+                **values,
+                "updated_at_ms": time.time_ns() // 1_000_000,
+            }
 
     def sync_checkpoint(self, account_id: str, mode: str) -> dict[str, object] | None:
         with self._lock:

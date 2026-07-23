@@ -22,8 +22,20 @@ def install_application_lifecycle(ctx: FleetAppContext) -> None:
     async def poll_loop() -> None:
         while True:
             await asyncio.sleep(ctx.selected.poll_interval_seconds)
-            if await ctx.runtime.poll_all():
+            active_ids = [
+                instance.id
+                for instance in ctx.service.list_instances()
+                if ctx.trade_history_scheduler.is_active(instance)
+            ]
+            if await ctx.runtime.poll_instances(active_ids):
                 await publish_snapshot()
+
+    async def history_sync_loop() -> None:
+        while True:
+            worked = await ctx.trade_history_scheduler.run_due()
+            if worked:
+                await publish_snapshot()
+            await asyncio.sleep(0.25 if worked else 1)
 
     async def refresh_beta_state() -> bool:
         available = await ctx.beta_source_runtime.refresh()
@@ -56,14 +68,19 @@ def install_application_lifecycle(ctx: FleetAppContext) -> None:
             await refresh_beta_state()
             beta_task = asyncio.create_task(beta_refresh_loop(), name="fleet-beta-refresher")
         poll_task = asyncio.create_task(poll_loop(), name="fleet-account-poller")
+        history_task = asyncio.create_task(history_sync_loop(), name="fleet-history-sync")
+        ctx.trade_history_scheduler.bootstrap()
         try:
             yield
         finally:
             poll_task.cancel()
+            history_task.cancel()
             if beta_task is not None:
                 beta_task.cancel()
             with suppress(asyncio.CancelledError):
                 await poll_task
+            with suppress(asyncio.CancelledError):
+                await history_task
             if beta_task is not None:
                 with suppress(asyncio.CancelledError):
                     await beta_task

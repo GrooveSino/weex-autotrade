@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
+from .history_sync_projection import project_history_sync
 from .instance_projection import project_instance_session
 from .main_context import FleetAppContext
 from .main_helpers import execution_cycle_view as _execution_cycle_view
@@ -162,7 +163,7 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     @app.post("/api/v1/volume-sessions/{session_id}/sync", response_model=VolumeSessionResponse)
     async def sync_volume_session(session_id: str) -> VolumeSessionResponse:
         session = owned_volume_session(session_id)
-        await runtime.refresh_instance(session.account_id)
+        await ctx.trade_history_scheduler.refresh_now(session.account_id)
         checkpoint = volume_ledger.sync_checkpoint(session.account_id, session.mode) or {}
         volume_ledger.update_session(
             session_id,
@@ -176,7 +177,10 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     @app.get("/api/v1/instances/{instance_id}/volume-history", response_model=dict[str, object])
     def account_volume_history(instance_id: str) -> dict[str, object]:
         instance = service.get_instance(instance_id)
-        return volume_ledger.account_summary(instance.id, instance.mode.value)
+        return {
+            **volume_ledger.account_summary(instance.id, instance.mode.value),
+            "sync": project_history_sync(volume_ledger.sync_checkpoint(instance.id, instance.mode.value)),
+        }
 
     @app.post("/api/v1/instances/{instance_id}/refresh", response_model=AccountInstance)
     async def refresh_instance(instance_id: str) -> AccountInstance:

@@ -1212,14 +1212,24 @@ class LiveBetaVolumeService:
                 if positions[symbol] is None:
                     lane_stops[symbol] = ("observation_uncertain", "position_observation_unavailable")
             return 0.0
-        both_open = (
-            abs(Decimal(str(positions["BTC"]))) > btc_plan.amount_step / 2
-            and abs(Decimal(str(positions["ETH"]))) > eth_plan.amount_step / 2
+        expected_positions = {
+            "BTC": btc_plan.quantity,
+            "ETH": -eth_plan.quantity,
+        }
+        tolerances = {
+            "BTC": btc_plan.amount_step / 2,
+            "ETH": eth_plan.amount_step / 2,
+        }
+        targets_reached = all(
+            abs(Decimal(str(positions[symbol])) - expected_positions[symbol]) <= tolerances[symbol]
+            for symbol in ("BTC", "ETH")
         )
-        if not both_open:
+        if not targets_reached:
+            self._emit("open_barrier_not_ready", round=round_number)
             return 0.0
         seconds = self._delay_seconds(self.hold_delay_seconds, round_number, 0.0)
         if seconds:
+            self._emit("open_barrier_verified", round=round_number)
             self._emit("hold_started", round=round_number, seconds=seconds)
             self._wait_for_stop(seconds)
             if self.stop_requested():

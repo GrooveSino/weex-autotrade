@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Protocol
 
+from .history_sync_projection import project_history_sync
 from .models import AccountInstance, InstanceStatus, SessionVolumeProjection, StrategyStage, StrategyTargetMode
 from .strategy_monitor import StrategyProgressProjection
 
@@ -11,6 +12,8 @@ class VolumeLedgerProjection(Protocol):
     def active_session(self, account_id: str, mode: str) -> dict[str, Any] | None: ...
 
     def latest_terminal_session(self, account_id: str, mode: str) -> dict[str, Any] | None: ...
+
+    def sync_checkpoint(self, account_id: str, mode: str) -> dict[str, Any] | None: ...
 
 
 class MonitorProjection(Protocol):
@@ -76,6 +79,8 @@ def project_instance_session(
         else instance.execution_lifecycle
     )
     projected_status, projected_phase = _lifecycle_account_state(instance, lifecycle_projection)
+    checkpoint_reader = getattr(volume_ledger, "sync_checkpoint", None)
+    checkpoint = checkpoint_reader(instance.id, instance.mode.value) if callable(checkpoint_reader) else None
     return instance.model_copy(
         update={
             "status": projected_status,
@@ -94,6 +99,7 @@ def project_instance_session(
                     "strategy_target_reached": target_reached,
                     "strategy_progress_source": progress_source,
                     "strategy_progress_updated_at_ms": progress_updated_at_ms,
+                    "history_sync": project_history_sync(checkpoint),
                 }
             ),
             "strategy_progress": strategy_progress,

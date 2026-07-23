@@ -45,6 +45,27 @@ class RuntimeControlMixin:
                 timeout=self._poll_timeout_seconds,
             )
 
+    async def sync_history_step(self, instance_id: str):
+        """Ask an account adapter for one persisted history-window step only."""
+        lock = self._locks.setdefault(instance_id, asyncio.Lock())
+        async with lock:
+            instance = self._service.get_instance(instance_id)
+            adapter = self._adapters.get(instance_id)
+            if adapter is None:
+                adapter = self._adapter_factory.create(instance_id)
+                self._adapters[instance_id] = adapter
+            context = AccountTelemetryContext(
+                instance=instance,
+                credentials=self._service.vault.get(instance_id),
+            )
+            sync_step = getattr(adapter, "sync_history_step", None)
+            if sync_step is None:
+                return None
+            return await asyncio.wait_for(
+                sync_step(context, now_ms=time.time_ns() // 1_000_000),
+                timeout=self._poll_timeout_seconds,
+            )
+
     async def apply_action(self, instance_id: str, action: InstanceAction) -> AccountInstance:
         lock = self._locks.setdefault(instance_id, asyncio.Lock())
         async with lock:

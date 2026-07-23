@@ -2,28 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import math
-import time
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
-from pydantic import SecretStr
 from weex_cli.config import Credentials, Settings
 from weex_cli.gateway import WeexGateway
 
-from .models import ExposureSnapshot, ProxyStatus, TradingMode, VolumeSnapshot, WalletSnapshot
-from .telemetry import AccountTelemetry, AccountTelemetryAdapter, AccountTelemetryContext
+from .models import ExposureSnapshot, TradingMode, WalletSnapshot
 from .vault import CredentialMaterial
 from .volume_history import (
-    InMemoryTradeVolumeLedger,
     NormalizedTradeFill,
     TradeHistoryContext,
     TradeHistoryPage,
     TradeHistorySource,
-    TradeHistorySynchronizer,
-    TradeVolumeLedger,
-    shanghai_day_start_ms,
 )
 
 DAY_MS = 24 * 60 * 60 * 1000
@@ -99,6 +91,8 @@ class WeexLiveTradeHistorySource(TradeHistorySource):
         self._coverage_complete = False
         self._truncated = False
         self._active = False
+        self._scan_start_ms: int | None = None
+        self._scan_end_ms: int | None = None
 
     def begin(self, start_ms: int, end_ms: int, *, coverage_complete: bool) -> None:
         start_ms = max(0, min(start_ms, end_ms))
@@ -117,6 +111,53 @@ class WeexLiveTradeHistorySource(TradeHistorySource):
         self._coverage_complete = coverage_complete
         self._truncated = False
         self._active = True
+        self._scan_start_ms = start_ms
+        self._scan_end_ms = end_ms
+
+    def snapshot(self) -> dict[str, object]:
+        """Return only scheduler state; no gateway response data is retained."""
+        return {
+            "pending_windows": [[start, end] for start, end in self._pending],
+            "expected_cursor": self._expected_cursor,
+            "scan_id": self._scan_id,
+            "page_sequence": self._page_sequence,
+            "coverage_complete": self._coverage_complete,
+            "truncated": self._truncated,
+            "active": self._active,
+            "scan_start_ms": self._scan_start_ms,
+            "scan_end_ms": self._scan_end_ms,
+        }
+
+    def restore(self, state: Mapping[str, object]) -> bool:
+        """Restore a checkpointed window queue after an executor restart."""
+        raw_windows = state.get("pending_windows")
+        if not isinstance(raw_windows, list):
+            return False
+        pending: list[tuple[int, int]] = []
+        for value in raw_windows:
+            if not isinstance(value, list) or len(value) != 2:
+                return False
+            start, end = value
+            if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end < start:
+                return False
+            pending.append((start, end))
+        expected_cursor = state.get("expected_cursor")
+        if expected_cursor is not None and not isinstance(expected_cursor, str):
+            return False
+        self._pending = pending
+        self._expected_cursor = expected_cursor
+        self._scan_id = _non_negative_int(state.get("scan_id"))
+        self._page_sequence = _non_negative_int(state.get("page_sequence"))
+        self._coverage_complete = bool(state.get("coverage_complete"))
+        self._truncated = bool(state.get("truncated"))
+        self._active = bool(state.get("active")) and bool(pending)
+        self._scan_start_ms = _optional_non_negative_int(state.get("scan_start_ms"))
+        self._scan_end_ms = _optional_non_negative_int(state.get("scan_end_ms"))
+        return self._active
+
+    @property
+    def scan_start_ms(self) -> int | None:
+        return self._scan_start_ms
 
     async def fetch_page(
         self,
@@ -173,6 +214,14 @@ class WeexLiveTradeHistorySource(TradeHistorySource):
             high_watermark_ms=high_watermark_ms,
             window_complete=not self._truncated,
         )
+
+
+def _non_negative_int(value: object) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _optional_non_negative_int(value: object) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
 
 
 def _wallet_snapshot(rows: list[dict[str, Any]]) -> WalletSnapshot:
@@ -280,7 +329,7 @@ def _finite_float(value: Decimal, field: str) -> float:
     return result
 
 
-from .weex_readonly_adapter import (  # noqa: E402
+from .weex_readonly_adapter import (  # noqa: E402, F401
     WeexReadonlyAccountTelemetryAdapter,
     WeexReadonlyAccountTelemetryAdapterFactory,
 )

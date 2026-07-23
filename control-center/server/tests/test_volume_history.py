@@ -206,6 +206,50 @@ def test_sqlite_conflict_rolls_back_entire_batch(tmp_path: Path) -> None:
     repository.close()
 
 
+def test_sqlite_checkpoint_preserves_split_window_state_across_restart(tmp_path: Path) -> None:
+    path = tmp_path / "fleet.db"
+    repository = SQLiteAccountRepository(path)
+    repository.create(account())
+    ledger = SQLiteTradeVolumeLedger(path)
+    state = {
+        "pending_windows": [[1_000, 1_999], [0, 999]],
+        "expected_cursor": "scan-7-2",
+        "scan_id": 7,
+        "page_sequence": 2,
+        "coverage_complete": False,
+        "truncated": False,
+        "active": True,
+        "scan_start_ms": 0,
+        "scan_end_ms": 1_999,
+    }
+    ledger.save_sync_checkpoint(
+        "ins-volume",
+        "demo",
+        cursor="scan-7-2",
+        high_watermark_ms=999,
+        pending=True,
+        source_complete=False,
+        coverage_complete=False,
+        stale=False,
+        scan_state=state,
+        sync_reason="initial_baseline",
+        next_sync_at_ms=123,
+        last_success_at_ms=99,
+        initial_baseline_state="running",
+    )
+    ledger.close()
+
+    restored = SQLiteTradeVolumeLedger(path)
+    checkpoint = restored.sync_checkpoint("ins-volume", "demo")
+    assert checkpoint is not None
+    assert checkpoint["cursor"] == "scan-7-2"
+    assert checkpoint["scan_state"] == state
+    assert checkpoint["last_success_at_ms"] == 99
+    assert checkpoint["initial_baseline_state"] == "running"
+    restored.close()
+    repository.close()
+
+
 def test_utc_day_start_is_stable_across_timezones() -> None:
     assert utc_day_start_ms(1784347199999) == TODAY_START
     assert utc_day_start_ms(1784347200000) == TODAY_START

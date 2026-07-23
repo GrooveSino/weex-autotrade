@@ -1,38 +1,61 @@
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import replace
+import json
+from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
-from threading import RLock
-
-from .volume_contracts import *  # noqa: F403
-from .volume_helpers import _aggregate, _fill_signature, _fill_summary, _normalized_session_status, _session_projection
 
 
 class SQLiteLedgerSyncMixin:
     def save_sync_checkpoint(self, account_id: str, mode: str, **values: object) -> None:
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT cursor, high_watermark_ms, pending_sync, source_complete, coverage_complete, stale, "
+                "scan_state_json, sync_reason, next_sync_at_ms, last_success_at_ms, initial_baseline_state "
+                "FROM volume_sync_checkpoints WHERE account_id = ? AND mode = ?",
+                (account_id, mode),
+            ).fetchone()
+            previous = dict(existing) if existing is not None else {}
+            scan_state = (
+                values["scan_state"]
+                if "scan_state" in values
+                else _decode_state(previous.get("scan_state_json"))
+            )
             self._connection.execute(
                 """INSERT INTO volume_sync_checkpoints(
                     account_id, mode, cursor, high_watermark_ms, pending_sync, source_complete,
-                    coverage_complete, stale, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    coverage_complete, stale, scan_state_json, sync_reason, next_sync_at_ms,
+                    last_success_at_ms, initial_baseline_state, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, mode) DO UPDATE SET cursor=excluded.cursor,
                     high_watermark_ms=excluded.high_watermark_ms, pending_sync=excluded.pending_sync,
                     source_complete=excluded.source_complete, coverage_complete=excluded.coverage_complete,
-                    stale=excluded.stale,
+                    stale=excluded.stale, scan_state_json=excluded.scan_state_json,
+                    sync_reason=excluded.sync_reason, next_sync_at_ms=excluded.next_sync_at_ms,
+                    last_success_at_ms=excluded.last_success_at_ms,
+                    initial_baseline_state=excluded.initial_baseline_state,
                     updated_at_ms=excluded.updated_at_ms""",
                 (
                     account_id,
                     mode,
-                    values.get("cursor"),
-                    values.get("high_watermark_ms"),
-                    int(bool(values.get("pending", values.get("pending_sync", False)))),
-                    int(bool(values.get("source_complete", False))),
-                    int(bool(values.get("coverage_complete", values.get("source_complete", False)))),
-                    int(bool(values.get("stale", True))),
+                    values.get("cursor", previous.get("cursor")),
+                    values.get("high_watermark_ms", previous.get("high_watermark_ms")),
+                    int(bool(values.get("pending", values.get("pending_sync", previous.get("pending_sync", False))))),
+                    int(bool(values.get("source_complete", previous.get("source_complete", False)))),
+                    int(
+                        bool(
+                            values.get(
+                                "coverage_complete",
+                                values.get("source_complete", previous.get("coverage_complete", False)),
+                            )
+                        )
+                    ),
+                    int(bool(values.get("stale", previous.get("stale", True)))),
+                    json.dumps(scan_state, separators=(",", ":")) if scan_state is not None else None,
+                    values.get("sync_reason", previous.get("sync_reason")),
+                    values.get("next_sync_at_ms", previous.get("next_sync_at_ms")),
+                    values.get("last_success_at_ms", previous.get("last_success_at_ms")),
+                    values.get("initial_baseline_state", previous.get("initial_baseline_state", "not_requested")),
                     now_ms,
                 ),
             )
@@ -41,7 +64,8 @@ class SQLiteLedgerSyncMixin:
         with self._lock:
             row = self._connection.execute(
                 "SELECT cursor, high_watermark_ms, pending_sync, source_complete, coverage_complete, stale, "
-                "updated_at_ms "
+                "scan_state_json, sync_reason, next_sync_at_ms, last_success_at_ms, "
+                "initial_baseline_state, updated_at_ms "
                 "FROM volume_sync_checkpoints WHERE account_id = ? AND mode = ?",
                 (account_id, mode),
             ).fetchone()
@@ -54,7 +78,12 @@ class SQLiteLedgerSyncMixin:
             "source_complete": bool(row[3]),
             "coverage_complete": bool(row[4]),
             "stale": bool(row[5]),
-            "updated_at_ms": row[6],
+            "scan_state": _decode_state(row[6]),
+            "sync_reason": row[7],
+            "next_sync_at_ms": row[8],
+            "last_success_at_ms": row[9],
+            "initial_baseline_state": row[10],
+            "updated_at_ms": row[11],
         }
 
     def refresh_sessions(
@@ -174,3 +203,13 @@ class SQLiteLedgerSyncMixin:
             """,
             (instance_id,),
         )
+
+
+def _decode_state(value: object) -> object | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None

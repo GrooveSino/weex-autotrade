@@ -1046,13 +1046,14 @@ def test_hold_and_round_gap_follow_confirmed_open_and_flat_boundaries(
         open_completed = [
             index for index, row in round_events if row["event"] == "leg_completed" and row.get("action") == "open"
         ]
+        open_barrier_verified = next(index for index, row in round_events if row["event"] == "open_barrier_verified")
         hold_started = next(index for index, row in round_events if row["event"] == "hold_started")
         hold_completed = next(index for index, row in round_events if row["event"] == "hold_completed")
         first_close = next(
             index for index, row in round_events if row["event"] == "leg_started" and row.get("action") == "close"
         )
         assert len(open_completed) == 2
-        assert max(open_completed) < hold_started < hold_completed < first_close
+        assert max(open_completed) < open_barrier_verified < hold_started < hold_completed < first_close
 
     first_gap_completed = next(
         index for index, row in enumerate(timeline) if row["event"] == "round_gap_completed" and row.get("round") == 1
@@ -1061,6 +1062,53 @@ def test_hold_and_round_gap_follow_confirmed_open_and_flat_boundaries(
         index for index, row in enumerate(timeline) if row["event"] == "cycle_started" and row.get("round") == 2
     )
     assert first_gap_completed < second_cycle_started
+
+
+def test_hold_wait_requires_both_open_positions_to_reach_their_cycle_targets(
+    tmp_path,
+    allocation: BetaAllocation,
+) -> None:
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="200",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    events: list[dict[str, object]] = []
+    venues: dict[str, ImmediateVenue] = {}
+
+    def venue_factory(unused_gateway: Gateway, symbol: str, position_side: str) -> ImmediateVenue:
+        venues.setdefault(symbol, ImmediateVenue(symbol, position_side))
+        return venues[symbol]
+
+    service = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=venue_factory,  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        event_sink=events.append,  # type: ignore[arg-type]
+        hold_delay_seconds=lambda round_number: 3,
+        now_ms=lambda: 1000,
+        sleep=lambda seconds: None,
+    )
+    service.current_plan_id = plan.plan_id
+    lanes = service._create_lanes()
+    assert plan.btc.quantity > plan.btc.amount_step
+    partial_btc = plan.btc.quantity - plan.btc.amount_step
+    assert partial_btc > plan.btc.amount_step / 2
+    venues["BTC"].position = float(partial_btc)
+    venues["ETH"].position = -float(plan.eth.quantity)
+
+    hold_seconds = service._hold_open_pair(1, {}, lanes, plan.btc, plan.eth)
+
+    assert hold_seconds == 0
+    assert [event["event"] for event in events] == ["open_barrier_not_ready"]
 
 
 def test_stop_during_hold_cancels_both_lanes_then_maker_flattens_before_stopping(

@@ -39,6 +39,17 @@ export interface AccountInstance {
     strategyTargetReached?: boolean
     strategyProgressSource?: 'ledger' | 'execution_journal' | 'pending'
     strategyProgressUpdatedAtMs?: number | null
+    historySync?: {
+      state: 'not_requested' | 'initial_baseline_queued' | 'initial_baseline_running' | 'initial_baseline_pending' | 'incremental_queued' | 'syncing' | 'fresh' | 'stale'
+      reason: string | null
+      initialBaselineState: 'not_requested' | 'queued' | 'running' | 'complete' | 'pending'
+      pending: boolean
+      sourceComplete: boolean
+      stale: boolean
+      lastSuccessAtMs: number | null
+      nextSyncAtMs: number | null
+      highWatermarkMs: number | null
+    } | null
     session?: VolumeSessionProjection | null
     activeSession?: VolumeSessionProjection | null
     lastRun?: VolumeSessionProjection | null

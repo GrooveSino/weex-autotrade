@@ -59,6 +59,10 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
         return LogLevel.INFO, f"实盘执行：第 {value('round')} 轮开始；计划总交易量 {value('desired_quote')} USDT"
     if name == "cycle_preparing":
         return LogLevel.INFO, f"实盘执行：第 {value('round')} 轮正在读取 BTC/ETH 盘口并计算数量"
+    if name == "open_barrier_verified":
+        return LogLevel.SUCCESS, f"实盘执行：BTC/ETH 本轮目标仓位已核验；第 {value('round')} 轮，开始持仓计时"
+    if name == "open_barrier_not_ready":
+        return LogLevel.WARN, f"实盘执行：BTC/ETH 本轮目标仓位未达成；第 {value('round')} 轮，不开始持仓计时"
     if name in {"hold_started", "hold_completed", "round_gap_started", "round_gap_completed"}:
         labels = {
             "hold_started": "BTC/ETH 双边开仓完成，进入持仓等待",

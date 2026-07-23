@@ -27,6 +27,7 @@ def install_campaign_lifecycle(ctx: FleetAppContext) -> None:
         try:
             await ctx.strategy_run_lifecycle.finalize_record(record)
         finally:
+            ctx.trade_history_scheduler.request(record.instance_id, "final_session")
             ctx.session_finalizations.discard(session_id)
             await ctx.publish_snapshot()
 
@@ -44,6 +45,7 @@ def install_campaign_lifecycle(ctx: FleetAppContext) -> None:
 
         def schedule() -> None:
             record = latest_bound_record(instance_id)
+            ctx.trade_history_scheduler.request(instance_id, "active_event")
             if record is not None and record.status in {"completed", "stopped", "recovering", "uncertain"}:
                 schedule_session_finalization(record)
             asyncio.create_task(ctx.publish_snapshot())

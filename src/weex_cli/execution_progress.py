@@ -114,7 +114,7 @@ def execution_phase(event: Mapping[str, Any]) -> str:
     if name.startswith("leg"):
         symbol = event_value(event, "symbol", "")
         return f"{symbol} {action_label(event_value(event, 'action'))}".strip()
-    if name.startswith("pair_wait"):
+    if name.startswith("pair_wait") or name.startswith("open_barrier"):
         return "双腿状态核验"
     if name.startswith("accounting"):
         return "成交明细对账"
@@ -201,6 +201,10 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
         return TimelinePresentation("error", f"{symbol} {action}仓位读取失败", "已停止该通道继续下单")
     if name == "pair_wait_completed":
         return TimelinePresentation("success", "BTC/ETH 双腿屏障已通过", f"第 {round_number} 轮 / {action}")
+    if name == "open_barrier_verified":
+        return TimelinePresentation("success", "BTC/ETH 目标仓位已核验", f"第 {round_number} 轮 / 开始持仓计时")
+    if name == "open_barrier_not_ready":
+        return TimelinePresentation("warn", "BTC/ETH 目标仓位未达成", f"第 {round_number} 轮 / 不开始持仓计时")
     if name == "close_barrier_started":
         return TimelinePresentation("info", "开仓阶段结束", "正在读取实际持仓并准备并发平仓")
     if name == "accounting_wait_completed":

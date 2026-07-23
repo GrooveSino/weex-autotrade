@@ -137,6 +137,16 @@ def test_projector_exposes_and_clears_hold_and_round_gap_countdowns() -> None:
     assert projector.active_waits == {}
 
 
+def test_hold_countdown_has_a_visible_target_position_barrier() -> None:
+    verified = describe_execution_event({"event": "open_barrier_verified", "round": 1})
+    not_ready = describe_execution_event({"event": "open_barrier_not_ready", "round": 1})
+
+    assert verified is not None
+    assert verified.title == "BTC/ETH 目标仓位已核验"
+    assert not_ready is not None
+    assert not_ready.title == "BTC/ETH 目标仓位未达成"
+
+
 def test_projector_snapshot_restores_dedupe_counts_and_absolute_wait_deadline() -> None:
     projector = ExecutionProgressProjector()
     projector.apply({"event": "campaign_run_started", "run": 1}, at_ms=1_000)

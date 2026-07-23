@@ -48,12 +48,26 @@ function relativeTime(timestamp: number | null): string {
   return `${Math.round(minutes / 60)} 小时前`
 }
 
+function historySyncLabel(account: AccountInstance): string {
+  const sync = account.volume.historySync
+  if (!sync || sync.state === 'not_requested') return '静默 · 未请求同步'
+  if (sync.state === 'initial_baseline_queued') return '正在建立初始基线'
+  if (sync.state === 'initial_baseline_running') return '正在建立初始基线'
+  if (sync.state === 'initial_baseline_pending') return '基线待核验'
+  if (sync.state === 'incremental_queued') return '增量同步排队中'
+  if (sync.state === 'syncing') return '正在核验成交历史'
+  if (sync.state === 'stale') return '数据待核验'
+  return `最近成交已落账 · ${relativeTime(sync.lastSuccessAtMs)}`
+}
+
 export function AccountTable({ accounts, selectedIds, refreshingIds, actioningIds, executionDisabled, boundStrategyExecutionEnabled, onSelect, onSelectAll, onToggleRunning, onOpenLogs, onOpenExecutions, onRefresh, onClosePositions, onEdit, onAssignStrategy }: AccountTableProps) {
   const [, setClockTick] = useState(0)
   const allSelected = accounts.length > 0 && accounts.every((account) => selectedIds.has(account.id))
 
   useEffect(() => {
-    if (!accounts.some((account) => account.strategyProgress.nextActionAtMs !== null)) return
+    if (!accounts.some((account) => (
+      account.strategyProgress.nextActionAtMs !== null || account.volume.historySync?.nextSyncAtMs !== null
+    ))) return
     const timer = window.setInterval(() => setClockTick((value) => value + 1), 100)
     return () => window.clearInterval(timer)
   }, [accounts])
@@ -90,6 +104,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
               || (progressSource === 'ledger' && Boolean(session?.stale))
             const estimate = estimateRounds(account.strategy, achievedVolume)
             const runtime = account.runtime ?? emptyRuntime
+            const historySync = account.volume.historySync
             const funding = account.fundingPreflight ?? calculateFundingPreflight(
               account.strategy,
               account.wallet.available,
@@ -209,9 +224,9 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                   <span className="strategy-scope">{account.strategy.name} · {targetModeLabel(account.strategy.targetMode)} · 每轮 {account.strategy.roundTurnoverQuoteMin}-{account.strategy.roundTurnoverQuoteMax} · 约 {estimate ? `${estimate.minimum}-${estimate.maximum}` : '-'} 轮</span>
                 </td>
                 <td>
-                  <div className={`runtime-cell ${runtime.consecutiveFailures ? 'failed' : ''}`} title={runtime.lastErrorType ?? '最近轮询正常'}>
-                    <span><i />{relativeTime(runtime.consecutiveFailures ? runtime.lastPollFailedAtMs : runtime.lastPollSucceededAtMs)}</span>
-                    <small>{runtime.lastPollDurationMs === null ? '无耗时' : `${runtime.lastPollDurationMs} ms`}{runtime.consecutiveFailures ? ` · 连败 ${runtime.consecutiveFailures}` : ''}</small>
+                  <div className={`runtime-cell ${runtime.consecutiveFailures || historySync?.stale ? 'failed' : ''}`} title={runtime.lastErrorType ?? historySync?.reason ?? '成交同步状态'}>
+                    <span><i />{historySyncLabel(account)}</span>
+                    <small>{historySync?.nextSyncAtMs ? `下次 ${countdown(historySync.nextSyncAtMs)}` : historySync?.lastSuccessAtMs ? `最近成功 ${relativeTime(historySync.lastSuccessAtMs)}` : '不会自动轮询静默账号'}</small>
                   </div>
                 </td>
                 <td className="actions-column">

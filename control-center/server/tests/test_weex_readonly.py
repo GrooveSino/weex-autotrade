@@ -151,13 +151,24 @@ def test_live_readonly_adapter_maps_wallet_positions_and_exact_fill_volume() -> 
         assert telemetry.wallet.unrealized_pnl == -2.25
         assert telemetry.exposure.btc_long == 123.45
         assert telemetry.exposure.eth_short == 67.89
-        assert telemetry.volume.lifetime == 75.375
-        assert telemetry.volume.today == 75.375
+        assert telemetry.volume.lifetime == 0
+        assert telemetry.volume.today == 0
         assert telemetry.volume.complete is False
         assert telemetry.proxy_location == "WEEX / account-bound"
         assert telemetry.phase == "WEEX 只读遥测已同步"
-        assert "2 笔" in (telemetry.activity_log or "")
+        assert telemetry.activity_log is None
         assert created_with == [(credentials, 3_000)]
+        assert gateway.trade_calls == []
+
+        result = await adapter.sync_history_step(
+            AccountTelemetryContext(account(), credentials),
+            now_ms=time.time_ns() // 1_000_000,
+        )
+        refreshed = await adapter.collect(AccountTelemetryContext(account(), credentials))
+
+        assert result.fills_inserted == 2
+        assert refreshed.volume.lifetime == 75.375
+        assert refreshed.volume.today == 75.375
         assert len(gateway.trade_calls) == 1
 
         await adapter.aclose()
@@ -176,7 +187,10 @@ def test_configured_history_start_within_retention_marks_volume_complete() -> No
             gateway_factory=lambda credentials, timeout_ms: FakeReadonlyGateway(),
         ).create(instance.id)
 
-        telemetry = await adapter.collect(AccountTelemetryContext(instance, material()))
+        context = AccountTelemetryContext(instance, material())
+        telemetry = await adapter.collect(context)
+        await adapter.sync_history_step(context, now_ms=now_ms)
+        telemetry = await adapter.collect(context)
 
         assert telemetry.volume.complete is True
         assert telemetry.phase == "WEEX 只读遥测已同步"
@@ -194,15 +208,18 @@ def test_history_start_older_than_retention_is_clamped_and_explained() -> None:
             gateway_factory=lambda credentials, timeout_ms: FakeReadonlyGateway(),
         ).create(instance.id)
 
-        telemetry = await adapter.collect(AccountTelemetryContext(instance, material()))
+        context = AccountTelemetryContext(instance, material())
+        telemetry = await adapter.collect(context)
+        await adapter.sync_history_step(context, now_ms=now_ms)
+        telemetry = await adapter.collect(context)
 
         assert telemetry.volume.complete is False
-        assert telemetry.phase == "WEEX 只读遥测已同步 / 历史起点超出可用窗口"
+        assert telemetry.phase == "WEEX 只读遥测已同步"
 
     asyncio.run(scenario())
 
 
-def test_history_failure_keeps_wallet_and_positions_available_but_marks_volume_unverified() -> None:
+def test_history_failure_is_isolated_from_wallet_and_position_telemetry() -> None:
     async def scenario() -> None:
         adapter = WeexReadonlyAccountTelemetryAdapterFactory(
             InMemoryTradeVolumeLedger(),
@@ -210,19 +227,23 @@ def test_history_failure_keeps_wallet_and_positions_available_but_marks_volume_u
             gateway_factory=lambda credentials, timeout_ms: HistoryFailingGateway(),
         ).create("ins-live")
 
-        first = await adapter.collect(AccountTelemetryContext(account(), material()))
-        second = await adapter.collect(AccountTelemetryContext(account(), material()))
+        context = AccountTelemetryContext(account(), material())
+        first = await adapter.collect(context)
+        with pytest.raises(IndexError):
+            await adapter.sync_history_step(context, now_ms=time.time_ns() // 1_000_000)
+        second = await adapter.collect(context)
 
         assert first.wallet.equity == 98
         assert first.exposure.btc_long == 123.45
         assert first.exposure.eth_short == 67.89
         assert first.volume.complete is False
-        assert "成交历史待核验 (IndexError)" in first.phase
-        assert first.activity_log is not None and "IndexError" in first.activity_log
-        # The repeated failing history sync is deliberately not logged again.
+        assert first.phase == "WEEX 只读遥测已同步"
+        assert first.activity_log is None
         assert second.activity_log is None
 
     asyncio.run(scenario())
+
+
 
 
 def test_each_account_gets_an_independent_gateway_and_proxy_material() -> None:

@@ -51,6 +51,9 @@ class AccountRuntimeManager(RuntimeControlMixin, RuntimePollingMixin):
 
     async def poll_all(self) -> bool:
         instance_ids = [instance.id for instance in self._service.list_instances()]
+        return await self.poll_instances(instance_ids)
+
+    async def poll_instances(self, instance_ids: list[str]) -> bool:
         if not instance_ids:
             return False
         round_started_at_ms = time.time_ns() // 1_000_000

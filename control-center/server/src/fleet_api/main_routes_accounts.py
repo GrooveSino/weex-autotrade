@@ -40,6 +40,7 @@ def register_account_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     combined_log_updates = ctx.combined_log_updates
     strategy_run_plan = ctx.strategy_run_plan
     require_command_id = ctx.require_command_id
+    trade_history_scheduler = ctx.trade_history_scheduler
 
     @app.get("/api/v1/instances", response_model=list[AccountInstance])
     def list_instances() -> list[AccountInstance]:
@@ -96,6 +97,7 @@ def register_account_routes(app: FastAPI, ctx: FleetAppContext) -> None:
             complete = selected.adapter == "mock" and created.mode is TradingMode.DEMO
             volume_ledger.set_complete(created.id, complete)
             created = service.set_volume_completeness(created.id, complete)
+            trade_history_scheduler.queue_initial_baseline(created)
         except Exception:
             volume_ledger.remove(created.id)
             service.delete_instance(created.id)
