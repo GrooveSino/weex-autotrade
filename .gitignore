@@ -73,6 +73,12 @@ logs/
 *.pid
 *.sock
 
+# Local TUI account credentials and private Beta endpoint
+config/*tui-accounts*.toml
+!config/tui-accounts.example.toml
+config/fleet-users.toml
+users.toml
+
 # Editors and personal tooling
 .idea/
 *.code-workspace

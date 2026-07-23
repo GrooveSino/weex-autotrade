@@ -16,6 +16,58 @@ class StrategyTargetReached(RuntimeError):
     pass
 
 
+class StrategyRunBlocked(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyRunPlan:
+    target_mode: StrategyTargetMode
+    run_disposition: str
+    strategy_target_quote_volume: Decimal
+    execution_target_quote_volume: Decimal
+    baseline_lifetime_quote_volume: Decimal
+
+
+def resolve_strategy_run_plan(
+    instance: AccountInstance,
+    active_session: dict[str, object] | None,
+) -> StrategyRunPlan:
+    if active_session is not None:
+        status = str(active_session.get("status") or "verification_pending")
+        if status == "uncertain":
+            raise StrategyRunBlocked("the previous strategy run requires manual reconciliation")
+        if status == "stopping":
+            raise StrategyRunBlocked("the previous strategy run is still stopping")
+        if status == "verification_pending":
+            raise StrategyRunBlocked("the previous strategy run data is awaiting verification")
+        raise StrategyRunBlocked("this account already has an active strategy run")
+
+    strategy_target = Decimal(instance.strategy.target_volume_quote)
+    lifetime = Decimal(str(instance.volume.lifetime))
+    if instance.strategy.target_mode is StrategyTargetMode.LIFETIME:
+        if not instance.volume.complete:
+            raise StrategyRunBlocked("complete lifetime trade history synchronization before starting")
+        execution_target = max(strategy_target - lifetime, Decimal(0))
+        if execution_target <= 0:
+            raise StrategyTargetReached("the lifetime strategy target is already verified complete")
+        return StrategyRunPlan(
+            target_mode=StrategyTargetMode.LIFETIME,
+            run_disposition="lifetime_residual",
+            strategy_target_quote_volume=strategy_target,
+            execution_target_quote_volume=execution_target,
+            baseline_lifetime_quote_volume=lifetime,
+        )
+
+    return StrategyRunPlan(
+        target_mode=StrategyTargetMode.INCREMENTAL,
+        run_disposition="new_incremental",
+        strategy_target_quote_volume=strategy_target,
+        execution_target_quote_volume=strategy_target,
+        baseline_lifetime_quote_volume=lifetime,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyCycleSizing:
     btc_long_quote: Decimal

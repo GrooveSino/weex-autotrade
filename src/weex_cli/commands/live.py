@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import shlex
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -12,21 +11,19 @@ from weex_cli.beta_allocation import DEFAULT_BETA_URL, HttpBetaAllocationProvide
 from weex_cli.beta_campaign import (
     DEFAULT_CAMPAIGN_DIRECTORY,
     DEFAULT_CHILD_PLAN_DIRECTORY,
-    BetaVolumeCampaign,
-    BetaVolumeCampaignStore,
-    LiveBetaVolumeCampaignService,
-    campaign_confirmation,
     campaign_execute_command,
     campaign_id_from_confirmation,
-    campaign_plan_payload,
-    live_profile_fingerprint,
+)
+from weex_cli.beta_campaign_workflow import (
+    BetaCampaignApplication,
+    CampaignPreviewRequest,
+    CampaignRuntimePaths,
 )
 from weex_cli.beta_volume import (
     DEFAULT_PLAN_DIRECTORY,
     BetaVolumePlanStore,
     beta_volume_confirmation,
     beta_volume_recovery_confirmation,
-    inspect_live_account,
     observed_recovery_quantity,
 )
 from weex_cli.beta_volume_workflow import BetaVolumeApplication, BetaVolumePlanRequest
@@ -43,7 +40,6 @@ from weex_cli.live_volume import (
     live_maker_volume_confirmation,
     plan_payload,
 )
-from weex_cli.live_websocket import WeexCampaignWebSocketRuntime
 from weex_cli.output import emit
 from weex_cli.safety import require_execution
 
@@ -123,9 +119,12 @@ def beta_campaign(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     profile = profile_for(ctx)
-    fingerprint = live_profile_fingerprint(profile)
-    campaign_store = BetaVolumeCampaignStore(campaign_directory)
-    child_store = BetaVolumePlanStore(child_plan_directory)
+    application = BetaCampaignApplication(
+        profile,
+        CampaignRuntimePaths(campaigns=campaign_directory, plans=child_plan_directory),
+        gateway_factory=lambda: gateway_for(ctx),
+        provider_factory=lambda: HttpBetaAllocationProvider(beta_url),
+    )
 
     if execute:
         try:
@@ -136,45 +135,15 @@ def beta_campaign(
             raise typer.BadParameter("--campaign-id does not match --confirm")
 
         def action() -> dict[str, object]:
-            record = campaign_store.load(confirmed_campaign_id)
-            require_execution(
-                execute=True,
-                supplied=confirm,
-                expected=campaign_confirmation(record.campaign),
-                mode="live",
-                settings=settings_for(ctx),
-            )
-            profile.require_maker_execution()
-            gateway = gateway_for(ctx)
-            provider = HttpBetaAllocationProvider(beta_url)
             progress_console = Console(stderr=True)
             progress_renderer = TerminalExecutionProgress(progress_console) if progress and not json_output else None
-            lane_gateways = {"BTC": gateway.fork(), "ETH": gateway.fork()}
-            snapshot_gateway = gateway.fork()
-            websocket_runtime = WeexCampaignWebSocketRuntime(
-                snapshot_gateway,
-                gateway.settings.require_credentials(),
-                proxy_url=profile.proxy_url,
-            )
             try:
-                websocket_runtime.start()
-                return LiveBetaVolumeCampaignService(
-                    gateway,
-                    provider,
-                    campaign_store,
-                    child_store,
-                    profile_fingerprint=fingerprint,
+                return application.execute(
+                    confirmation=confirm,
+                    campaign_id=confirmed_campaign_id,
                     event_sink=progress_renderer,
-                    lane_gateways=lane_gateways,
-                    market_data=websocket_runtime,
-                    order_updates=websocket_runtime,
-                ).execute(record.campaign)
+                )
             finally:
-                websocket_runtime.close()
-                snapshot_gateway.close()
-                for lane_gateway in lane_gateways.values():
-                    lane_gateway.close()
-                gateway.close()
                 if progress_renderer is not None:
                     progress_renderer.close()
 
@@ -190,31 +159,17 @@ def beta_campaign(
         raise typer.BadParameter("--confirm is only valid with --execute")
 
     def make_campaign() -> dict[str, object]:
-        gateway = gateway_for(ctx)
-        provider = HttpBetaAllocationProvider(beta_url)
-        campaign = BetaVolumeCampaign.create(
-            gateway,
-            provider.get(),
-            profile_fingerprint=fingerprint,
-            target_turnover_quote=target,
-            round_turnover_quote=cycle_volume,
-            hold_min_seconds=hold_min_minutes * SECONDS_PER_MINUTE,
-            hold_max_seconds=hold_max_minutes * SECONDS_PER_MINUTE,
-            round_gap_min_seconds=round_gap_min_minutes * SECONDS_PER_MINUTE,
-            round_gap_max_seconds=round_gap_max_minutes * SECONDS_PER_MINUTE,
+        payload = application.preview(
+            CampaignPreviewRequest(
+                target_quote=target,
+                cycle_volume=cycle_volume,
+                hold_min_seconds=hold_min_minutes * SECONDS_PER_MINUTE,
+                hold_max_seconds=hold_max_minutes * SECONDS_PER_MINUTE,
+                round_gap_min_seconds=round_gap_min_minutes * SECONDS_PER_MINUTE,
+                round_gap_max_seconds=round_gap_max_minutes * SECONDS_PER_MINUTE,
+            )
         )
-        opening_notional = min(campaign.round_turnover_quote, campaign.target_turnover_quote) / 2
-        required = opening_notional / Decimal(campaign.max_auto_leverage) * campaign.margin_buffer
-        readiness = inspect_live_account(
-            gateway,
-            required,
-            opening_notional=opening_notional,
-            leverage=campaign.leverage,
-            max_auto_leverage=campaign.max_auto_leverage,
-            margin_buffer=campaign.margin_buffer,
-        )
-        path = campaign_store.create(campaign)
-        payload = campaign_plan_payload(campaign, path, readiness)
+        campaign = application.load(str(payload["campaign"]["campaign_id"])).campaign
         payload["execute_command"] = campaign_execute_command(campaign, profile.path)
         return payload
 

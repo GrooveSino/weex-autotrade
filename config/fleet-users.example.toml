@@ -1,0 +1,9 @@
+# Copy this to ~/Library/Application Support/WEEXFleet/users.toml and set mode 0600.
+# The deployment script can create the real file with random 32-character passwords
+# without printing them. Never commit the real users.toml file.
+
+[users.gg]
+password = "replace-with-a-32-character-ascii-password"
+
+[users.colin]
+password = "replace-with-a-32-character-ascii-password"

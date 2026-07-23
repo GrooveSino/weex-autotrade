@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from pydantic import SecretStr
+
+from .campaign_log import campaign_event_log
 from .execution import CycleExecutionStatus, ExecutionRecord, PositionCloseExecutionResult
 from .funding import funding_preflight
 from .models import (
@@ -20,6 +24,7 @@ from .models import (
     LogLine,
     ProxySnapshot,
     ProxyStatus,
+    ProxyType,
     RuntimeHealthSnapshot,
     StrategyProgress,
     StrategyStage,
@@ -31,7 +36,8 @@ from .models import (
     WalletSnapshot,
     default_volume_strategy,
 )
-from .proxy import ProxyValidationError, proxy_host
+from .ownership import LEGACY_OWNER_USER_ID, current_owner_user_id
+from .proxy import ProxyValidationError, normalize_proxy_url, proxy_host
 from .repository import AccountRepository
 from .strategy import estimate_rounds, target_progress_quote
 from .telemetry import AccountTelemetry
@@ -61,6 +67,10 @@ class ValidationFailed(FleetError):
 
 class TelemetryUnavailable(FleetError):
     status_code = 503
+
+
+class BetaSourceUnavailable(TelemetryUnavailable):
+    """The Final Beta source cannot safely produce a new Live preview."""
 
 
 def _now() -> str:
@@ -105,12 +115,22 @@ class FleetControlService:
         return strategy
 
     def create_strategy(self, request: VolumeStrategyInput) -> VolumeStrategy:
-        strategy = VolumeStrategy(id=f"strategy-{uuid4().hex[:10]}", **request.model_dump())
+        strategy = VolumeStrategy(
+            id=f"strategy-{uuid4().hex[:10]}",
+            owner_user_id=current_owner_user_id() or LEGACY_OWNER_USER_ID,
+            version=1,
+            **request.model_dump(),
+        )
         return self.repository.create_strategy(strategy)
 
     def update_strategy(self, strategy_id: str, request: VolumeStrategyInput) -> VolumeStrategy:
         current = self.get_strategy(strategy_id)
-        updated_strategy = VolumeStrategy(id=current.id, **request.model_dump())
+        updated_strategy = VolumeStrategy(
+            id=current.id,
+            owner_user_id=current.owner_user_id,
+            version=current.version + 1,
+            **request.model_dump(),
+        )
         target_mode_changed = updated_strategy.target_mode is not current.target_mode
         assigned = [instance for instance in self.repository.list() if instance.strategy_id == strategy_id]
         for instance in assigned:
@@ -151,10 +171,15 @@ class FleetControlService:
         return updated
 
     def create_instance(self, request: CreateInstanceRequest) -> AccountInstance:
-        try:
-            host = proxy_host(request.proxy.type, request.proxy.url.get_secret_value())
-        except ProxyValidationError as exc:
-            raise ValidationFailed(str(exc)) from exc
+        host = "不使用代理"
+        normalized_proxy: str | None = None
+        if request.proxy.type is not ProxyType.NONE:
+            assert request.proxy.url is not None
+            try:
+                host = proxy_host(request.proxy.type, request.proxy.url.get_secret_value())
+                normalized_proxy = normalize_proxy_url(request.proxy.type, request.proxy.url.get_secret_value())
+            except ProxyValidationError as exc:
+                raise ValidationFailed(str(exc)) from exc
 
         instance_id = f"ins-{uuid4().hex[:10]}"
         api_key = request.credentials.api_key.get_secret_value()
@@ -176,6 +201,7 @@ class FleetControlService:
         )
         instance = AccountInstance(
             id=instance_id,
+            owner_user_id=current_owner_user_id() or LEGACY_OWNER_USER_ID,
             name=request.name.strip(),
             account_tag=request.account_tag.strip() or "未分组",
             api_key_tail=api_key[-4:].upper().rjust(4, "-"),
@@ -195,7 +221,7 @@ class FleetControlService:
             api_key=request.credentials.api_key,
             api_secret=request.credentials.api_secret,
             passphrase=request.credentials.passphrase,
-            proxy_url=request.proxy.url,
+            proxy_url=SecretStr(normalized_proxy) if normalized_proxy is not None else None,
         )
         created = self.repository.create(instance)
         try:
@@ -224,10 +250,29 @@ class FleetControlService:
                 raise UnsafeOperation("Live instances cannot start while the mock adapter is active")
             if instance.status is InstanceStatus.ERROR:
                 raise UnsafeOperation("resolve the instance error before starting")
+            if instance.status is InstanceStatus.WARNING:
+                raise UnsafeOperation("refresh and verify telemetry before starting")
             if progress.system_pause_reason is not None:
                 raise UnsafeOperation("the system pause must be resolved before starting")
             opening_new_pair = instance.strategy_progress.stage is not StrategyStage.HOLDING
-            if opening_new_pair and target_progress_quote(instance) >= instance.strategy.target_volume_quote:
+            if (
+                opening_new_pair
+                and instance.strategy.target_mode is StrategyTargetMode.INCREMENTAL
+                and (
+                    progress.started_at_ms is not None
+                    or progress.generated_volume_quote > 0
+                    or progress.stage is StrategyStage.COMPLETE
+                )
+            ):
+                # An incremental target describes one run, not the account's
+                # permanent target. A new explicit start begins a fresh run.
+                progress = StrategyProgress()
+            target_progress = (
+                Decimal(str(instance.volume.lifetime))
+                if instance.strategy.target_mode is StrategyTargetMode.LIFETIME
+                else progress.generated_volume_quote
+            )
+            if opening_new_pair and target_progress >= instance.strategy.target_volume_quote:
                 raise UnsafeOperation("volume target has already been reached")
             if (
                 opening_new_pair
@@ -270,6 +315,9 @@ class FleetControlService:
                 "cycle": instance.cycle.model_copy(update={"next_action_at": next_action}),
                 "strategy_progress": progress,
                 "funding_preflight": funding,
+                "runtime": instance.runtime.model_copy(update={"last_stop_verified_at_ms": None})
+                if action is InstanceAction.START
+                else instance.runtime,
                 "updated_at": "刚刚",
                 "unread_logs": instance.unread_logs + 1,
             },
@@ -278,6 +326,50 @@ class FleetControlService:
         self.repository.replace(updated)
         action_label = {InstanceAction.START: "启动", InstanceAction.PAUSE: "暂停", InstanceAction.STOP: "停止"}[action]
         self._append_log(instance_id, LogLevel.INFO, f"实例操作已接受：{action_label}")
+        return updated
+
+    def project_bound_strategy_execution(
+        self,
+        instance_id: str,
+        campaign_status: str,
+        reason: str | None = None,
+    ) -> AccountInstance:
+        """Project executor-owned Live state without reusing the Mock action state machine."""
+        instance = self.get_instance(instance_id)
+        if instance.mode.value != "live":
+            return instance
+        status_map = {
+            "executing": InstanceStatus.RUNNING,
+            "stopping": InstanceStatus.PAUSED,
+            "completed": InstanceStatus.STOPPED,
+            "stopped": InstanceStatus.STOPPED,
+            "uncertain": InstanceStatus.WARNING,
+        }
+        projected = status_map.get(campaign_status)
+        if projected is None:
+            return instance
+        phase_map = {
+            "executing": "已绑定策略实盘执行中",
+            "stopping": "已绑定策略安全停止中；等待撤单与成交核验",
+            "completed": "已绑定策略本次授权完成；请核验成交账本",
+            "stopped": "已绑定策略已安全停止",
+            "uncertain": "已绑定策略结果待人工对账",
+        }
+        phase = phase_map[campaign_status]
+        if reason:
+            phase = f"{phase} ({reason[:64]})"
+        if instance.status is projected and instance.phase == phase:
+            return instance
+        updated = instance.model_copy(
+            update={
+                "status": projected,
+                "phase": phase,
+                "cycle": instance.cycle.model_copy(update={"next_action_at": None}),
+                "updated_at": "刚刚",
+            },
+            deep=True,
+        )
+        self.repository.replace(updated)
         return updated
 
     def pause_for_beta(self, instance_id: str, reason_code: str) -> AccountInstance:
@@ -470,10 +562,20 @@ class FleetControlService:
         *,
         canceled_count: int,
         reason: str,
+        marks_stop_verified: bool = False,
     ) -> AccountInstance:
         instance = self.get_instance(instance_id)
+        verified_at_ms = time.time_ns() // 1_000_000
         updated = instance.model_copy(
-            update={"updated_at": "刚刚", "unread_logs": instance.unread_logs + 1},
+            update={
+                "runtime": instance.runtime.model_copy(
+                    update={"last_stop_verified_at_ms": verified_at_ms}
+                    if marks_stop_verified
+                    else {}
+                ),
+                "updated_at": "刚刚",
+                "unread_logs": instance.unread_logs + 1,
+            },
             deep=True,
         )
         self.repository.replace(updated)
@@ -498,6 +600,7 @@ class FleetControlService:
                     update={
                         "consecutive_failures": instance.runtime.consecutive_failures + 1,
                         "last_error_type": "OrderCancellationUnverified",
+                        "last_stop_verified_at_ms": None,
                     }
                 ),
                 "updated_at": "刚刚",
@@ -529,8 +632,12 @@ class FleetControlService:
 
     def update_instance(self, instance_id: str, request: UpdateInstanceRequest) -> AccountInstance:
         instance = self.get_instance(instance_id)
-        if instance.status is not InstanceStatus.STOPPED:
+        if instance.status not in {InstanceStatus.STOPPED, InstanceStatus.ERROR}:
             raise UnsafeOperation("stop the instance before changing account configuration")
+        if instance.status is InstanceStatus.ERROR:
+            recovery_fields = {"name", "account_tag", "credentials", "proxy"}
+            if not request.model_fields_set <= recovery_fields:
+                raise UnsafeOperation("error instances only allow account credentials and proxy recovery")
         if instance.strategy_progress.stage is StrategyStage.HOLDING:
             raise UnsafeOperation("resume and close the active mock pair before changing configuration")
 
@@ -549,29 +656,36 @@ class FleetControlService:
         api_key_tail = instance.api_key_tail
         proxy_snapshot = instance.proxy
         if credentials is not None or proxy is not None:
+            normalized_proxy: str | None = None
+            if proxy is not None:
+                host = "不使用代理"
+                if proxy.type is not ProxyType.NONE:
+                    assert proxy.url is not None
+                    try:
+                        host = proxy_host(proxy.type, proxy.url.get_secret_value())
+                        normalized_proxy = normalize_proxy_url(proxy.type, proxy.url.get_secret_value())
+                    except ProxyValidationError as exc:
+                        raise ValidationFailed(str(exc)) from exc
+                proxy_snapshot = ProxySnapshot(type=proxy.type, host=host)
             if current_material is None:
                 assert credentials is not None and proxy is not None
                 current_material = CredentialMaterial(
                     api_key=credentials.api_key,
                     api_secret=credentials.api_secret,
                     passphrase=credentials.passphrase,
-                    proxy_url=proxy.url,
+                    proxy_url=SecretStr(normalized_proxy) if normalized_proxy is not None else None,
                 )
             if credentials is not None:
                 api_key = credentials.api_key.get_secret_value()
                 api_key_tail = api_key[-4:].upper().rjust(4, "-")
-            if proxy is not None:
-                try:
-                    host = proxy_host(proxy.type, proxy.url.get_secret_value())
-                except ProxyValidationError as exc:
-                    raise ValidationFailed(str(exc)) from exc
-                proxy_snapshot = ProxySnapshot(type=proxy.type, host=host)
 
             next_material = CredentialMaterial(
                 api_key=credentials.api_key if credentials else current_material.api_key,
                 api_secret=credentials.api_secret if credentials else current_material.api_secret,
                 passphrase=credentials.passphrase if credentials else current_material.passphrase,
-                proxy_url=proxy.url if proxy else current_material.proxy_url,
+                proxy_url=(
+                    SecretStr(normalized_proxy) if normalized_proxy is not None else None
+                ) if proxy is not None else current_material.proxy_url,
             )
 
         name = request.name.strip() if request.name is not None else instance.name
@@ -683,7 +797,7 @@ class FleetControlService:
         protected_error = (
             instance.status is InstanceStatus.ERROR and instance.strategy_progress.system_pause_reason is not None
         )
-        recovered = instance.status is InstanceStatus.ERROR and not protected_error
+        recovered = instance.status in {InstanceStatus.ERROR, InstanceStatus.WARNING} and not protected_error
         status = InstanceStatus.STOPPED if recovered else instance.status
         phase = instance.phase if protected_error else "连接已恢复，等待人工启动" if recovered else telemetry.phase
         log_count = int(telemetry.activity_log is not None) + int(recovered)
@@ -854,11 +968,33 @@ class FleetControlService:
     ) -> AccountInstance:
         instance = self.get_instance(instance_id)
         failed_at_ms = poll_failed_at_ms or time.time_ns() // 1_000_000
-        phase = f"数据同步失败 ({failure_type})"
-        should_log = instance.status is not InstanceStatus.ERROR or instance.phase != phase
+        legacy_telemetry_error = (
+            instance.status is InstanceStatus.ERROR
+            and instance.strategy_progress.system_pause_reason is None
+            and instance.phase.startswith("数据同步失败 (")
+        )
+        if instance.status is InstanceStatus.STOPPED or legacy_telemetry_error:
+            status = InstanceStatus.STOPPED
+            phase = f"已停止；数据待核验 ({failure_type})"
+        elif instance.status is InstanceStatus.PAUSED:
+            status = InstanceStatus.PAUSED
+            phase = f"已暂停；数据待核验 ({failure_type})"
+        elif instance.status in {InstanceStatus.RUNNING, InstanceStatus.WARNING}:
+            status = InstanceStatus.WARNING
+            phase = f"运行已安全暂停；数据待核验 ({failure_type})"
+        else:
+            # Protected execution/cancellation errors must never be downgraded
+            # by a later read-only telemetry failure.
+            status = InstanceStatus.ERROR
+            phase = instance.phase
+        should_log = (
+            instance.status is not status
+            or instance.phase != phase
+            or instance.runtime.last_error_type != failure_type
+        )
         updated = instance.model_copy(
             update={
-                "status": InstanceStatus.ERROR,
+                "status": status,
                 "phase": phase,
                 "proxy": instance.proxy.model_copy(update={"status": ProxyStatus.DEGRADED}),
                 "cycle": instance.cycle.model_copy(update={"next_action_at": None}),
@@ -945,6 +1081,36 @@ class FleetControlService:
             self.repository.replace(instance.model_copy(update={"unread_logs": 0}, deep=True))
         return lines
 
+    def record_refresh_success(self, instance_id: str) -> AccountInstance:
+        """Record an explicit user-triggered refresh without logging background polls."""
+        instance = self.get_instance(instance_id)
+        updated = instance.model_copy(
+            update={"unread_logs": instance.unread_logs + 1},
+            deep=True,
+        )
+        self.repository.replace(updated)
+        self._append_log(instance_id, LogLevel.SUCCESS, "刷新成功：价格、钱包与仓位已同步")
+        return updated
+
+    def record_campaign_progress(self, instance_id: str, event: Mapping[str, object]) -> None:
+        """Project a safe, durable Campaign event into the account log stream.
+
+        The worker has already persisted the event before calling here.  This is
+        strictly an observability projection and cannot alter execution state.
+        """
+        self.get_instance(instance_id)
+        rendered = campaign_event_log(event)
+        if rendered is None:
+            return
+        level, message = rendered
+        self._append_log(instance_id, level, message)
+
+    def clear_logs(self, instance_id: str) -> None:
+        instance = self.get_instance(instance_id)
+        self.repository.clear_logs(instance_id)
+        if instance.unread_logs:
+            self.repository.replace(instance.model_copy(update={"unread_logs": 0}, deep=True))
+
     def log_updates(self, instance_id: str, limit: int, after: str | None) -> LogBatch:
         instance = self.get_instance(instance_id)
         window = self.repository.read_logs(instance_id, 500)
@@ -960,7 +1126,7 @@ class FleetControlService:
                 lines = window[cursor_index + 1 : cursor_index + 1 + limit]
         if instance.unread_logs:
             self.repository.replace(instance.model_copy(update={"unread_logs": 0}, deep=True))
-        cursor = lines[-1].id if lines else after
+        cursor = lines[-1].id if lines else (None if reset else after)
         return LogBatch(lines=lines, cursor=cursor, reset=reset)
 
     @staticmethod
@@ -1004,18 +1170,23 @@ class FleetControlService:
             self.repository.create_strategy(default_volume_strategy())
 
     def _default_strategy(self) -> VolumeStrategy:
-        strategy = self.repository.get_strategy("strategy-default")
+        owner = current_owner_user_id() or LEGACY_OWNER_USER_ID
+        strategy_id = "strategy-default" if owner == LEGACY_OWNER_USER_ID else f"strategy-default-{owner}"
+        strategy = self.repository.get_strategy(strategy_id)
         if strategy is not None:
             return strategy
         strategies = self.repository.list_strategies()
         if strategies:
             return strategies[0]
-        return self.repository.create_strategy(default_volume_strategy())
+        return self.repository.create_strategy(
+            default_volume_strategy().model_copy(update={"id": strategy_id, "owner_user_id": owner})
+        )
 
     def _create_legacy_strategy(self, *, cycle_target: int, legacy_total_quote: Decimal) -> VolumeStrategy:
         round_turnover = legacy_total_quote * Decimal(2)
         strategy = VolumeStrategy(
             id=f"strategy-{uuid4().hex[:10]}",
+            owner_user_id=current_owner_user_id() or LEGACY_OWNER_USER_ID,
             name="兼容固定轮次策略",
             target_volume_quote=round_turnover * cycle_target,
             round_turnover_quote_min=round_turnover,

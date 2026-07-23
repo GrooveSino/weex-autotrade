@@ -20,6 +20,7 @@ from weex_cli.symbols import live_symbol_id
 LOGGER = logging.getLogger(__name__)
 CHINA_STANDARD_TIME = timezone(timedelta(hours=8))
 WEEX_PUBLIC_WS_URL = "wss://ws-contract.weex.com/v3/ws/public"
+DEFAULT_WEBSOCKET_STALE_AFTER_SECONDS = 30.0
 
 
 class MarketGateway(Protocol):
@@ -172,7 +173,25 @@ class WebSocketMarketCollector:
         self.clock = clock
         self.monotonic = monotonic
         self.latest_prices: dict[str, float] = {}
+        self.latest_price_at: dict[str, float] = {}
         self.ignored_ticks = 0
+
+    def reset_stream(self) -> None:
+        self.latest_prices.clear()
+        self.latest_price_at.clear()
+
+    def stale_symbols(
+        self,
+        *,
+        now: float,
+        connected_at: float,
+        stale_after_seconds: float,
+    ) -> tuple[str, ...]:
+        return tuple(
+            symbol
+            for symbol in self.symbols
+            if now - self.latest_price_at.get(symbol, connected_at) >= stale_after_seconds
+        )
 
     def subscription_message(self) -> str:
         return json.dumps(
@@ -216,6 +235,7 @@ class WebSocketMarketCollector:
             self.ignored_ticks += 1
             return
         self.latest_prices[symbol] = price
+        self.latest_price_at[symbol] = float(self.monotonic())
 
     def snapshot(self) -> CollectionResult | None:
         if any(symbol not in self.latest_prices for symbol in self.symbols):
@@ -322,6 +342,7 @@ def run_websocket_market_collector(
     poll_interval_seconds: float = 1.0,
     cleanup_interval_seconds: float = 300.0,
     log_interval_seconds: float = 60.0,
+    stale_after_seconds: float = DEFAULT_WEBSOCKET_STALE_AFTER_SECONDS,
     once: bool = False,
     stop_event: threading.Event | None = None,
 ) -> CollectorStats:
@@ -331,6 +352,8 @@ def run_websocket_market_collector(
         raise ValidationError("cleanup_interval_seconds must be greater than zero")
     if log_interval_seconds <= 0:
         raise ValidationError("log_interval_seconds must be greater than zero")
+    if stale_after_seconds <= 0:
+        raise ValidationError("stale_after_seconds must be greater than zero")
 
     stopper = stop_event or threading.Event()
     stats = CollectorStats()
@@ -384,7 +407,8 @@ def run_websocket_market_collector(
                     text("WebSocket 已连接 交易对=%s", "websocket_connected symbols=%s"),
                     ",".join(collector.symbols),
                 )
-                collector.latest_prices.clear()
+                collector.reset_stream()
+                connected_at = collector.monotonic()
                 next_sample: float | None = None
                 while not stopper.is_set():
                     now_monotonic = collector.monotonic()
@@ -397,6 +421,13 @@ def run_websocket_market_collector(
                         collector.handle_message(websocket, message)
 
                     now_monotonic = collector.monotonic()
+                    stale_symbols = collector.stale_symbols(
+                        now=now_monotonic,
+                        connected_at=connected_at,
+                        stale_after_seconds=stale_after_seconds,
+                    )
+                    if stale_symbols:
+                        raise ValidationError("WEEX ticker stream stale for " + ",".join(stale_symbols))
                     ready = all(symbol in collector.latest_prices for symbol in collector.symbols)
                     if ready and (next_sample is None or now_monotonic >= next_sample):
                         result = collector.snapshot()

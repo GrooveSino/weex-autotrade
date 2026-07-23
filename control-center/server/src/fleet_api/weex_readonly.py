@@ -81,7 +81,10 @@ def build_readonly_gateway(material: CredentialMaterial, timeout_ms: int) -> Rea
         timeout_ms=timeout_ms,
         enable_rate_limit=True,
     )
-    return WeexGateway(settings, proxy_url=material.proxy_url.get_secret_value())
+    return WeexGateway(
+        settings,
+        proxy_url=material.proxy_url.get_secret_value() if material.proxy_url is not None else None,
+    )
 
 
 class WeexLiveTradeHistorySource(TradeHistorySource):
@@ -168,6 +171,7 @@ class WeexLiveTradeHistorySource(TradeHistorySource):
             next_cursor=next_cursor,
             complete=self._coverage_complete and not self._truncated,
             high_watermark_ms=high_watermark_ms,
+            window_complete=not self._truncated,
         )
 
 
@@ -195,9 +199,11 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
         self._history_cursor: str | None = None
         self._history_scan_active = False
         self._history_scan_end_ms: int | None = None
+        self._history_scan_start_ms: int | None = None
         self._last_history_end_ms: int | None = None
         self._history_coverage_complete = False
         self._history_coverage_reason: str | None = None
+        self._last_history_failure_type: str | None = None
 
     async def collect(self, context: AccountTelemetryContext) -> AccountTelemetry:
         if context.instance.mode is not TradingMode.LIVE:
@@ -206,9 +212,9 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
             raise MissingAccountCredentials("account credentials are unavailable")
         if self._gateway is None:
             credentials = context.credentials
-            proxy_url = credentials.proxy_url.get_secret_value()
-            if "://" not in proxy_url:
-                scheme = "socks5" if context.instance.proxy.type.value == "socks5" else "https"
+            proxy_url = credentials.proxy_url.get_secret_value() if credentials.proxy_url is not None else None
+            if proxy_url is not None and "://" not in proxy_url:
+                scheme = context.instance.proxy.type.value
                 credentials = replace(credentials, proxy_url=SecretStr(f"{scheme}://{proxy_url}"))
             self._gateway = self._gateway_factory(credentials, self._request_timeout_ms)
             self._history_source = WeexLiveTradeHistorySource(self._gateway)
@@ -218,22 +224,59 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
         wallet = _wallet_snapshot(balance_rows)
         exposure = _exposure_snapshot(position_rows)
         now_ms = time.time_ns() // 1_000_000
-        history_result = await self._sync_history(context, now_ms)
+        history_result = None
+        history_failure_type: str | None = None
+        try:
+            history_result = await self._sync_history(context, now_ms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A delayed or malformed userTrades response cannot make a
+            # successfully-read wallet and positions snapshot unusable. Keep
+            # volume explicitly unverified until the incremental sync recovers.
+            history_failure_type = type(exc).__name__
+            self._ledger.refresh_sessions(
+                context.instance.id,
+                context.instance.mode.value,
+                now_ms=now_ms,
+                source_complete=False,
+                stale=True,
+            )
         latency_ms = max(0, round((time.perf_counter() - started) * 1000))
         history_scanning = self._history_scan_active
         activity_log = None
-        if history_result.fills_inserted:
+        if history_result is not None and history_result.fills_inserted:
             activity_log = (
                 f"只读成交历史已同步 {history_result.fills_inserted} 笔；"
                 f"历史完整：{'是' if history_result.aggregate.complete else '否'}"
             )
+        if history_failure_type is not None:
+            if self._last_history_failure_type != history_failure_type:
+                activity_log = f"成交历史同步待核验：{history_failure_type}；钱包与仓位数据仍已更新"
+            self._last_history_failure_type = history_failure_type
+        elif self._last_history_failure_type is not None:
+            self._last_history_failure_type = None
+            activity_log = "成交历史同步已恢复"
+
+        aggregate = self._ledger.aggregate(
+            context.instance.id,
+            shanghai_day_start_ms(now_ms),
+        )
+        volume_complete = aggregate.complete and history_failure_type is None
+        phase = (
+            f"WEEX 钱包与仓位已同步；成交历史待核验 ({history_failure_type})"
+            if history_failure_type is not None
+            else "WEEX 只读遥测已同步 / 历史扫描中"
+            if history_scanning
+            else self._history_coverage_reason or "WEEX 只读遥测已同步"
+        )
 
         return AccountTelemetry(
             wallet=wallet,
             volume=VolumeSnapshot(
-                lifetime=_finite_float(history_result.aggregate.lifetime, "lifetime volume"),
-                today=_finite_float(history_result.aggregate.today, "today volume"),
-                complete=history_result.aggregate.complete,
+                lifetime=_finite_float(aggregate.lifetime, "lifetime volume"),
+                today=_finite_float(aggregate.today, "today volume"),
+                complete=volume_complete,
                 session=self._ledger.latest_session(context.instance.id, context.instance.mode.value),
             ),
             exposure=exposure,
@@ -241,11 +284,7 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
             proxy_status=ProxyStatus.HEALTHY,
             proxy_latency_ms=latency_ms,
             proxy_location="WEEX / account-bound",
-            phase=(
-                "WEEX 只读遥测已同步 / 历史扫描中"
-                if history_scanning
-                else self._history_coverage_reason or "WEEX 只读遥测已同步"
-            ),
+            phase=phase,
             activity_log=activity_log,
         )
 
@@ -274,6 +313,7 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
             TradeHistoryContext(context.instance, context.credentials),
             source,
             today_start_ms=start_ms,
+            coverage_start_ms=start_ms,
         )
         fills = temporary.fills_for_account(context.instance.id, context.instance.mode.value, start_ms)
         complete = result.stop_reason == "history_exhausted" and result.aggregate.complete
@@ -317,6 +357,7 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
             self._history_source.begin(start_ms, now_ms, coverage_complete=coverage_complete)
             self._history_cursor = None
             self._history_scan_active = True
+            self._history_scan_start_ms = start_ms
             self._history_scan_end_ms = now_ms
 
         result = await self._history_synchronizer.sync(
@@ -325,12 +366,14 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
             self._history_source,
             today_start_ms=shanghai_day_start_ms(now_ms),
             cursor=self._history_cursor,
+            coverage_start_ms=self._history_scan_start_ms,
         )
         self._history_cursor = result.next_cursor
         if result.next_cursor is None:
             self._history_scan_active = False
             self._last_history_end_ms = self._history_scan_end_ms
             self._history_scan_end_ms = None
+            self._history_scan_start_ms = None
         return result
 
 
@@ -339,7 +382,7 @@ class WeexReadonlyAccountTelemetryAdapterFactory:
         self,
         ledger: TradeVolumeLedger,
         *,
-        request_timeout_ms: int = 5_000,
+        request_timeout_ms: int = 15_000,
         history_lookback_days: int = 365,
         history_pages_per_poll: int = 1,
         gateway_factory: GatewayFactory = build_readonly_gateway,

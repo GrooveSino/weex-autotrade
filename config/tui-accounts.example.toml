@@ -1,0 +1,43 @@
+# 复制到 config/tui-accounts.toml 后填写。目标文件包含明文凭据，权限必须设置为 0600。
+schema_version = 1
+
+[safety]
+# 允许 TUI 在精确确认且 WEEX_LIVE_TRADING_ENABLED=true 时执行实盘写操作。
+allow_live_mutations = true
+# 必须保持 true；程序只允许 POST_ONLY Maker 订单。
+post_only_only = true
+
+[beta]
+# 私有 Beta 数据接口。真实地址只写在被 Git 忽略的 config/tui-accounts.toml 中。
+# 必须填写完整的 http:// 或 https:// 地址；模板和仓库不会保存私人部署地址。
+url = ""
+
+[defaults]
+# 大多数账户共用的 API Passphrase。某个账户不同时，可在它自己的 [[accounts]] 中覆盖。
+passphrase = ""
+
+[[accounts]]
+# 唯一账户名称；这就是账户的唯一标识，支持中文，不需要再填写 id。改名会被视为另一个新账户。
+name = "账号 01"
+# false 时账户显示为禁用，不能进入。
+enabled = true
+# WEEX 实盘 API 凭据；API Key 建议绑定代理出口 IP 且不开启提现权限。
+api_key = ""
+api_secret = ""
+# 支持 http、https、socks5。
+proxy_scheme = "http"
+# Webshare 格式：host:port:username:password。
+proxy = "82.21.23.245:6009:username:password"
+
+# 添加更多账户时，复制整个 [[accounts]] 区块并填写另一个唯一名称：
+#
+# [[accounts]]
+# name = "账号 02"
+# enabled = true
+# api_key = ""
+# api_secret = ""
+# proxy_scheme = "http"
+# proxy = "46.203.42.82:8082:username:password"
+#
+# 如果这个账户使用不同的 Passphrase，再单独添加：
+# passphrase = "该账户自己的 passphrase"

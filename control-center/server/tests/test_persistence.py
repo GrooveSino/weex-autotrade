@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -82,6 +84,101 @@ def test_account_and_encrypted_credentials_survive_restart_without_plaintext_on_
         assert material.api_secret.get_secret_value() == "persistent-secret-never-plaintext"
 
 
+def test_legacy_embedded_session_target_is_upgraded_before_repository_validation(tmp_path: Path) -> None:
+    path = tmp_path / "fleet.db"
+    key = Fernet.generate_key().decode()
+    first = create_app(settings(path, key))
+    with TestClient(first) as api:
+        instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute("SELECT payload FROM instances WHERE id = ?", (instance_id,)).fetchone()
+        assert row is not None
+        payload = json.loads(str(row[0]))
+        payload["volume"]["session"] = {
+            "sessionId": "legacy-session",
+            "accountId": instance_id,
+            "mode": "demo",
+            "startedAtMs": 1_000,
+            "targetQuoteVolume": "500",
+            "verifiedQuoteVolume": "500",
+            "remainingQuoteVolume": "0",
+            "status": "completed",
+            "fillCount": 2,
+            "openingQuoteVolume": "250",
+            "closingQuoteVolume": "250",
+            "makerQuoteVolume": "500",
+            "takerQuoteVolume": "0",
+            "unknownLiquidityQuoteVolume": "0",
+            "lastSyncAtMs": 2_000,
+            "lastReconciliationAtMs": 2_000,
+            "sourceComplete": True,
+            "stale": False,
+            "reconciliationRequired": False,
+            "discrepancyQuoteVolume": "0",
+            "retryAllowed": False,
+        }
+        connection.execute(
+            "UPDATE instances SET payload = ? WHERE id = ?",
+            (json.dumps(payload), instance_id),
+        )
+
+    second = create_app(settings(path, key))
+    with TestClient(second):
+        restored = second.state.fleet_repository.get(instance_id)
+        assert restored is not None
+        assert restored.volume.session is not None
+        assert restored.volume.session.strategy_target_quote_volume == Decimal("500")
+
+
+def test_null_legacy_embedded_session_target_is_upgraded_before_repository_validation(tmp_path: Path) -> None:
+    path = tmp_path / "fleet.db"
+    key = Fernet.generate_key().decode()
+    first = create_app(settings(path, key))
+    with TestClient(first) as api:
+        instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute("SELECT payload FROM instances WHERE id = ?", (instance_id,)).fetchone()
+        assert row is not None
+        payload = json.loads(str(row[0]))
+        payload["volume"]["session"] = {
+            "sessionId": "legacy-null-session",
+            "accountId": instance_id,
+            "mode": "demo",
+            "startedAtMs": 1_000,
+            "strategyTargetQuoteVolume": None,
+            "targetQuoteVolume": "125",
+            "verifiedQuoteVolume": "0",
+            "remainingQuoteVolume": "125",
+            "status": "active",
+            "fillCount": 0,
+            "openingQuoteVolume": "0",
+            "closingQuoteVolume": "0",
+            "makerQuoteVolume": "0",
+            "takerQuoteVolume": "0",
+            "unknownLiquidityQuoteVolume": "0",
+            "lastSyncAtMs": None,
+            "lastReconciliationAtMs": None,
+            "sourceComplete": False,
+            "stale": True,
+            "reconciliationRequired": False,
+            "discrepancyQuoteVolume": "0",
+            "retryAllowed": False,
+        }
+        connection.execute(
+            "UPDATE instances SET payload = ? WHERE id = ?",
+            (json.dumps(payload), instance_id),
+        )
+
+    second = create_app(settings(path, key))
+    with TestClient(second):
+        restored = second.state.fleet_repository.get(instance_id)
+        assert restored is not None
+        assert restored.volume.session is not None
+        assert restored.volume.session.strategy_target_quote_volume == Decimal("125")
+
+
 def test_wrong_master_key_cannot_decrypt_stored_credentials(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
     first_key = Fernet.generate_key().decode()
@@ -98,6 +195,21 @@ def test_wrong_master_key_cannot_decrypt_stored_credentials(tmp_path: Path) -> N
 
     with pytest.raises(CredentialVaultError, match="cannot be decrypted"):
         create_app(settings(path, Fernet.generate_key().decode()))
+
+
+def test_cleared_logs_remain_empty_after_sqlite_restart(tmp_path: Path) -> None:
+    path = tmp_path / "fleet.db"
+    key = Fernet.generate_key().decode()
+    first = create_app(settings(path, key))
+    with TestClient(first) as api:
+        instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
+        assert api.get(f"/api/v1/instances/{instance_id}/logs").json()
+        assert api.delete(f"/api/v1/instances/{instance_id}/log-updates").status_code == 204
+        assert api.get(f"/api/v1/instances/{instance_id}/logs").json() == []
+
+    second = create_app(settings(path, key))
+    with TestClient(second) as api:
+        assert api.get(f"/api/v1/instances/{instance_id}/logs").json() == []
 
 
 def test_persisted_running_instance_requires_manual_restart_after_process_restart(tmp_path: Path) -> None:

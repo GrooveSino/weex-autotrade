@@ -251,6 +251,16 @@ class ImmediateVenue:
         self.time += milliseconds
 
 
+class SafeStopVenue(ImmediateVenue):
+    def __init__(self, symbol: str, position_side: str) -> None:
+        super().__init__(symbol, position_side)
+        self.cancel_all_calls = 0
+
+    def cancel_all_and_verify(self) -> bool:
+        self.cancel_all_calls += 1
+        return True
+
+
 class OneShotPositionTimeoutVenue(ImmediateVenue):
     def __init__(self, symbol: str, position_side: str) -> None:
         super().__init__(symbol, position_side)
@@ -1051,6 +1061,59 @@ def test_hold_and_round_gap_follow_confirmed_open_and_flat_boundaries(
         index for index, row in enumerate(timeline) if row["event"] == "cycle_started" and row.get("round") == 2
     )
     assert first_gap_completed < second_cycle_started
+
+
+def test_stop_during_hold_cancels_both_lanes_then_maker_flattens_before_stopping(
+    tmp_path,
+    allocation: BetaAllocation,
+) -> None:
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="400",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    store.save(plan)
+    venues: dict[str, SafeStopVenue] = {}
+    stop = threading.Event()
+    events: list[dict[str, object]] = []
+
+    def venue_factory(unused_gateway: Gateway, symbol: str, position_side: str) -> SafeStopVenue:
+        venues.setdefault(symbol, SafeStopVenue(symbol, position_side))
+        return venues[symbol]
+
+    def event_sink(event: dict[str, object]) -> None:
+        events.append(dict(event))
+        if event.get("event") == "hold_started":
+            stop.set()
+
+    result = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=venue_factory,  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        reconciler_factory=lambda unused_gateway: DeterministicReconciler(),
+        now_ms=lambda: 1000,
+        sleep=lambda seconds: None,
+        hold_delay_seconds=lambda round_number: 30,
+        stop_requested=stop.is_set,
+        event_sink=event_sink,  # type: ignore[arg-type]
+    ).execute(plan)
+
+    assert result["status"] == "stopped"
+    assert result["reason"] == "safe_stop_flattened"
+    assert venues["BTC"].cancel_all_calls == 1
+    assert venues["ETH"].cancel_all_calls == 1
+    assert venues["BTC"].position == 0
+    assert venues["ETH"].position == 0
+    assert any(event["event"] == "safe_stop_started" for event in events)
+    assert any(event["event"] == "safe_stop_verified" for event in events)
 
 
 def test_close_barrier_retries_transient_position_timeout_and_still_flattens(

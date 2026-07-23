@@ -1,0 +1,266 @@
+import { useEffect, useRef, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Copy, LoaderCircle, Play, ShieldCheck, Square, X } from 'lucide-react'
+import type { AccountInstance, BetaCampaign, BetaCampaignPreview } from '../types'
+import {
+  executeBoundStrategyExecution,
+  listBoundStrategyExecutions,
+  previewBoundStrategyExecution,
+  reconcileBoundStrategyExecution,
+  stopBoundStrategyExecution,
+} from '../services/controlCenter'
+
+interface BoundStrategyExecutionDialogProps {
+  account: AccountInstance
+  queuePosition: number
+  queueLength: number
+  enabled: boolean
+  onClose: () => void
+  onChanged: (execution: BetaCampaign) => void
+  onStarted: (execution: BetaCampaign) => void
+  onToast: (message: string) => void
+}
+
+const quote = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const statusLabel: Record<BetaCampaign['status'], string> = {
+  planned: '待精确确认',
+  executing: '执行中',
+  stopping: '安全停止中',
+  completed: '已完成',
+  stopped: '已安全停止',
+  uncertain: '待人工对账',
+}
+
+function copy(value: string, onToast: (message: string) => void) {
+  void navigator.clipboard?.writeText(value).then(
+    () => onToast('已复制精确确认短语'),
+    () => onToast('浏览器未允许复制，请手动选择短语'),
+  )
+}
+
+function launchErrorMessage(reason: unknown, fallback: string): string {
+  const message = reason instanceof Error ? reason.message : fallback
+  if (message.startsWith('final beta source unavailable:')) {
+    return 'Final Beta 来源当前不可用，无法安全生成启动确认。请在顶部 Final Beta 旁检查来源设置，待数据恢复后重新获取确认；本次不会提交订单。'
+  }
+  return message
+}
+
+export function BoundStrategyExecutionDialog({ account, queuePosition, queueLength, enabled, onClose, onChanged, onStarted, onToast }: BoundStrategyExecutionDialogProps) {
+  const [execution, setExecution] = useState<BetaCampaign | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const autoPreviewedAccountId = useRef<string | null>(null)
+
+  const update = (next: BetaCampaign) => {
+    setExecution(next)
+    setConfirmation('')
+    onChanged(next)
+  }
+
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        const items = await listBoundStrategyExecutions(account)
+        if (!active) return
+        const latest = items.find((item) => ['planned', 'executing', 'stopping', 'uncertain'].includes(item.status)) ?? null
+        if (latest) {
+          setExecution(latest)
+          return
+        }
+        if (!enabled || autoPreviewedAccountId.current === account.id) return
+
+        // Opening the launch dialog is an explicit start intent. Fetch the
+        // read-only preflight automatically so the only user step left is the
+        // exact confirmation that actually authorizes a live submission.
+        autoPreviewedAccountId.current = account.id
+        setBusy(true)
+        const preview = await previewBoundStrategyExecution(account)
+        if (!active) return
+        update(preview)
+      } catch (reason) {
+        if (active) setError(launchErrorMessage(reason, '无法读取启动确认'))
+      } finally {
+        if (active) {
+          setBusy(false)
+          setLoading(false)
+        }
+      }
+    }
+    void load()
+    return () => { active = false }
+  }, [account, enabled, onChanged])
+
+  const preview = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      update(await previewBoundStrategyExecution(account))
+    } catch (reason) {
+      setError(launchErrorMessage(reason, '预览失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const execute = async () => {
+    if (!execution) return
+    setBusy(true)
+    setError(null)
+    try {
+      const started = await executeBoundStrategyExecution(
+        account,
+        execution.campaignId,
+        confirmation,
+        riskAcknowledged,
+      )
+      update(started)
+      onToast(`${account.name} 的已绑定策略已提交执行；不会自动重试任何订单命令`)
+      if (started.status === 'executing') onStarted(started)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '启动失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const stop = async () => {
+    if (!execution) return
+    setBusy(true)
+    setError(null)
+    try {
+      update(await stopBoundStrategyExecution(account, execution, confirmation))
+      onToast(`${account.name} 正在安全停止；撤单、仓位和成交将继续核验`)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '安全停止请求失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reconcile = async () => {
+    if (!execution) return
+    setBusy(true)
+    setError(null)
+    try {
+      update(await reconcileBoundStrategyExecution(account, execution, confirmation))
+      onToast('已完成一次人工对账请求')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '对账失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const plan = execution as (BetaCampaignPreview | null)
+  const canExecute = execution?.status === 'planned' && riskAcknowledged && confirmation === execution.confirmation && enabled
+  const canStop = execution?.status === 'executing' && confirmation === execution.stopConfirmation
+  const reconcilePhrase = execution?.reconciliationConfirmation
+  const canReconcile = execution?.status === 'uncertain' && Boolean(reconcilePhrase) && confirmation === reconcilePhrase
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="dialog beta-campaign-dialog bound-strategy-execution-dialog" role="dialog" aria-modal="true" aria-labelledby="bound-execution-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="dialog-header">
+          <div>
+            <h2 id="bound-execution-title">启动已绑定策略</h2>
+            <span>实盘账号 · {account.name}{queueLength > 1 ? ` · 队列 ${queuePosition + 1}/${queueLength}` : ''}</span>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} data-tooltip="关闭" aria-label="关闭"><X size={16} /></button>
+        </header>
+
+        <div className="beta-campaign-body">
+          <div className="beta-campaign-summary">
+            <div className="beta-campaign-summary-primary">
+              <span>已绑定共享策略</span>
+              <strong>{execution?.strategyName ?? account.strategy.name}<small>v{execution?.strategyVersion ?? account.strategy.version}</small></strong>
+            </div>
+            <div>
+              <span>{execution?.targetMode === 'lifetime' || account.strategy.targetMode === 'lifetime' ? '本次执行差额' : '本次新增目标'}</span>
+              <strong>{quote.format(Number(execution?.executionTargetQuoteVolume ?? execution?.targetQuote ?? account.strategy.targetVolumeQuote))}<small>USDT</small></strong>
+            </div>
+            <div>
+              <span>每轮总交易量</span>
+              <strong>{quote.format(Number(execution?.roundTurnoverQuoteMin ?? account.strategy.roundTurnoverQuoteMin))} - {quote.format(Number(execution?.cycleVolume ?? account.strategy.roundTurnoverQuoteMax))}<small>USDT</small></strong>
+            </div>
+            <div>
+              <span>持仓时间</span>
+              <strong>{execution ? `${execution.holdMinSeconds}-${execution.holdMaxSeconds}s` : `${account.strategy.positionHoldMinSeconds}-${account.strategy.positionHoldMaxSeconds}s`}</strong>
+            </div>
+            <div>
+              <span>轮次间隔</span>
+              <strong>{execution ? `${execution.roundGapMinSeconds}-${execution.roundGapMaxSeconds}s` : `${account.strategy.roundIntervalMinSeconds}-${account.strategy.roundIntervalMaxSeconds}s`}</strong>
+            </div>
+          </div>
+
+          {!enabled && <div className="execution-warning"><AlertTriangle size={16} /><p>执行器不可用或实盘门禁未启用。不会把普通策略启动当作实盘交易。</p></div>}
+          {error && <div className="execution-warning"><AlertTriangle size={16} /><p>{error}</p></div>}
+
+          {loading || busy && !execution ? <div className="execution-state"><LoaderCircle className="spin" size={16} />{busy ? '正在生成启动确认' : '正在读取该账号的执行状态'}</div> : !execution ? (
+            <div className="bound-strategy-empty-actions">
+              <p>启动确认尚未生成。重新读取时不会提交订单。</p>
+              <button className="button primary" type="button" disabled={busy || !enabled} onClick={() => void preview()}><Play size={15} />重新获取确认</button>
+            </div>
+          ) : (
+            <>
+              <div className="bound-execution-stage">
+                <div>
+                  <span>实时预检</span>
+                  <strong>{execution.status === 'planned' ? '启动条件已生成，等待最后确认' : statusLabel[execution.status]}</strong>
+                </div>
+                <div className={`execution-status ${execution.status}`}><ShieldCheck size={13} />{statusLabel[execution.status]}</div>
+              </div>
+              <div className="beta-campaign-summary">
+                <div><span>Final Beta</span><strong>{Number(execution.beta).toFixed(6)}</strong></div>
+                <div><span>可用余额</span><strong>{execution.availableQuote === null ? '--' : quote.format(Number(execution.availableQuote))}<small>{execution.availableQuote === null ? '' : 'USDT'}</small></strong></div>
+                <div><span>目标口径</span><strong>{execution.targetMode === 'lifetime' ? '累计达到' : '每次新增'}</strong></div>
+                <div><span>已核验成交</span><strong>{quote.format(Number(account.volume.activeSession?.verifiedQuoteVolume ?? 0))}<small>USDT</small></strong></div>
+                <div><span>数据状态</span><strong>{account.volume.activeSession?.stale || account.volume.activeSession?.reconciliationRequired ? '待核验' : '已核验'}</strong></div>
+              </div>
+              {execution.status === 'planned' && <section className="bound-start-confirmation">
+                <div className="bound-confirmation-heading">
+                  <div>
+                    <span>最后确认</span>
+                    <strong>粘贴确认短语后即可提交启动</strong>
+                  </div>
+                </div>
+                <label className="bound-risk-check">
+                  <input type="checkbox" checked={riskAcknowledged} onChange={(event) => setRiskAcknowledged(event.target.checked)} />
+                  <span>我理解这会在实盘提交 BTC 多、ETH 空的 POST_ONLY 订单。<small>网络不确定时不会自动补单或重试。</small></span>
+                </label>
+                <div className="bound-phrase-panel">
+                  <div className="bound-phrase-heading">
+                    <div><span>精确确认短语</span><small>复制后完整粘贴</small></div>
+                    <button className="icon-button compact" type="button" onClick={() => copy(execution.confirmation, onToast)} data-tooltip="复制确认短语" aria-label="复制确认短语"><Copy size={13} /></button>
+                  </div>
+                  <code className="confirmation-phrase">{execution.confirmation}</code>
+                  <input className="confirm-input" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="粘贴完整确认短语" autoComplete="off" />
+                </div>
+              </section>}
+              {execution.status === 'executing' && <>
+                <label className="confirm-label">安全停止确认<button className="icon-button compact" type="button" onClick={() => copy(execution.stopConfirmation, onToast)} data-tooltip="复制停止短语" aria-label="复制停止短语"><Copy size={13} /></button></label>
+                <code className="confirmation-phrase">{execution.stopConfirmation}</code>
+                <input className="confirm-input" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="粘贴完整停止短语" autoComplete="off" />
+              </>}
+              {execution.status === 'uncertain' && reconcilePhrase && <>
+                <div className="execution-warning"><AlertTriangle size={16} /><p>执行结果不确定。先核验交易所仓位、订单与成交，再提交人工对账；页面不会重试、补单或平仓。</p></div>
+                <code className="confirmation-phrase">{reconcilePhrase}</code>
+                <input className="confirm-input" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="粘贴人工对账短语" autoComplete="off" />
+              </>}
+              {(plan?.warnings?.length ?? 0) > 0 && <p className="reason-code">{plan?.warnings.join(' · ')}</p>}
+              <footer className="dialog-actions">
+                <button className="button secondary" type="button" onClick={onClose}>关闭</button>
+                {execution.status === 'planned' && <button className="button primary" type="button" disabled={busy || !canExecute} onClick={() => void execute()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}确认并启动</button>}
+                {execution.status === 'executing' && <button className="button danger" type="button" disabled={busy || !canStop} onClick={() => void stop()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Square size={14} />}安全停止</button>}
+                {execution.status === 'uncertain' && <button className="button primary" type="button" disabled={busy || !canReconcile} onClick={() => void reconcile()}>{busy ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}人工对账</button>}
+              </footer>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}

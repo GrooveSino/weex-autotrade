@@ -22,12 +22,18 @@ class ControlPlaneSettings:
     seed_demo_data: bool = True
     cors_origins: tuple[str, ...] = ("http://127.0.0.1:4173", "http://localhost:4173")
     mock_tick_interval_seconds: float = 2.4
-    weex_poll_interval_seconds: float = 15
-    weex_request_timeout_ms: int = 5_000
+    weex_poll_interval_seconds: float = 30
+    # Match the CLI's conservative live-read timeout. Five seconds is too
+    # short for account-scoped WebShare proxies and turned transient latency
+    # into a persistent degraded state.
+    weex_request_timeout_ms: int = 15_000
     weex_history_lookback_days: int = 365
     weex_history_pages_per_poll: int = 1
     max_parallel_polls: int = 12
-    account_poll_timeout_seconds: float = 10
+    # Wallet, positions, and one bounded history page are independent private
+    # reads. Leave room for their request timeouts without cancelling a valid
+    # snapshot halfway through.
+    account_poll_timeout_seconds: float = 50
     mock_cycle_total_quote: Decimal = Decimal("20")
     beta_ratio_url: str = "http://127.0.0.1:5888/api/v1/hedge-ratio"
     beta_ratio_timeout_seconds: float = 3
@@ -37,6 +43,12 @@ class ControlPlaneSettings:
     live_trading_enabled: bool = False
     live_campaign_worker_count: int = 1
     campaign_data_directory: Path = Path("server/data/beta-campaigns")
+    executor_socket: Path = Path("run/weex-fleet-executor.sock")
+    # Local-console identity is intentionally separate from exchange
+    # credentials. It is enabled by the production launch configuration and
+    # remains opt-in for in-memory unit-test fixtures.
+    local_user_auth_required: bool = False
+    users_toml_path: Path = Path("~/Library/Application Support/WEEXFleet/users.toml")
 
     def __post_init__(self) -> None:
         if self.adapter not in {"mock", "weex-readonly", "weex-live"}:
@@ -79,6 +91,8 @@ class ControlPlaneSettings:
             raise ValueError("FLEET_BETA_RATIO_TIMEOUT_SECONDS must be greater than 0")
         if self.beta_refresh_interval_seconds <= 0:
             raise ValueError("FLEET_BETA_REFRESH_SECONDS must be greater than 0")
+        if self.local_user_auth_required and not self.users_toml_path.expanduser().is_absolute():
+            raise ValueError("FLEET_USERS_TOML must be an absolute path when local user authentication is enabled")
 
     @classmethod
     def load(cls) -> ControlPlaneSettings:
@@ -122,6 +136,13 @@ class ControlPlaneSettings:
             live_campaign_worker_count=int(os.environ.get("FLEET_LIVE_CAMPAIGN_WORKERS", "1")),
             campaign_data_directory=Path(
                 os.environ.get("FLEET_CAMPAIGN_DATA_DIR", "server/data/beta-campaigns")
+            ).expanduser(),
+            executor_socket=Path(
+                os.environ.get("FLEET_EXECUTOR_SOCKET", "run/weex-fleet-executor.sock")
+            ).expanduser(),
+            local_user_auth_required=_as_bool(os.environ.get("FLEET_LOCAL_USER_AUTH_REQUIRED", "true")),
+            users_toml_path=Path(
+                os.environ.get("FLEET_USERS_TOML", "~/Library/Application Support/WEEXFleet/users.toml")
             ).expanduser(),
         )
 

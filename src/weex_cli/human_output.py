@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from weex_cli.execution_progress import ExecutionProgressProjector, TimelinePresentation
 from weex_cli.i18n import text, translate_field, translate_message, translate_value
 
 
@@ -462,6 +463,13 @@ class _ActiveWait:
     detail: str = ""
 
 
+def _render_progress_presentation(presentation: TimelinePresentation, console: Console) -> None:
+    styles = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
+    style = styles.get(presentation.level, "cyan")
+    detail = f"  {presentation.detail}" if presentation.detail else ""
+    console.print(f"[{style}]{presentation.title}[/{style}]{detail}")
+
+
 class TerminalExecutionProgress:
     """Render concurrent execution waits as one transient, live terminal area."""
 
@@ -481,6 +489,7 @@ class TerminalExecutionProgress:
         self._lock = threading.RLock()
         self._live_lifecycle_lock = threading.Lock()
         self._waits: dict[str, _ActiveWait] = {}
+        self._projector = ExecutionProgressProjector()
         self._live = Live(
             self,
             console=console,
@@ -495,10 +504,20 @@ class TerminalExecutionProgress:
             render_execution_event(event, self.console)
             return
         with self._lock:
-            consumed = self._update_waits(event)
+            presentation = self._projector.apply(event, at_ms=int(self.monotonic() * 1000))
+            self._waits = {
+                wait.key: _ActiveWait(
+                    label=wait.label,
+                    elapsed_seconds=wait.elapsed_ms / 1000,
+                    remaining_seconds=(wait.remaining_ms / 1000 if wait.remaining_ms is not None else None),
+                    updated_at=self.monotonic(),
+                    detail=wait.detail,
+                )
+                for wait in self._projector.active_waits.values()
+            }
         self._sync_live()
-        if not consumed:
-            render_execution_event(event, self.console)
+        if presentation is not None:
+            _render_progress_presentation(presentation, self.console)
 
     def close(self) -> None:
         if not self.interactive:
@@ -506,6 +525,7 @@ class TerminalExecutionProgress:
         with self._live_lifecycle_lock:
             with self._lock:
                 self._waits.clear()
+                self._projector.active_waits.clear()
                 should_stop = self._live_started
                 self._live_started = False
             if should_stop:
@@ -561,243 +581,6 @@ class TerminalExecutionProgress:
                     self._live.update(self, refresh=True)
             elif was_started:
                 self._live.stop()
-
-    def _set_wait(
-        self,
-        key: str,
-        label: str,
-        *,
-        elapsed_seconds: float = 0.0,
-        remaining_seconds: float | None = None,
-        detail: str = "",
-    ) -> None:
-        self._waits[key] = _ActiveWait(
-            label=label,
-            elapsed_seconds=max(0.0, elapsed_seconds),
-            remaining_seconds=max(0.0, remaining_seconds) if remaining_seconds is not None else None,
-            updated_at=self.monotonic(),
-            detail=detail,
-        )
-
-    def _update_waits(self, event: Mapping[str, Any]) -> bool:
-        name = str(event.get("event") or "")
-        leg_key = self._leg_key(event)
-        if name != "campaign_read_retry":
-            self._waits.pop("campaign-read-retry", None)
-
-        if name in {"pair_waiting", "pair_wait_progress"}:
-            round_number = event.get("round")
-            action = event.get("action")
-            active = tuple(event.get("active_symbols") or event.get("symbols") or ())
-            symbols = "/".join(str(symbol) for symbol in active)
-            self._waits.pop(f"cycle-stage:{round_number}", None)
-            self._set_wait(
-                f"pair:{round_number}:{action}",
-                f"{symbols} {_display(action)} · {text('等待进入确定状态', 'Waiting for a determinate state')}",
-                elapsed_seconds=float(event.get("elapsed_ms") or 0) / 1000,
-                remaining_seconds=float(event.get("remaining_ms") or 0) / 1000,
-                detail=text(
-                    "到期后自动撤单并核验仓位",
-                    "then cancel and verify the position",
-                ),
-            )
-            return True
-
-        if name == "leg_progress":
-            progress = str(event.get("progress_event") or "")
-            if progress != "wait":
-                self._waits.pop(leg_key, None)
-                return False
-            waiting_for = str(event.get("waiting_for") or "")
-            labels = {
-                "maker_fill": text("等待 Maker 挂单成交", "Waiting for Maker fill"),
-                "cancel_confirmation": text("等待撤单最终状态", "Waiting for final cancel state"),
-                "order_observation_retry": text("等待重新读取订单状态", "Waiting to retry order read"),
-                "position_observation_retry": text("等待重新读取仓位", "Waiting to retry position read"),
-                "market_observation_retry": text("等待重新读取盘口", "Waiting to retry market read"),
-                "submission_slot": text("等待下单限频窗口", "Waiting for submission slot"),
-                "submission_preflight_retry": text("等待重新计算 Maker 报价", "Waiting to reprice Maker order"),
-                "submission_recovery": text("按客户订单号确认下单结果", "Checking submission by client ID"),
-                "submission_verification": text("重新验证下单状态", "Retrying post-submit verification"),
-                "submission_post_only_verification": text("确认订单保持 POST_ONLY", "Verifying POST_ONLY"),
-                "submission_book_check": text("重新读取下单前盘口", "Retrying pre-submit book read"),
-                "amount_precision": text("重新读取数量精度", "Retrying amount precision read"),
-                "price_precision": text("重新读取价格精度", "Retrying price precision read"),
-                "cleanup_order_observation": text("重新读取清理后的委托", "Retrying cleanup order read"),
-                "cleanup_order_clearance": text("等待清理后的委托消失", "Waiting for cleanup clearance"),
-                "precheck_positions": text("重新读取下单前仓位", "Retrying precheck position read"),
-                "precheck_open_orders": text("重新读取下单前委托", "Retrying precheck order read"),
-            }
-            detail = ""
-            if waiting_for == "maker_fill":
-                detail = (
-                    f"{text('本单成交', 'order fill')} {event.get('filled_quantity')}/{event.get('order_quantity')}"
-                )
-            self._set_wait(
-                leg_key,
-                f"{event.get('symbol')} {_display(event.get('action'))} · "
-                f"{labels.get(waiting_for, _display(waiting_for))}",
-                elapsed_seconds=float(event.get("elapsed_ms") or 0) / 1000,
-                remaining_seconds=float(event.get("remaining_ms") or 0) / 1000,
-                detail=detail,
-            )
-            return True
-
-        if name in {"leg_started", "leg_completed", "leg_stopped", "leg_uncertain"}:
-            self._waits.pop(leg_key, None)
-            return False
-        if name == "leg_preparing":
-            self._set_wait(
-                leg_key,
-                f"{event.get('symbol')} {_display(event.get('action'))} · "
-                f"{text('读取实际仓位', 'Reading current position')}",
-            )
-            return True
-        if name == "leg_waiting":
-            labels = {
-                "order_identity": text("确认成交订单身份", "Confirming filled-order identity"),
-                "fill_reconciliation": text("等待 WEEX 成交明细对账", "Waiting for WEEX fill reconciliation"),
-                "open_order_clearance": text("确认无残留挂单", "Confirming no open order remains"),
-                "position_observation_retry": text("仓位读取超时，等待重新查询", "Waiting to retry position read"),
-                "order_observation_retry": text("委托读取超时，等待重新查询", "Waiting to retry order read"),
-            }
-            waiting_for = str(event.get("waiting_for") or "")
-            self._set_wait(
-                leg_key,
-                f"{event.get('symbol')} {_display(event.get('action'))} · "
-                f"{labels.get(waiting_for, _display(waiting_for))}",
-            )
-            return True
-
-        finite = self._finite_wait(event)
-        if finite is not None:
-            key, label, seconds = finite
-            self._set_wait(key, label, remaining_seconds=seconds)
-            return True
-
-        start = self._stage_wait(event)
-        if start is not None:
-            key, label = start
-            self._set_wait(key, label)
-            return True
-
-        self._clear_completed_wait(event)
-        return False
-
-    def _finite_wait(self, event: Mapping[str, Any]) -> tuple[str, str, float] | None:
-        name = str(event.get("event") or "")
-        seconds = float(event.get("seconds") or 0)
-        if name == "hold_started":
-            return "hold", text("双边持仓计时", "Holding open pair"), seconds
-        if name == "round_gap_started":
-            return "round-gap", text("等待进入下一周期", "Waiting for next cycle"), seconds
-        if name == "preflight_retry":
-            return "preflight", text("执行前检查失败，等待重试", "Preflight failed; waiting to retry"), seconds
-        if name == "campaign_read_retry":
-            return (
-                "campaign-read-retry",
-                text("Campaign 只读检查失败，等待重试", "Campaign read failed; waiting to retry"),
-                seconds,
-            )
-        if name in {"cycle_sizing_retry", "cycle_read_retry"}:
-            if name == "cycle_sizing_retry":
-                label = text("盘口读取失败，等待重新计算周期数量", "Book read failed; waiting to resize cycle")
-            elif event.get("read") == "balance":
-                label = text("余额读取失败，等待重查", "Balance read failed; waiting to retry")
-            else:
-                label = text("杠杆读取失败，等待重查", "Leverage read failed; waiting to retry")
-            return (f"cycle-read:{event.get('round') or ''}", label, seconds)
-        if name == "accounting_retry_wait":
-            return (
-                f"accounting:{event.get('symbol')}",
-                f"{event.get('symbol')} · {text('成交明细尚未完整，等待重查', 'Waiting to retry fill reconciliation')}",
-                seconds,
-            )
-        return None
-
-    def _stage_wait(self, event: Mapping[str, Any]) -> tuple[str, str] | None:
-        name = str(event.get("event") or "")
-        round_number = event.get("round")
-        stages = {
-            "campaign_boundary_started": (
-                "campaign-boundary",
-                text("读取账户持仓与挂单边界", "Reading account positions and orders"),
-            ),
-            "campaign_child_planning_started": (
-                "campaign-child-plan",
-                text("读取 Beta 与盘口并生成子计划", "Reading Beta and books; planning child run"),
-            ),
-            "preflight_started": (
-                "preflight",
-                text("执行前检查 Beta、行情、资金、持仓和委托", "Checking Beta, market, funds, positions, and orders"),
-            ),
-            "cycle_preparing": (
-                f"cycle-stage:{round_number}",
-                text("读取 BTC/ETH 盘口并计算本周期数量", "Reading BTC/ETH books and sizing cycle"),
-            ),
-            "leverage_preparing": (
-                f"cycle-stage:{round_number}",
-                text("查询余额并配置本周期杠杆", "Checking funds and configuring cycle leverage"),
-            ),
-            "close_barrier_started": (
-                f"cycle-stage:{round_number}",
-                text("读取实际持仓并准备并发平仓", "Reading positions and preparing concurrent close"),
-            ),
-            "pair_waiting": (
-                f"pair:{round_number}:{event.get('action')}",
-                f"BTC/ETH {_display(event.get('action'))} · "
-                f"{text('等待双腿进入确定状态', 'Waiting for both legs to become determinate')}",
-            ),
-            "accounting_waiting": (
-                f"accounting:{event.get('symbol')}",
-                f"{event.get('symbol')} · {text('等待成交明细对账', 'Waiting for fill reconciliation')}",
-            ),
-            "final_acceptance_started": (
-                "final-acceptance",
-                text("最终验收空仓、挂单、Maker 成交和交易量", "Final acceptance checks"),
-            ),
-        }
-        return stages.get(name)
-
-    def _clear_completed_wait(self, event: Mapping[str, Any]) -> None:
-        name = str(event.get("event") or "")
-        round_number = event.get("round")
-        removals = {
-            "campaign_boundary_completed": ("campaign-boundary",),
-            "campaign_child_planning_completed": ("campaign-child-plan",),
-            "preflight_completed": ("preflight",),
-            "preflight_rejected": ("preflight",),
-            "cycle_started": (f"cycle-stage:{round_number}", f"cycle-read:{round_number}"),
-            "cycle_completed": (f"cycle-stage:{round_number}", f"cycle-read:{round_number}"),
-            "cycle_stopped": (f"cycle-stage:{round_number}", f"cycle-read:{round_number}"),
-            "pair_wait_completed": (f"pair:{round_number}:{event.get('action')}",),
-            "hold_completed": ("hold",),
-            "round_gap_completed": ("round-gap",),
-            "accounting_wait_completed": (f"accounting:{event.get('symbol')}",),
-            "final_acceptance_completed": ("final-acceptance",),
-            "workflow_finished": tuple(self._waits),
-            "campaign_finished": tuple(self._waits),
-        }
-        for key in removals.get(name, ()):
-            self._waits.pop(key, None)
-        if name == "pair_wait_completed":
-            prefix = f"leg:{round_number}:"
-            suffix = f":{event.get('action')}"
-            for key in tuple(self._waits):
-                if key.startswith(prefix) and key.endswith(suffix):
-                    self._waits.pop(key, None)
-
-    @staticmethod
-    def _leg_key(event: Mapping[str, Any]) -> str:
-        return ":".join(
-            (
-                "leg",
-                str(event.get("round") or ""),
-                str(event.get("sequence") or ""),
-                str(event.get("symbol") or ""),
-                str(event.get("action") or ""),
-            )
-        )
 
 
 def render_live_volume_event(event: Mapping[str, Any], console: Console) -> None:

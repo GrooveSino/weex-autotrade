@@ -6,15 +6,18 @@ import type {
   BetaCampaignPreview,
   BetaCampaignPreviewRequest,
   BetaMarketSnapshot,
+  BetaSourceSettings,
   ControlPlaneHealth,
   ExecutionCycle,
   GlobalStopResult,
   InstanceSnapshotEvent,
   LogBatch,
   LogLine,
-  SchedulerMetrics,
   StrategyAssignmentResult,
   StrategyDraft,
+  StrategyMonitorEvent,
+  StrategyMonitorSnapshot,
+  StrategyRunPage,
   VolumeStrategy,
   VolumeSessionProjection,
 } from '../types'
@@ -27,13 +30,19 @@ const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$
 export const controlPlaneEnabled = Boolean(configuredBaseUrl)
 export const dataSourceLabel = controlPlaneEnabled ? '控制平面 API' : '内置 Mock 服务'
 
+export type LocalUserSession = { userId: string }
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   if (!configuredBaseUrl) throw new Error('control-plane API is not configured')
   const headers = new Headers(init?.headers)
   if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (init?.method && !['GET', 'HEAD'].includes(init.method.toUpperCase()) && !headers.has('X-Fleet-Command-Id')) {
+    headers.set('X-Fleet-Command-Id', crypto.randomUUID())
+  }
   const response = await fetch(`${configuredBaseUrl}${path}`, {
     ...init,
     headers,
+    credentials: 'include',
   })
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as { detail?: unknown } | null
@@ -56,6 +65,21 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+export async function fetchLocalUserSession(): Promise<LocalUserSession> {
+  return apiRequest<LocalUserSession>('/auth/me')
+}
+
+export async function loginLocalUser(username: string, password: string): Promise<LocalUserSession> {
+  return apiRequest<LocalUserSession>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  })
+}
+
+export async function logoutLocalUser(): Promise<void> {
+  await apiRequest<void>('/auth/logout', { method: 'POST' })
 }
 
 export async function listAccountInstances(): Promise<AccountInstance[]> {
@@ -89,6 +113,52 @@ export async function previewBetaCampaign(
   })
 }
 
+export async function previewBoundStrategyExecution(account: AccountInstance): Promise<BetaCampaignPreview> {
+  if (!controlPlaneEnabled) throw new Error('已绑定策略实盘执行需要控制平面 API')
+  return apiRequest<BetaCampaignPreview>(`/instances/${account.id}/strategy-executions/preview`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
+export async function listBoundStrategyExecutions(account: AccountInstance): Promise<BetaCampaign[]> {
+  return apiRequest<BetaCampaign[]>(`/instances/${account.id}/strategy-executions`)
+}
+
+export async function executeBoundStrategyExecution(
+  account: AccountInstance,
+  executionId: string,
+  confirmation: string,
+  riskAcknowledged: boolean,
+): Promise<BetaCampaign> {
+  return apiRequest<BetaCampaign>(`/instances/${account.id}/strategy-executions/${executionId}/execute`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmation, riskAcknowledged }),
+  })
+}
+
+export async function stopBoundStrategyExecution(
+  account: AccountInstance,
+  execution: BetaCampaign,
+  confirmation: string,
+): Promise<BetaCampaign> {
+  return apiRequest<BetaCampaign>(`/instances/${account.id}/strategy-executions/${execution.campaignId}/stop`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmation }),
+  })
+}
+
+export async function reconcileBoundStrategyExecution(
+  account: AccountInstance,
+  execution: BetaCampaign,
+  confirmation: string,
+): Promise<BetaCampaign> {
+  return apiRequest<BetaCampaign>(`/instances/${account.id}/strategy-executions/${execution.campaignId}/reconcile`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmation }),
+  })
+}
+
 export async function executeBetaCampaign(
   account: AccountInstance,
   campaignId: string,
@@ -101,10 +171,25 @@ export async function executeBetaCampaign(
   })
 }
 
-export async function stopBetaCampaign(account: AccountInstance, campaign: BetaCampaign): Promise<BetaCampaign> {
+export async function stopBetaCampaign(
+  account: AccountInstance,
+  campaign: BetaCampaign,
+  confirmation: string,
+): Promise<BetaCampaign> {
   return apiRequest<BetaCampaign>(`/instances/${account.id}/beta-campaigns/${campaign.campaignId}/stop`, {
     method: 'POST',
-    body: JSON.stringify({ confirmation: campaign.stopConfirmation }),
+    body: JSON.stringify({ confirmation }),
+  })
+}
+
+export async function reconcileBetaCampaign(
+  account: AccountInstance,
+  campaign: BetaCampaign,
+  confirmation: string,
+): Promise<BetaCampaign> {
+  return apiRequest<BetaCampaign>(`/instances/${account.id}/beta-campaigns/${campaign.campaignId}/reconcile`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmation }),
   })
 }
 
@@ -141,22 +226,46 @@ export async function fetchBetaMarketSnapshot(): Promise<BetaMarketSnapshot> {
   }
 }
 
+export async function fetchBetaSourceSettings(): Promise<BetaSourceSettings> {
+  if (!controlPlaneEnabled) throw new Error('Beta 来源设置需要控制平面 API')
+  return apiRequest<BetaSourceSettings>('/beta/source')
+}
+
+export async function updateBetaSourceSettings(settings: Omit<BetaSourceSettings, 'updatedAtMs'>): Promise<BetaSourceSettings> {
+  if (!controlPlaneEnabled) throw new Error('Beta 来源设置需要控制平面 API')
+  return apiRequest<BetaSourceSettings>('/beta/source', {
+    method: 'PATCH',
+    body: JSON.stringify(settings),
+  })
+}
+
 export function subscribeToInstanceEvents(
-  onInstances: (instances: AccountInstance[], runtime?: SchedulerMetrics) => void,
+  onSnapshot: (snapshot: InstanceSnapshotEvent) => void,
   onConnectionChange: (connected: boolean) => void,
-  onCampaigns?: (campaigns: BetaCampaign[]) => void,
 ): () => void {
   if (!configuredBaseUrl) return () => undefined
-  const source = new EventSource(`${configuredBaseUrl}/events`)
+  let executorGeneration: string | null = null
+  let lastSequence = -1
+  const source = new EventSource(`${configuredBaseUrl}/events`, { withCredentials: true })
   source.onopen = () => onConnectionChange(true)
   source.onerror = () => onConnectionChange(false)
   source.addEventListener('instances', (event) => {
     try {
       const snapshot = JSON.parse((event as MessageEvent<string>).data) as InstanceSnapshotEvent
-      if (snapshot.type === 'instances') {
-        onInstances(snapshot.instances, snapshot.runtime)
-        if (snapshot.campaigns && onCampaigns) onCampaigns(snapshot.campaigns)
+      const sequence = snapshot.sequence
+      if (
+        snapshot.type !== 'instances'
+        || !snapshot.executorGeneration
+        || typeof sequence !== 'number'
+        || !Number.isSafeInteger(sequence)
+      ) return
+      if (executorGeneration !== snapshot.executorGeneration) {
+        executorGeneration = snapshot.executorGeneration
+        lastSequence = -1
       }
+      if (sequence <= lastSequence) return
+      lastSequence = sequence
+      onSnapshot(snapshot)
     } catch {
       onConnectionChange(false)
     }
@@ -165,6 +274,18 @@ export function subscribeToInstanceEvents(
 }
 
 const mockLogStreams = new Map<string, LogLine[]>()
+
+function appendMockLog(accountId: string, level: LogLine['level'], message: string): void {
+  const stream = mockLogStreams.get(accountId)
+  if (!stream) return
+  stream.push({
+    id: `${accountId}-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+  })
+  if (stream.length > 500) stream.splice(0, stream.length - 500)
+}
 
 function mockLogStream(account: AccountInstance): LogLine[] {
   const existing = mockLogStreams.get(account.id)
@@ -225,6 +346,67 @@ export async function fetchInstanceLogs(account: AccountInstance, after: string 
   return { lines, cursor: lines.at(-1)?.id ?? after, reset: false }
 }
 
+export async function fetchStrategyMonitor(
+  account: AccountInstance,
+  beforeSequence: number | null = null,
+  sessionId: string | null = null,
+): Promise<StrategyMonitorSnapshot> {
+  const query = new URLSearchParams({ limit: '200' })
+  if (beforeSequence !== null) query.set('beforeSequence', String(beforeSequence))
+  if (sessionId) query.set('sessionId', sessionId)
+  return apiRequest<StrategyMonitorSnapshot>(`/instances/${account.id}/strategy-monitor?${query}`)
+}
+
+export function subscribeToStrategyMonitor(
+  account: AccountInstance,
+  cursor: string | null,
+  sessionId: string | null,
+  onEvent: (event: StrategyMonitorEvent) => void,
+  onConnectionChange: (state: 'connected' | 'retrying') => void,
+): () => void {
+  if (!configuredBaseUrl) return () => undefined
+  let retryTimer: number | undefined
+  const query = new URLSearchParams()
+  if (cursor) query.set('after', cursor)
+  if (sessionId) query.set('sessionId', sessionId)
+  const suffix = query.size ? `?${query}` : ''
+  const source = new EventSource(`${configuredBaseUrl}/instances/${account.id}/strategy-monitor/events${suffix}`)
+  source.onopen = () => {
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    retryTimer = undefined
+    onConnectionChange('connected')
+  }
+  source.onerror = () => {
+    if (retryTimer !== undefined) return
+    retryTimer = window.setTimeout(() => {
+      retryTimer = undefined
+      if (source.readyState !== EventSource.OPEN) onConnectionChange('retrying')
+    }, 1_500)
+  }
+  const receive = (message: Event) => {
+    try {
+      onEvent(JSON.parse((message as MessageEvent<string>).data) as StrategyMonitorEvent)
+    } catch {
+      onConnectionChange('retrying')
+    }
+  }
+  source.addEventListener('snapshot', receive)
+  source.addEventListener('delta', receive)
+  source.addEventListener('reset', receive)
+  return () => {
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    source.close()
+  }
+}
+
+export async function clearInstanceLogs(account: AccountInstance): Promise<void> {
+  if (controlPlaneEnabled) {
+    await apiRequest<void>(`/instances/${account.id}/log-updates`, { method: 'DELETE' })
+    return
+  }
+  mockLogStreams.set(account.id, [])
+}
+
 export async function fetchExecutionHistory(account: AccountInstance): Promise<ExecutionCycle[]> {
   if (controlPlaneEnabled) return apiRequest<ExecutionCycle[]>(`/instances/${account.id}/executions?limit=50`)
   await sleep(360)
@@ -280,10 +462,25 @@ export async function fetchExecutionHistory(account: AccountInstance): Promise<E
   }, ...completed]
 }
 
+export async function fetchStrategyRuns(
+  account: AccountInstance,
+  cursor: string | null = null,
+): Promise<StrategyRunPage> {
+  if (controlPlaneEnabled) {
+    const query = new URLSearchParams({ limit: '50' })
+    if (cursor) query.set('cursor', cursor)
+    return apiRequest<StrategyRunPage>(`/instances/${account.id}/strategy-runs?${query}`)
+  }
+  await sleep(240)
+  return { items: [], nextCursor: null }
+}
+
 export async function refreshAccountSnapshot(account: AccountInstance): Promise<AccountInstance> {
   if (controlPlaneEnabled) return apiRequest<AccountInstance>(`/instances/${account.id}/refresh`, { method: 'POST' })
   await sleep(420)
   const completedAt = Date.now()
+  mockLogStream(account)
+  appendMockLog(account.id, 'success', '刷新成功：价格、钱包与仓位已同步')
   return {
     ...account,
     wallet: {
@@ -302,12 +499,14 @@ export async function refreshAccountSnapshot(account: AccountInstance): Promise<
       lastPollDurationMs: 380,
       consecutiveFailures: 0,
       lastErrorType: null,
+      lastStopVerifiedAtMs: null,
     },
     updatedAt: '刚刚',
   }
 }
 
 function proxyHost(value: string): string {
+  if (!value.trim()) return '不使用代理'
   try {
     return new URL(value.includes('://') ? value : `https://${value}`).host || '未配置'
   } catch {
@@ -335,7 +534,7 @@ export function accountFromDraft(draft: AccountDraft, strategy: VolumeStrategy):
     phase: '等待连接验证',
     proxy: {
       type: draft.proxyType,
-      host: proxyHost(draft.proxyUrl),
+      host: draft.proxyType === 'none' ? '不使用代理' : proxyHost(draft.proxyUrl),
       location: '待检测',
       latencyMs: null,
       status: 'unchecked',
@@ -365,6 +564,7 @@ export function accountFromDraft(draft: AccountDraft, strategy: VolumeStrategy):
       lastPollDurationMs: null,
       consecutiveFailures: 0,
       lastErrorType: null,
+      lastStopVerifiedAtMs: null,
     },
     updatedAt: '尚未同步',
     unreadLogs: 0,
@@ -391,7 +591,7 @@ export async function createAccountInstance(
       },
       proxy: {
         type: draft.proxyType,
-        url: draft.proxyUrl,
+        url: draft.proxyType === 'none' ? undefined : draft.proxyUrl,
       },
     }),
   })
@@ -414,7 +614,13 @@ export async function updateAccountInstance(
       name: draft.name,
       accountTag: draft.accountTag || '未分组',
       apiKeyTail: draft.apiKey ? draft.apiKey.slice(-4).toUpperCase() : instance.apiKeyTail,
-      proxy: draft.proxyUrl ? {
+      proxy: draft.proxyType === 'none' ? {
+        type: 'none',
+        host: '不使用代理',
+        location: '直连',
+        latencyMs: null,
+        status: 'unchecked',
+      } : draft.proxyUrl ? {
         type: draft.proxyType,
         host: proxyHost(draft.proxyUrl),
         location: '待检测',
@@ -447,8 +653,10 @@ export async function updateAccountInstance(
   const payload: Record<string, unknown> = {
     name: draft.name,
     accountTag: draft.accountTag,
-    strategyId: draft.strategyId,
-    historyStartAtMs: historyStartAtMs(draft.historyStartAt),
+  }
+  if (instance.status !== 'error') {
+    payload.strategyId = draft.strategyId
+    payload.historyStartAtMs = historyStartAtMs(draft.historyStartAt)
   }
   if (draft.apiKey && draft.apiSecret && draft.passphrase) {
     payload.credentials = {
@@ -457,10 +665,10 @@ export async function updateAccountInstance(
       passphrase: draft.passphrase,
     }
   }
-  if (draft.proxyUrl) {
+  if (draft.proxyType === 'none' || draft.proxyUrl) {
     payload.proxy = {
       type: draft.proxyType,
-      url: draft.proxyUrl,
+      url: draft.proxyType === 'none' ? undefined : draft.proxyUrl,
     }
   }
   return apiRequest<AccountInstance>(`/instances/${instance.id}`, {
@@ -485,7 +693,7 @@ function strategyPayload(draft: StrategyDraft) {
 
 export async function createVolumeStrategy(draft: StrategyDraft): Promise<VolumeStrategy> {
   if (!controlPlaneEnabled) {
-    return { id: `strategy-${crypto.randomUUID().slice(0, 8)}`, ...strategyPayload(draft) }
+    return { id: `strategy-${crypto.randomUUID().slice(0, 8)}`, version: 1, ...strategyPayload(draft) }
   }
   return apiRequest<VolumeStrategy>('/strategies', {
     method: 'POST',
@@ -497,7 +705,7 @@ export async function updateVolumeStrategy(
   strategy: VolumeStrategy,
   draft: StrategyDraft,
 ): Promise<VolumeStrategy> {
-  if (!controlPlaneEnabled) return { id: strategy.id, ...strategyPayload(draft) }
+  if (!controlPlaneEnabled) return { id: strategy.id, version: strategy.version + 1, ...strategyPayload(draft) }
   return apiRequest<VolumeStrategy>(`/strategies/${strategy.id}`, {
     method: 'PATCH',
     body: JSON.stringify(strategyPayload(draft)),

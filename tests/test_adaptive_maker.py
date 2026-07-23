@@ -227,6 +227,81 @@ def test_partial_fill_is_reconciled_before_cancel_and_target_finishes_exactly() 
     assert result.maker_only is True
 
 
+def test_stop_request_cancels_the_active_maker_order_once_and_never_submits_another() -> None:
+    class WaitingVenue:
+        def __init__(self) -> None:
+            self.time = 0
+            self.position = 0.0
+            self.order: VenueOrder | None = None
+            self.submissions = 0
+            self.cancel_calls = 0
+
+        @property
+        def now_ms(self) -> int:
+            return self.time
+
+        def snapshot(self) -> MarketSnapshot:
+            return snapshot(timestamp_ms=self.time)
+
+        def position_quantity(self) -> float:
+            return self.position
+
+        def wait_for_submission_slot(self) -> None:
+            return None
+
+        def submit_post_only(self, side: Side, quantity: float, price: float, client_order_id: str) -> VenueOrder:
+            self.submissions += 1
+            self.order = VenueOrder(
+                client_order_id,
+                client_order_id,
+                side,
+                price,
+                quantity,
+                0,
+                0,
+                "new",
+                True,
+                None,
+            )
+            return self.order
+
+        def fetch_order(self, order_id: str, client_order_id: str) -> VenueOrder:
+            assert self.order is not None
+            return self.order
+
+        def cancel_order(self, order_id: str, client_order_id: str) -> VenueOrder:
+            self.cancel_calls += 1
+            assert self.order is not None
+            self.order = replace(self.order, status="canceled")
+            return self.order
+
+        def advance(self, milliseconds: int) -> None:
+            self.time += milliseconds
+
+    venue = WaitingVenue()
+    stop = False
+
+    def progress(event: dict[str, object]) -> None:
+        nonlocal stop
+        if event.get("event") == "submit":
+            stop = True
+
+    result = execute_adaptive_maker_target(
+        venue,
+        AlwaysHoldPolicy(),
+        TargetRequest("buy", 0.02, deadline_ms=10_000, poll_interval_ms=100),
+        progress_sink=progress,
+        stop_requested=lambda: stop,
+    )
+
+    assert result.status == "stopped"
+    assert result.reason == "stop_requested"
+    assert venue.submissions == 1
+    assert venue.cancel_calls == 1
+    assert result.cancels == 1
+    assert any(event["event"] == "stop_contained" for event in result.events)
+
+
 def test_deadline_uses_symbol_wide_cleanup_and_stops_when_cleanup_is_uncertain() -> None:
     venue = fast_venue()
     cleanup_calls = 0

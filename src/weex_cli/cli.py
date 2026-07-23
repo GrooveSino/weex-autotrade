@@ -8,7 +8,20 @@ import typer
 
 from weex_cli import __version__
 from weex_cli.cli_support import AppContext, gateway_for, invoke, selected_mode, settings_for
-from weex_cli.commands import account, config_cmd, home, live, maker_cli, market, order, orders, risk, trades, volume
+from weex_cli.commands import (
+    account,
+    config_cmd,
+    home,
+    live,
+    maker_cli,
+    market,
+    order,
+    orders,
+    risk,
+    trades,
+    tui,
+    volume,
+)
 from weex_cli.i18n import (
     current_language,
     install_typer_i18n,
@@ -44,6 +57,7 @@ advanced.add_typer(config_cmd.app, name="config")
 app.command("status", rich_help_panel="Daily workflow")(home.status)
 app.add_typer(maker_cli.app, name="maker", rich_help_panel="Daily workflow")
 app.add_typer(live.app, name="live", rich_help_panel="Daily workflow")
+app.command("tui", rich_help_panel="Daily workflow")(tui.tui)
 app.command("activity", rich_help_panel="Daily workflow")(home.activity)
 app.add_typer(advanced, name="advanced", rich_help_panel="Maintenance")
 

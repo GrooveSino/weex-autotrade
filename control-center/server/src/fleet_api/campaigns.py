@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
+import os
+import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
-from weex_cli.beta_allocation import HttpBetaAllocationProvider
+from weex_cli.beta_allocation import BetaUnavailable, HttpBetaAllocationProvider
 from weex_cli.beta_campaign import (
     BetaVolumeCampaign,
     BetaVolumeCampaignStore,
@@ -23,6 +28,7 @@ from weex_cli.beta_campaign import (
 )
 from weex_cli.beta_volume import BetaVolumePlanStore
 from weex_cli.config import Credentials, Settings
+from weex_cli.execution_progress import ExecutionProgressProjector
 from weex_cli.gateway import WeexGateway
 from weex_cli.live_profile import LiveProfile
 from weex_cli.live_websocket import WeexCampaignWebSocketRuntime
@@ -34,8 +40,9 @@ from .models import (
     BetaCampaignPreviewRequest,
     BetaCampaignStatus,
     BetaCampaignView,
+    VolumeStrategy,
 )
-from .service import UnsafeOperation, ValidationFailed
+from .service import BetaSourceUnavailable, UnsafeOperation, ValidationFailed
 from .vault import CredentialMaterial, CredentialVault
 
 
@@ -50,9 +57,17 @@ class CampaignJournal(Protocol):
 
     def active_for_instance(self, instance_id: str) -> CampaignRecord | None: ...
 
+    def monitor_record(self, instance_id: str, session_id: str | None = None) -> CampaignRecord | None: ...
+
+    def events_after(self, campaign_id: str, sequence: int, limit: int) -> list[dict[str, Any]]: ...
+
+    def events_before(self, campaign_id: str, sequence: int | None, limit: int) -> list[dict[str, Any]]: ...
+
     def update(
         self, campaign_id: str, *, status: str | None = None, result: dict[str, Any] | None = None, **metadata: Any
     ) -> None: ...
+
+    def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool: ...
 
     def add_event(self, campaign_id: str, event: dict[str, Any]) -> int: ...
 
@@ -72,6 +87,43 @@ class CampaignRecord:
     metadata: dict[str, Any]
     result: dict[str, Any] | None
     events: tuple[dict[str, Any], ...]
+
+
+class _AccountLease:
+    def __init__(self, root: Path, api_key: str, instance_id: str, campaign_id: str) -> None:
+        fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:32]
+        self.path = root / "locks" / f"account-{fingerprint}.lock"
+        self.instance_id = instance_id
+        self.campaign_id = campaign_id
+        self._handle: Any | None = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        os.chmod(self.path, 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            raise UnsafeOperation("this WEEX account is already in use by another live campaign") from None
+        handle.seek(0)
+        handle.truncate()
+        json.dump(
+            {"pid": os.getpid(), "instance_id": self.instance_id, "campaign_id": self.campaign_id},
+            handle,
+            separators=(",", ":"),
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 ACTIVE_STATUSES = {
@@ -113,6 +165,29 @@ class InMemoryCampaignJournal:
             (record for record in self.list_for_instance(instance_id) if record.status in ACTIVE_STATUSES), None
         )
 
+    def monitor_record(self, instance_id: str, session_id: str | None = None) -> CampaignRecord | None:
+        records = self.list_for_instance(instance_id)
+        if session_id is not None:
+            records = [record for record in records if record.metadata.get("session_id") == session_id]
+        return next(
+            (record for record in records if record.status in ACTIVE_STATUSES), records[-1] if records else None
+        )
+
+    def events_after(self, campaign_id: str, sequence: int, limit: int) -> list[dict[str, Any]]:
+        record = self.get(campaign_id)
+        if record is None:
+            return []
+        return [dict(event) for event in record.events if int(event.get("sequence") or 0) > sequence][:limit]
+
+    def events_before(self, campaign_id: str, sequence: int | None, limit: int) -> list[dict[str, Any]]:
+        record = self.get(campaign_id)
+        if record is None:
+            return []
+        selected = [
+            dict(event) for event in record.events if sequence is None or int(event.get("sequence") or 0) < sequence
+        ]
+        return selected[-limit:]
+
     def update(
         self, campaign_id: str, *, status: str | None = None, result: dict[str, Any] | None = None, **metadata: Any
     ) -> None:
@@ -144,6 +219,19 @@ class InMemoryCampaignJournal:
                 (*current.events, stored_event),
             )
             return sequence
+
+    def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool:
+        with self._lock:
+            current = self._records[campaign_id.lower()]
+            if current.status != BetaCampaignStatus.PLANNED.value:
+                return False
+            self.update(
+                campaign_id,
+                status=BetaCampaignStatus.EXECUTING.value,
+                risk_acknowledged=True,
+                started_at_ms=started_at_ms,
+            )
+            return True
 
     def recover_incomplete(self) -> int:
         count = 0
@@ -271,6 +359,41 @@ class SQLiteCampaignJournal:
             ).fetchone()
         return self._record(row, []) if row else None
 
+    def monitor_record(self, instance_id: str, session_id: str | None = None) -> CampaignRecord | None:
+        query = "SELECT * FROM beta_campaigns WHERE instance_id = ?"
+        parameters: list[object] = [instance_id]
+        if session_id is not None:
+            query += " AND json_extract(metadata_json, '$.session_id') = ?"
+            parameters.append(session_id)
+        query += (
+            " ORDER BY CASE WHEN status IN ('planned', 'executing', 'stopping') THEN 0 ELSE 1 END, "
+            "updated_at_ms DESC LIMIT 1"
+        )
+        with self._lock:
+            row = self._connection.execute(query, parameters).fetchone()
+        return self._record(row, []) if row else None
+
+    def events_after(self, campaign_id: str, sequence: int, limit: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM beta_campaign_events WHERE campaign_id = ? AND sequence > ? "
+                "ORDER BY sequence LIMIT ?",
+                (campaign_id.lower(), sequence, limit),
+            ).fetchall()
+        return [json.loads(str(row[0])) for row in rows]
+
+    def events_before(self, campaign_id: str, sequence: int | None, limit: int) -> list[dict[str, Any]]:
+        query = "SELECT payload FROM beta_campaign_events WHERE campaign_id = ?"
+        parameters: list[object] = [campaign_id.lower()]
+        if sequence is not None:
+            query += " AND sequence < ?"
+            parameters.append(sequence)
+        query += " ORDER BY sequence DESC LIMIT ?"
+        parameters.append(limit)
+        with self._lock:
+            rows = self._connection.execute(query, parameters).fetchall()
+        return [json.loads(str(row[0])) for row in reversed(rows)]
+
     def update(
         self, campaign_id: str, *, status: str | None = None, result: dict[str, Any] | None = None, **metadata: Any
     ) -> None:
@@ -313,6 +436,22 @@ class SQLiteCampaignJournal:
                 ),
             )
             return sequence
+
+    def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE beta_campaigns SET status = ?, "
+                "metadata_json = json_set(metadata_json, '$.risk_acknowledged', 1, '$.started_at_ms', ?), "
+                "updated_at_ms = ? WHERE campaign_id = ? AND status = ?",
+                (
+                    BetaCampaignStatus.EXECUTING.value,
+                    started_at_ms,
+                    started_at_ms,
+                    campaign_id.lower(),
+                    BetaCampaignStatus.PLANNED.value,
+                ),
+            )
+            return cursor.rowcount == 1
 
     def recover_incomplete(self) -> int:
         with self._lock, self._connection:
@@ -360,17 +499,24 @@ class CampaignWorkerManager:
         beta_provider_factory: Callable[[], HttpBetaAllocationProvider],
         *,
         on_change: Callable[[str], None] | None = None,
+        on_progress: Callable[[str, Mapping[str, Any]], None] | None = None,
+        on_execution_claim: Callable[[CampaignRecord, int], None] | None = None,
     ) -> None:
         self.settings = settings
         self.vault = vault
         self.journal = journal
         self.beta_provider_factory = beta_provider_factory
         self.on_change = on_change or (lambda _instance_id: None)
+        self.on_progress = on_progress or (lambda _instance_id, _event: None)
+        self.on_execution_claim = on_execution_claim or (lambda _record, _started_at_ms: None)
         self._executor = ThreadPoolExecutor(
             max_workers=settings.live_campaign_worker_count, thread_name_prefix="weex-campaign"
         )
         self._stops: dict[str, threading.Event] = {}
         self._futures: dict[str, Future[None]] = {}
+        self._leases: dict[str, _AccountLease] = {}
+        self._starting: set[str] = set()
+        self._closing = False
         self._lock = RLock()
 
     def recover(self) -> int:
@@ -387,10 +533,15 @@ class CampaignWorkerManager:
             raise UnsafeOperation("account credentials are unavailable")
         if self.journal.active_for_instance(instance_id) is not None:
             raise UnsafeOperation("this account already has an active Beta Campaign")
+        if self._unresolved_uncertain(instance_id) is not None:
+            raise UnsafeOperation("this account has an uncertain Beta Campaign that requires manual reconciliation")
         profile, gateway = self._profile_and_gateway(material)
         provider = self.beta_provider_factory()
         try:
-            allocation = provider.get()
+            try:
+                allocation = provider.get()
+            except BetaUnavailable as exc:
+                raise BetaSourceUnavailable(f"final beta source unavailable: {exc}") from None
             campaign = BetaVolumeCampaign.create(
                 gateway,
                 allocation,
@@ -431,6 +582,143 @@ class CampaignWorkerManager:
         finally:
             gateway.close()
 
+    def preview_bound_strategy(
+        self,
+        instance_id: str,
+        strategy: VolumeStrategy,
+        target_quote: Decimal,
+        material: CredentialMaterial | None,
+        *,
+        session_id: str | None,
+        target_mode: str = "incremental",
+        run_disposition: str = "new_incremental",
+        strategy_target_quote: Decimal | None = None,
+        baseline_lifetime_quote: Decimal = Decimal(0),
+    ) -> BetaCampaignPreview:
+        """Create an executable Live preview solely from a persisted strategy binding."""
+        self._require_live_gate()
+        if target_quote <= 0:
+            raise UnsafeOperation("bound strategy has no remaining verified target")
+        if material is None:
+            raise UnsafeOperation("account credentials are unavailable")
+        invalidated = self._invalidate_stale_preview_for_current_strategy(instance_id, strategy)
+        if self.journal.active_for_instance(instance_id) is not None:
+            raise UnsafeOperation("this account already has an active bound strategy execution")
+        if self._unresolved_uncertain(instance_id) is not None:
+            raise UnsafeOperation("this account has an uncertain execution that requires manual reconciliation")
+        if invalidated:
+            self._notify(instance_id)
+        profile, gateway = self._profile_and_gateway(material)
+        provider = self.beta_provider_factory()
+        try:
+            try:
+                allocation = provider.get()
+            except BetaUnavailable as exc:
+                raise BetaSourceUnavailable(f"final beta source unavailable: {exc}") from None
+            campaign = BetaVolumeCampaign.create(
+                gateway,
+                allocation,
+                profile_fingerprint=live_profile_fingerprint(profile),
+                target_turnover_quote=target_quote,
+                round_turnover_quote=strategy.round_turnover_quote_max,
+                round_turnover_quote_min=strategy.round_turnover_quote_min,
+                hold_min_seconds=strategy.position_hold_min_seconds,
+                hold_max_seconds=strategy.position_hold_max_seconds,
+                round_gap_min_seconds=strategy.round_interval_min_seconds,
+                round_gap_max_seconds=strategy.round_interval_max_seconds,
+            )
+            opening_notional = min(campaign.round_turnover_quote, campaign.target_turnover_quote) / Decimal(2)
+            required = opening_notional / Decimal(campaign.max_auto_leverage) * campaign.margin_buffer
+            readiness = inspect_live_account(
+                gateway,
+                required,
+                opening_notional=opening_notional,
+                leverage=campaign.leverage,
+                max_auto_leverage=campaign.max_auto_leverage,
+                margin_buffer=campaign.margin_buffer,
+            )
+            available = _available_quote(gateway)
+            blockers: list[str] = []
+            if not readiness.get("available_sufficient", False):
+                blockers.append("available_balance_insufficient")
+            if (
+                readiness.get("active_position_count", 0)
+                or readiness.get("regular_order_count", 0)
+                or readiness.get("trigger_order_count", 0)
+            ):
+                blockers.append("account_is_not_flat")
+            if blockers:
+                raise UnsafeOperation(f"bound strategy preview blocked: {','.join(blockers)}")
+            metadata = _preview_metadata(campaign, available, readiness)
+            metadata.update(
+                {
+                    "execution_kind": "bound_strategy",
+                    "confirmation": _bound_strategy_confirmation(campaign),
+                    "stop_confirmation": _bound_strategy_stop_confirmation(campaign.campaign_id),
+                    "strategy_id": strategy.id,
+                    "strategy_name": strategy.name,
+                    "strategy_version": strategy.version,
+                    "strategy_snapshot": strategy.model_dump(mode="json", by_alias=True),
+                    "session_id": session_id,
+                    "session_target_quote": str(target_quote),
+                    "target_mode": target_mode,
+                    "run_disposition": run_disposition,
+                    "strategy_target_quote": str(strategy_target_quote or target_quote),
+                    "baseline_lifetime_quote": str(baseline_lifetime_quote),
+                }
+            )
+            self.journal.create(instance_id, campaign, metadata)
+            BetaVolumeCampaignStore(self.settings.campaign_data_directory / instance_id).create(campaign)
+            return _view(self.journal.get(campaign.campaign_id), include_events=False)  # type: ignore[arg-type]
+        finally:
+            gateway.close()
+
+    def apply_bound_strategy_change(
+        self,
+        instance_ids: Iterable[str],
+        apply: Callable[[], Any],
+        *,
+        reason: str,
+    ) -> Any:
+        """Atomically persist a binding change and retire only its unexecuted previews.
+
+        Planned bound-strategy previews are immutable authorization artifacts.  They
+        cannot be edited to match a new shared strategy, because that would let an
+        old exact confirmation authorize a different execution.  They are safe to
+        retire: no worker has claimed them and no exchange operation has occurred.
+        """
+        affected = tuple(dict.fromkeys(instance_ids))
+        with self._lock:
+            self._assert_bound_strategy_change_allowed(affected)
+            result = apply()
+            invalidated = self._invalidate_planned_bound_strategy_previews_locked(affected, reason=reason)
+        for instance_id in invalidated:
+            self._notify(instance_id)
+        return result
+
+    def invalidate_stale_planned_bound_strategy_previews(
+        self,
+        strategies_by_instance: Mapping[str, VolumeStrategy],
+        *,
+        reason: str,
+    ) -> list[str]:
+        """Retire persisted previews whose immutable strategy snapshot is stale.
+
+        This is used during executor startup to repair planned previews created by
+        older releases, before they can shadow an account's current binding.
+        """
+        with self._lock:
+            invalidated: list[str] = []
+            for instance_id, strategy in strategies_by_instance.items():
+                record = self.journal.active_for_instance(instance_id)
+                if record is None or not self._is_stale_bound_strategy_preview(record, strategy):
+                    continue
+                self._invalidate_planned_record_locked(record, reason=reason)
+                invalidated.append(instance_id)
+        for instance_id in invalidated:
+            self._notify(instance_id)
+        return invalidated
+
     def start(
         self,
         instance_id: str,
@@ -445,26 +733,73 @@ class CampaignWorkerManager:
         record = self._require_record(instance_id, campaign_id)
         if record.status != BetaCampaignStatus.PLANNED.value:
             raise UnsafeOperation("campaign is not in planned state")
-        if record.campaign.schema_version != 2:
-            raise UnsafeOperation("campaign schema is not executable; create a new Beta Campaign")
-        if int(time.time() * 1000) >= record.campaign.expires_at_ms:
-            raise UnsafeOperation("campaign authorization has expired")
-        if confirmation != str(record.metadata["confirmation"]):
-            raise UnsafeOperation("exact campaign confirmation does not match")
-        if material is None:
-            raise UnsafeOperation("account credentials are unavailable")
-        self._verify_profile_fingerprint(record, material)
-        stop = threading.Event()
+        if record.campaign.schema_version not in {2, 3}:
+            raise UnsafeOperation("execution schema is not executable; create a new preview")
         with self._lock:
-            self._stops[campaign_id] = stop
+            if self._closing:
+                raise UnsafeOperation("campaign manager is shutting down")
+            if campaign_id in self._starting or campaign_id in self._futures:
+                raise UnsafeOperation("campaign is already starting or running")
+            self._starting.add(campaign_id)
+        lease: _AccountLease | None = None
+        submitted = False
+        try:
+            if int(time.time() * 1000) >= record.campaign.expires_at_ms:
+                raise UnsafeOperation("campaign authorization has expired")
+            if confirmation != str(record.metadata["confirmation"]):
+                raise UnsafeOperation("exact campaign confirmation does not match")
+            if material is None:
+                raise UnsafeOperation("account credentials are unavailable")
+            lease = _AccountLease(
+                self.settings.campaign_data_directory,
+                material.api_key.get_secret_value(),
+                instance_id,
+                campaign_id,
+            )
+            lease.acquire()
+            starting_available_balance = self._verify_execution_boundary(record, material)
             self.journal.update(
                 campaign_id,
-                status=BetaCampaignStatus.EXECUTING.value,
-                risk_acknowledged=True,
-                started_at_ms=int(time.time() * 1000),
+                starting_available_balance_quote=str(starting_available_balance),
             )
-            future = self._executor.submit(self._run, record, material, stop)
-            self._futures[campaign_id] = future
+            stop = threading.Event()
+            with self._lock:
+                started_at_ms = int(time.time() * 1000)
+                if not self.journal.claim_execution(campaign_id, started_at_ms=started_at_ms):
+                    raise UnsafeOperation("campaign was already claimed by another worker")
+                claimed = self._require_record(instance_id, campaign_id)
+                try:
+                    self.on_execution_claim(claimed, started_at_ms)
+                except Exception as exc:
+                    self.journal.update(
+                        campaign_id,
+                        status=BetaCampaignStatus.UNCERTAIN.value,
+                        reason=f"execution_claim_callback_failed:{type(exc).__name__.lower()}",
+                    )
+                    raise UnsafeOperation("execution could not establish its local ledger session") from exc
+                self._stops[campaign_id] = stop
+                self._leases[campaign_id] = lease
+                claimed = self._require_record(instance_id, campaign_id)
+                try:
+                    future = self._executor.submit(self._run, claimed, material, stop)
+                except Exception as exc:
+                    self._stops.pop(campaign_id, None)
+                    self._leases.pop(campaign_id, None)
+                    self.journal.update(
+                        campaign_id,
+                        status=BetaCampaignStatus.UNCERTAIN.value,
+                        reason=f"worker_submit_failed:{type(exc).__name__.lower()}",
+                    )
+                    raise UnsafeOperation(
+                        "campaign worker could not be started; manual reconciliation is required"
+                    ) from exc
+                self._futures[campaign_id] = future
+                submitted = True
+        finally:
+            with self._lock:
+                self._starting.discard(campaign_id)
+            if lease is not None and not submitted:
+                lease.release()
         self._notify(instance_id)
         return _view(self.journal.get(campaign_id), include_events=False)  # type: ignore[arg-type]
 
@@ -493,6 +828,49 @@ class CampaignWorkerManager:
         record = self._require_record(instance_id, campaign_id)
         return [BetaCampaignEvent.model_validate(event) for event in record.events]
 
+    def reconcile(
+        self,
+        instance_id: str,
+        campaign_id: str,
+        confirmation: str,
+        material: CredentialMaterial | None,
+    ) -> BetaCampaignView:
+        self._require_live_gate()
+        record = self._require_record(instance_id, campaign_id)
+        if record.status != BetaCampaignStatus.UNCERTAIN.value:
+            raise UnsafeOperation("manual reconciliation is only available for an uncertain campaign")
+        if not _reconciliation_required(record):
+            return _view(record)
+        expected = _reconciliation_confirmation(record.campaign_id)
+        if confirmation != expected:
+            raise UnsafeOperation("exact reconciliation confirmation does not match")
+        if material is None:
+            raise UnsafeOperation("account credentials are unavailable")
+
+        profile: LiveProfile | None = None
+        gateway: WeexGateway | None = None
+        try:
+            profile, gateway = self._profile_and_gateway(material)
+            if live_profile_fingerprint(profile) != record.campaign.profile_fingerprint:
+                raise UnsafeOperation("live profile changed since campaign execution")
+            boundary = inspect_live_account(gateway, Decimal(0))
+            if not _account_boundary_is_flat(boundary):
+                raise UnsafeOperation("manual reconciliation requires flat BTC/ETH positions and no active orders")
+        finally:
+            if gateway is not None:
+                gateway.close()
+
+        reconciled_at_ms = int(time.time() * 1000)
+        self.journal.update(
+            campaign_id,
+            reconciliation_acknowledged_at_ms=reconciled_at_ms,
+            reconciliation_boundary="btc_eth_flat_no_regular_or_trigger_orders",
+        )
+        event = _sanitize_event({"event": "campaign_reconciliation_acknowledged"})
+        event["sequence"] = self.journal.add_event(campaign_id, event)
+        self._notify(instance_id)
+        return _view(self.journal.get(campaign_id))  # type: ignore[arg-type]
+
     def public_snapshot(self) -> list[dict[str, Any]]:
         if not hasattr(self.journal, "list_all"):
             return []
@@ -501,12 +879,23 @@ class CampaignWorkerManager:
             for record in self.journal.list_all()
         ]  # type: ignore[attr-defined]
 
+    def active_worker_count(self) -> int:
+        """Return work currently owned by this process, not executor capacity."""
+        with self._lock:
+            active_futures = {campaign_id for campaign_id, future in self._futures.items() if not future.done()}
+            return len(self._starting | active_futures)
+
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=False)
+        with self._lock:
+            self._closing = True
+            for stop in self._stops.values():
+                stop.set()
+        self._executor.shutdown(wait=True, cancel_futures=False)
         self.journal.close()
 
     def _run(self, record: CampaignRecord, material: CredentialMaterial, stop: threading.Event) -> None:
         campaign_id = record.campaign_id
+        progress_projector = ExecutionProgressProjector()
         profile: LiveProfile | None = None
         gateway: WeexGateway | None = None
         snapshot_gateway: WeexGateway | None = None
@@ -515,13 +904,19 @@ class CampaignWorkerManager:
 
         def event_sink(payload: dict[str, Any]) -> None:
             event = _sanitize_event(payload)
+            progress_projector.apply(payload, at_ms=int(event["at_ms"]))
             sequence = self.journal.add_event(campaign_id, event)
             event["sequence"] = sequence
-            metadata: dict[str, Any] = {"phase": _phase_for_event(str(event["name"]))}
+            metadata: dict[str, Any] = {
+                "phase": _phase_for_event(str(event["name"])),
+                "monitor_state": progress_projector.snapshot(),
+            }
             if event.get("run") is not None:
                 metadata["current_run"] = event["run"]
             self.journal.update(campaign_id, **metadata)
-            self._notify(record.instance_id)
+            self._notify_progress(record.instance_id, event)
+            if _publishes_fleet_snapshot(str(event["name"])):
+                self._notify(record.instance_id)
 
         try:
             profile, gateway = self._profile_and_gateway(material)
@@ -546,6 +941,10 @@ class CampaignWorkerManager:
                 order_updates=websocket_runtime,
                 stop_requested=stop.is_set,
             ).execute(record.campaign)
+            try:
+                ending_available_balance = _available_quote(gateway)
+            except Exception:  # A missing audit snapshot must not change the execution outcome.
+                ending_available_balance = None
             status = str(result.get("status") or BetaCampaignStatus.UNCERTAIN.value)
             if status not in {item.value for item in BetaCampaignStatus}:
                 status = BetaCampaignStatus.UNCERTAIN.value
@@ -560,6 +959,9 @@ class CampaignWorkerManager:
                 remaining_quote=result.get("remaining_quote", "0"),
                 excess_quote=result.get("excess_quote", "0"),
                 reason=result.get("reason"),
+                ending_available_balance_quote=(
+                    None if ending_available_balance is None else str(ending_available_balance)
+                ),
                 **metrics,
             )
         except Exception as exc:  # noqa: BLE001 - a worker failure is an uncertain live outcome
@@ -571,6 +973,7 @@ class CampaignWorkerManager:
             )
             event = _sanitize_event({"event": "campaign_uncertain", "error": type(exc).__name__})
             event["sequence"] = self.journal.add_event(campaign_id, event)
+            self._notify_progress(record.instance_id, event)
         finally:
             if websocket_runtime is not None:
                 websocket_runtime.close()
@@ -583,6 +986,9 @@ class CampaignWorkerManager:
             with self._lock:
                 self._stops.pop(campaign_id, None)
                 self._futures.pop(campaign_id, None)
+                lease = self._leases.pop(campaign_id, None)
+            if lease is not None:
+                lease.release()
             self._notify(record.instance_id)
 
     def _profile_and_gateway(self, material: CredentialMaterial) -> tuple[LiveProfile, WeexGateway]:
@@ -600,12 +1006,92 @@ class CampaignWorkerManager:
         profile = LiveProfile(
             path=self.settings.campaign_data_directory / "control-plane-live.toml",
             settings=settings,
-            proxy_url=_normalize_proxy_url(material.proxy_url.get_secret_value()),
+            proxy_url=_normalize_proxy_url(
+                material.proxy_url.get_secret_value() if material.proxy_url is not None else None
+            ),
             allow_live_mutations=True,
             post_only_only=True,
         )
         profile.require_maker_execution()
         return profile, WeexGateway(settings, proxy_url=profile.proxy_url)
+
+    def _notify_progress(self, instance_id: str, event: Mapping[str, Any]) -> None:
+        """Keep observability failures out of the live execution state machine."""
+        try:
+            self.on_progress(instance_id, event)
+        except Exception:
+            return
+
+    def _invalidate_stale_preview_for_current_strategy(self, instance_id: str, strategy: VolumeStrategy) -> bool:
+        with self._lock:
+            record = self.journal.active_for_instance(instance_id)
+            if record is None or not self._is_stale_bound_strategy_preview(record, strategy):
+                return False
+            self._invalidate_planned_record_locked(record, reason="bound_strategy_version_stale")
+            return True
+
+    def _assert_bound_strategy_change_allowed(self, instance_ids: Iterable[str]) -> None:
+        for instance_id in instance_ids:
+            for record in self.journal.list_for_instance(instance_id):
+                if record.metadata.get("execution_kind") != "bound_strategy":
+                    continue
+                if record.status in {BetaCampaignStatus.EXECUTING.value, BetaCampaignStatus.STOPPING.value}:
+                    raise UnsafeOperation(
+                        "cannot change a bound strategy while its Live execution is active; stop and verify it first"
+                    )
+                if record.status == BetaCampaignStatus.UNCERTAIN.value and _reconciliation_required(record):
+                    raise UnsafeOperation(
+                        "cannot change a bound strategy while its Live execution requires manual reconciliation"
+                    )
+
+    def _invalidate_planned_bound_strategy_previews_locked(
+        self, instance_ids: Iterable[str], *, reason: str
+    ) -> list[str]:
+        invalidated: list[str] = []
+        for instance_id in instance_ids:
+            for record in self.journal.list_for_instance(instance_id):
+                if not self._is_planned_bound_strategy_preview(record):
+                    continue
+                self._invalidate_planned_record_locked(record, reason=reason)
+                invalidated.append(instance_id)
+        return invalidated
+
+    @staticmethod
+    def _is_planned_bound_strategy_preview(record: CampaignRecord) -> bool:
+        return (
+            record.status == BetaCampaignStatus.PLANNED.value
+            and record.metadata.get("execution_kind") == "bound_strategy"
+        )
+
+    @classmethod
+    def _is_stale_bound_strategy_preview(cls, record: CampaignRecord, strategy: VolumeStrategy) -> bool:
+        if not cls._is_planned_bound_strategy_preview(record):
+            return False
+        return (
+            record.metadata.get("strategy_id") != strategy.id
+            or record.metadata.get("strategy_version") != strategy.version
+        )
+
+    def _invalidate_planned_record_locked(self, record: CampaignRecord, *, reason: str) -> None:
+        invalidated_at_ms = int(time.time() * 1000)
+        self.journal.update(
+            record.campaign_id,
+            status=BetaCampaignStatus.STOPPED.value,
+            reason=reason,
+            invalidated_at_ms=invalidated_at_ms,
+            invalidation_reason=reason,
+        )
+        self.journal.add_event(
+            record.campaign_id,
+            _sanitize_event(
+                {
+                    "event": "bound_strategy_preview_invalidated",
+                    "reason": reason,
+                    "strategy_id": record.metadata.get("strategy_id"),
+                    "strategy_version": record.metadata.get("strategy_version"),
+                }
+            ),
+        )
 
     def _require_record(self, instance_id: str, campaign_id: str) -> CampaignRecord:
         record = self.journal.get(campaign_id)
@@ -613,15 +1099,25 @@ class CampaignWorkerManager:
             raise ValidationFailed("campaign was not found for this account")
         return record
 
-    def _verify_profile_fingerprint(self, record: CampaignRecord, material: CredentialMaterial) -> None:
+    def _verify_execution_boundary(self, record: CampaignRecord, material: CredentialMaterial) -> Decimal:
         gateway: WeexGateway | None = None
         try:
             profile, gateway = self._profile_and_gateway(material)
             if live_profile_fingerprint(profile) != record.campaign.profile_fingerprint:
                 raise UnsafeOperation("live profile changed since campaign preview")
+            boundary = inspect_live_account(gateway, Decimal(0))
+            if not _account_boundary_is_flat(boundary):
+                raise UnsafeOperation("account changed after preview and is no longer flat")
+            return Decimal(str(boundary["available_quote"]))
         finally:
             if gateway is not None:
                 gateway.close()
+
+    def _unresolved_uncertain(self, instance_id: str) -> CampaignRecord | None:
+        return next(
+            (record for record in self.journal.list_for_instance(instance_id) if _reconciliation_required(record)),
+            None,
+        )
 
     def _require_live_gate(self) -> None:
         if (
@@ -654,6 +1150,14 @@ def _preview_metadata(campaign: BetaVolumeCampaign, available: Decimal, readines
     }
 
 
+def _bound_strategy_confirmation(campaign: BetaVolumeCampaign) -> str:
+    return f"EXECUTE WEEX LIVE STRATEGY {campaign.campaign_id.upper()} POST_ONLY"
+
+
+def _bound_strategy_stop_confirmation(campaign_id: str) -> str:
+    return f"STOP WEEX LIVE STRATEGY {campaign_id.upper()} POST_ONLY"
+
+
 def _available_quote(gateway: WeexGateway) -> Decimal:
     rows = gateway.account_balance_rows("live")
     for row in rows:
@@ -668,11 +1172,31 @@ def _available_quote(gateway: WeexGateway) -> Decimal:
     raise ValidationFailed("WEEX account balance has no USDT row")
 
 
-def _normalize_proxy_url(value: str) -> str:
+def _normalize_proxy_url(value: str | None) -> str | None:
+    if value is None:
+        return None
     text = value.strip()
     if "://" in text:
         return text
     return f"https://{text}"
+
+
+def _reconciliation_confirmation(campaign_id: str) -> str:
+    return f"RECONCILE WEEX LIVE BETA-CAMPAIGN {campaign_id.upper()} ACCOUNT_FLAT NO_ORDERS"
+
+
+def _reconciliation_required(record: CampaignRecord) -> bool:
+    return (
+        record.status == BetaCampaignStatus.UNCERTAIN.value
+        and record.metadata.get("reconciliation_acknowledged_at_ms") is None
+    )
+
+
+def _account_boundary_is_flat(boundary: dict[str, Any]) -> bool:
+    return all(
+        int(boundary.get(key, -1)) == 0
+        for key in ("active_position_count", "regular_order_count", "trigger_order_count")
+    )
 
 
 def _campaign_result_metrics(result: dict[str, Any]) -> dict[str, Any]:
@@ -768,35 +1292,121 @@ def _decimal_field(payload: dict[str, Any], key: str) -> Decimal:
 
 def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
     name = str(payload.get("event") or payload.get("name") or "event")[:96]
+    timestamp_ms = payload.get("timestamp_ms")
+    try:
+        at_ms = int(timestamp_ms) if timestamp_ms is not None else int(time.time() * 1000)
+    except (TypeError, ValueError):
+        at_ms = int(time.time() * 1000)
     event: dict[str, Any] = {
-        "sequence": int(payload.get("sequence") or 1),
+        "sequence": 1,
         "name": name,
-        "at_ms": int(time.time() * 1000),
+        "at_ms": at_ms,
     }
     for key in ("phase", "run", "child_plan_id", "status"):
         if payload.get(key) is not None:
             event[key] = payload[key]
-    allowed = {
+    text_fields = {
+        "operation",
+        "reason",
+        "symbol",
+        "action",
+        "side",
+        "progress_event",
+        "waiting_for",
+        "source",
+        "decision",
+        "read",
+        "child_status",
+        "btc",
+        "eth",
+    }
+    decimal_fields = {
         "remaining_quote",
         "total_quote",
         "child_quote",
+        "seconds",
+        "desired_quote",
+        "opening_notional_quote",
+        "quote_volume",
+        "executed_quote_volume",
+        "price",
+        "quantity",
+        "quote",
+        "filled_quantity",
+        "order_quantity",
+        "remaining_quantity",
+        "btc_quantity",
+        "eth_quantity",
+    }
+    integer_fields = {
         "attempt",
         "max_attempts",
-        "seconds",
-        "operation",
-        "reason",
+        "round",
+        "event_index",
+        "elapsed_ms",
+        "remaining_ms",
+        "next_check_ms",
+        "leverage",
+        "fill_count",
+        "submissions",
+        "cancels",
+        "requotes",
     }
-    fields = {
-        key: payload[key] for key in allowed if key in payload and isinstance(payload[key], (str, int, float, bool))
+    boolean_fields = {
+        "completed",
+        "flat",
+        "no_orders",
+        "maker_only",
+        "verified",
+        "maker",
     }
+    fields: dict[str, object] = {}
+    if payload.get("sequence") is not None:
+        with suppress(TypeError, ValueError):
+            fields["leg_sequence"] = int(payload["sequence"])
+    for key in text_fields:
+        if payload.get(key) is not None:
+            fields[key] = _safe_event_text(payload[key], limit=96)
+    for key in decimal_fields:
+        if payload.get(key) is None:
+            continue
+        try:
+            value = Decimal(str(payload[key]))
+        except Exception:  # noqa: BLE001 - malformed observability data is omitted
+            continue
+        if value.is_finite():
+            fields[key] = format(value, "f")
+    for key in integer_fields:
+        if payload.get(key) is None:
+            continue
+        try:
+            fields[key] = int(payload[key])
+        except (TypeError, ValueError):
+            continue
+    for key in boolean_fields:
+        if isinstance(payload.get(key), bool):
+            fields[key] = payload[key]
+    for key in ("symbols", "active_symbols", "completed_symbols"):
+        values = payload.get(key)
+        if isinstance(values, (list, tuple)):
+            fields[key] = [_safe_event_text(value, limit=16) for value in values[:2]]
     if payload.get("error"):
-        fields["error"] = str(payload["error"])[:80]
+        fields["error"] = _safe_event_text(payload["error"], limit=80)
     event["fields"] = fields
     event["message"] = name.replace("_", " ")[:240]
     return event
 
 
+_SAFE_EVENT_TEXT = re.compile(r"[^A-Za-z0-9._:/+\- ]+")
+
+
+def _safe_event_text(value: object, *, limit: int) -> str:
+    return _SAFE_EVENT_TEXT.sub("", str(value)).strip()[:limit]
+
+
 def _phase_for_event(name: str) -> str:
+    if name.startswith("safe_stop"):
+        return "safe_stop"
     if "planning" in name:
         return "planning"
     if "run_started" in name:
@@ -810,6 +1420,28 @@ def _phase_for_event(name: str) -> str:
     if "retry" in name:
         return "recovery"
     return name[:64]
+
+
+def _publishes_fleet_snapshot(name: str) -> bool:
+    return name in {
+        "campaign_boundary_completed",
+        "campaign_child_planning_completed",
+        "campaign_run_started",
+        "campaign_run_completed",
+        "preflight_completed",
+        "preflight_rejected",
+        "cycle_started",
+        "cycle_completed",
+        "cycle_stopped",
+        "hold_started",
+        "hold_completed",
+        "round_gap_started",
+        "round_gap_completed",
+        "final_acceptance_completed",
+        "workflow_finished",
+        "campaign_finished",
+        "campaign_uncertain",
+    }
 
 
 def _view(record: CampaignRecord | None, *, include_events: bool = True) -> BetaCampaignView:
@@ -841,7 +1473,30 @@ def _view(record: CampaignRecord | None, *, include_events: bool = True) -> Beta
         instance_id=record.instance_id,
         status=record.status,
         schema_version=campaign.schema_version,
+        strategy_id=str(metadata["strategy_id"]) if metadata.get("strategy_id") else None,
+        strategy_name=str(metadata["strategy_name"]) if metadata.get("strategy_name") else None,
+        strategy_version=int(metadata["strategy_version"]) if metadata.get("strategy_version") is not None else None,
+        strategy_snapshot=dict(metadata["strategy_snapshot"])
+        if isinstance(metadata.get("strategy_snapshot"), dict)
+        else None,
+        session_id=str(metadata["session_id"]) if metadata.get("session_id") else None,
+        target_mode=str(metadata["target_mode"]) if metadata.get("target_mode") else None,
+        run_disposition=str(metadata["run_disposition"]) if metadata.get("run_disposition") else None,
+        strategy_target_quote_volume=(
+            Decimal(str(metadata["strategy_target_quote"]))
+            if metadata.get("strategy_target_quote") is not None
+            else None
+        ),
+        execution_target_quote_volume=(
+            Decimal(str(metadata["session_target_quote"])) if metadata.get("session_target_quote") is not None else None
+        ),
+        baseline_lifetime_quote_volume=(
+            Decimal(str(metadata["baseline_lifetime_quote"]))
+            if metadata.get("baseline_lifetime_quote") is not None
+            else None
+        ),
         target_quote=campaign.target_turnover_quote,
+        round_turnover_quote_min=campaign.round_turnover_quote_min,
         cycle_volume=campaign.round_turnover_quote,
         authorized_max_quote=campaign.authorized_max_turnover_quote,
         hold_min_seconds=int(campaign.hold_min_seconds),
@@ -867,6 +1522,11 @@ def _view(record: CampaignRecord | None, *, include_events: bool = True) -> Beta
         else None,
         confirmation=str(metadata["confirmation"]),
         stop_confirmation=str(metadata["stop_confirmation"]),
+        reconciliation_confirmation=(
+            _reconciliation_confirmation(campaign.campaign_id) if _reconciliation_required(record) else None
+        ),
+        reconciliation_required=_reconciliation_required(record),
+        retry_allowed=False,
         risk_acknowledged=bool(metadata.get("risk_acknowledged", False)),
         current_run=int(metadata.get("current_run", 0)),
         generated_quote=generated,

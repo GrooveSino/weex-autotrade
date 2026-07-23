@@ -1,12 +1,44 @@
 export type InstanceStatus = 'running' | 'paused' | 'stopped' | 'warning' | 'error'
 export type TradingMode = 'demo' | 'live'
-export type ProxyType = 'https' | 'socks5'
+export type ProxyType = 'none' | 'http' | 'https' | 'socks5'
 export type ProxyStatus = 'healthy' | 'degraded' | 'unchecked'
 export type StrategyStage = 'idle' | 'holding' | 'cooldown' | 'complete'
 export type StrategyTargetMode = 'incremental' | 'lifetime'
+export type StrategyRunStatus = 'active' | 'stopping' | 'completed' | 'stopped' | 'verification_pending' | 'uncertain'
+
+export interface StrategyRunSummary {
+  sessionId: string
+  strategyId: string | null
+  strategyName: string | null
+  strategyVersion: number | null
+  targetMode: StrategyTargetMode
+  startedAtMs: number
+  finishedAtMs: number | null
+  status: StrategyRunStatus
+  result: 'completed' | 'stopped' | 'uncertain' | null
+  resultReason: string | null
+  strategyTargetQuoteVolume: string
+  executionTargetQuoteVolume: string
+  verifiedQuoteVolume: string
+  remainingQuoteVolume: string
+  baselineLifetimeQuoteVolume: string
+  finalLifetimeQuoteVolume: string | null
+  startingAvailableBalanceQuote: string | null
+  endingAvailableBalanceQuote: string | null
+  availableBalanceChangeQuote: string | null
+  sourceComplete: boolean
+  stale: boolean
+  reconciliationRequired: boolean
+}
+
+export interface StrategyRunPage {
+  items: StrategyRunSummary[]
+  nextCursor: string | null
+}
 
 export interface VolumeStrategy {
   id: string
+  version: number
   name: string
   targetMode: StrategyTargetMode
   targetVolumeQuote: string
@@ -82,8 +114,24 @@ export interface AccountInstance {
     lifetime: number
     today: number
     complete: boolean
+    lifetimeSourceComplete?: boolean
+    strategyTargetQuoteVolume?: string
+    strategyVerifiedQuoteVolume?: string
+    strategyRemainingQuoteVolume?: string
+    strategyTargetReached?: boolean
     session?: {
       sessionId: string
+      startedAtMs: number
+      finishedAtMs: number | null
+      strategyId: string | null
+      strategyName: string | null
+      strategyVersion: number | null
+      targetMode: StrategyTargetMode
+      strategyTargetQuoteVolume: string
+      baselineLifetimeQuoteVolume: string
+      finalLifetimeQuoteVolume: string | null
+      result: string | null
+      resultReason: string | null
       targetQuoteVolume: string
       verifiedQuoteVolume: string
       remainingQuoteVolume: string
@@ -101,6 +149,8 @@ export interface AccountInstance {
       discrepancyQuoteVolume: string
       retryAllowed: false
     } | null
+    activeSession?: VolumeSessionProjection | null
+    lastRun?: VolumeSessionProjection | null
   }
   exposure: {
     btcLong: number
@@ -123,6 +173,7 @@ export interface AccountInstance {
     lastPollDurationMs: number | null
     consecutiveFailures: number
     lastErrorType: string | null
+    lastStopVerifiedAtMs: number | null
   }
   updatedAt: string
   unreadLogs: number
@@ -139,6 +190,64 @@ export interface LogBatch {
   lines: LogLine[]
   cursor: string | null
   reset: boolean
+}
+
+export interface ActiveExecutionWait {
+  key: string
+  label: string
+  updatedAtMs: number
+  elapsedMs: number
+  remainingMs: number | null
+  detail: string
+  symbol: string | null
+  action: string | null
+}
+
+export interface ExecutionTimelineEntry {
+  id: string
+  sequence: number
+  atMs: number
+  level: LogLine['level']
+  eventName: string
+  title: string
+  detail: string
+}
+
+export interface StrategyMonitorSnapshot {
+  schemaVersion: number
+  instanceId: string
+  sessionId: string | null
+  executionId: string | null
+  executorGeneration: string
+  status: string
+  phase: string
+  currentRun: number
+  currentRound: number
+  targetQuoteVolume: string
+  verifiedQuoteVolume: string
+  ledgerVerifiedQuoteVolume: string
+  remainingQuoteVolume: string
+  volumeSource: 'ledger' | 'execution_journal' | 'pending'
+  sourceComplete: boolean
+  stale: boolean
+  reconciliationRequired: boolean
+  btcQuoteVolume: string
+  ethQuoteVolume: string
+  makerFillCount: number
+  takerFillCount: number
+  unknownFillCount: number
+  submissions: number
+  cancels: number
+  requotes: number
+  activeWaits: ActiveExecutionWait[]
+  timeline: ExecutionTimelineEntry[]
+  cursor: string | null
+  hasMore: boolean
+}
+
+export interface StrategyMonitorEvent {
+  type: 'snapshot' | 'delta' | 'reset'
+  snapshot: StrategyMonitorSnapshot
 }
 
 export interface ExecutionCycle {
@@ -184,6 +293,16 @@ export interface VolumeSessionProjection {
   accountId: string
   mode: TradingMode
   startedAtMs: number
+  finishedAtMs: number | null
+  strategyId: string | null
+  strategyName: string | null
+  strategyVersion: number | null
+  targetMode: StrategyTargetMode
+  strategyTargetQuoteVolume: string
+  baselineLifetimeQuoteVolume: string
+  finalLifetimeQuoteVolume: string | null
+  result: string | null
+  resultReason: string | null
   targetQuoteVolume: string
   verifiedQuoteVolume: string
   remainingQuoteVolume: string
@@ -223,11 +342,21 @@ export interface BetaMarketSnapshot {
   maxAgeMs: string
 }
 
+export interface BetaSourceSettings {
+  url: string
+  timeoutSeconds: number
+  refreshIntervalSeconds: number
+  backgroundRefreshEnabled: boolean
+  updatedAtMs: number
+}
+
 export interface InstanceSnapshotEvent {
   type: 'instances'
   instances: AccountInstance[]
   runtime?: SchedulerMetrics
   campaigns?: BetaCampaign[]
+  sequence?: number
+  executorGeneration?: string
 }
 
 export interface SchedulerMetrics {
@@ -253,7 +382,12 @@ export interface ControlPlaneHealth {
   liveTradingEnabled: boolean
   executionEnabled: boolean
   liveCampaignsEnabled: boolean
+  boundStrategyExecutionEnabled: boolean
+  liveCampaignActiveWorkerCount: number
   liveCampaignWorkerCount: number
+  apiReleaseId?: string | null
+  executorConnected?: boolean
+  executorGeneration?: string | null
 }
 
 export type BetaCampaignStatus = 'planned' | 'executing' | 'stopping' | 'completed' | 'stopped' | 'uncertain'
@@ -275,7 +409,18 @@ export interface BetaCampaign {
   instanceId: string
   status: BetaCampaignStatus
   schemaVersion: number
+  strategyId: string | null
+  strategyName: string | null
+  strategyVersion: number | null
+  strategySnapshot: Record<string, unknown> | null
+  sessionId?: string | null
+  targetMode?: StrategyTargetMode | null
+  runDisposition?: 'new_incremental' | 'lifetime_residual' | null
+  strategyTargetQuoteVolume?: string | null
+  executionTargetQuoteVolume?: string | null
+  baselineLifetimeQuoteVolume?: string | null
   targetQuote: string
+  roundTurnoverQuoteMin: string | null
   cycleVolume: string
   authorizedMaxQuote: string
   holdMinSeconds: number
@@ -297,6 +442,9 @@ export interface BetaCampaign {
   maxSupportedTurnoverQuote: string | null
   confirmation: string
   stopConfirmation: string
+  reconciliationConfirmation: string | null
+  reconciliationRequired: boolean
+  retryAllowed: false
   riskAcknowledged: boolean
   currentRun: number
   generatedQuote: string

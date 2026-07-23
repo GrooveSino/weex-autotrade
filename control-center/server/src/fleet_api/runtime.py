@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from threading import RLock
@@ -101,7 +102,9 @@ class AccountRuntimeManager:
         return any(result.processed for result in results)
 
     async def refresh_instance(self, instance_id: str) -> AccountInstance:
-        await self._poll_one(instance_id, propagate=True, allow_execution=False)
+        result = await self._poll_one(instance_id, propagate=True, allow_execution=False)
+        if result.successful:
+            self._service.record_refresh_success(instance_id)
         return self._service.get_instance(instance_id)
 
     async def authoritative_session_fills(
@@ -135,6 +138,16 @@ class AccountRuntimeManager:
         async with lock:
             if action is InstanceAction.START:
                 return self._service.apply_action(instance_id, action)
+            before = self._service.get_instance(instance_id)
+            if (
+                action is InstanceAction.STOP
+                and before.status is InstanceStatus.STOPPED
+                and before.runtime.last_stop_verified_at_ms is not None
+            ):
+                # This exact inactive state was already cancellation-verified.
+                # Avoid duplicate network work and duplicate audit records from
+                # repeated clicks or overlapping browser requests.
+                return before
             updated = self._service.apply_action(instance_id, action)
             outcome = await self._cancel_active_orders(updated)
             if not outcome.verified:
@@ -148,6 +161,7 @@ class AccountRuntimeManager:
                 instance_id,
                 canceled_count=outcome.canceled_count,
                 reason=outcome.reason,
+                marks_stop_verified=action is InstanceAction.STOP,
             )
             return self._service.get_instance(instance_id)
 
@@ -296,6 +310,8 @@ class AccountRuntimeManager:
             except InstanceNotFound:
                 return _GlobalStopAccountResult(False, False, False)
             was_active = before.status is not InstanceStatus.STOPPED
+            if before.status is InstanceStatus.STOPPED and before.runtime.last_stop_verified_at_ms is not None:
+                return _GlobalStopAccountResult(False, False, False)
             updated = self._service.apply_action(instance_id, InstanceAction.STOP)
             outcome = await self._cancel_active_orders(updated)
             if not outcome.verified:
@@ -309,6 +325,7 @@ class AccountRuntimeManager:
                 instance_id,
                 canceled_count=outcome.canceled_count,
                 reason=outcome.reason,
+                marks_stop_verified=True,
             )
             self._service.record_global_stop(instance_id)
             return _GlobalStopAccountResult(was_active, True, False)
@@ -591,6 +608,16 @@ class AccountRuntimeManager:
             except Exception as exc:
                 outcome = False
                 failure_type = type(exc).__name__
+                # CCXT clients can retain a poisoned connection after a
+                # completed transport/parser failure. Recreate it for the next
+                # poll instead of repeatedly reusing a known-bad client. Do
+                # not close a thread-backed request that the outer timeout
+                # cancelled but could not actually interrupt.
+                if failure_type != "TimeoutError":
+                    failed_adapter = self._adapters.pop(instance_id, None)
+                    if failed_adapter is not None:
+                        with suppress(Exception):
+                            await failed_adapter.aclose()
                 try:
                     self._service.record_runtime_failure(
                         instance_id,

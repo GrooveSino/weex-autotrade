@@ -119,6 +119,7 @@ def execute_adaptive_maker_target(
     request: TargetRequest,
     *,
     progress_sink: ProgressSink | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> TargetExecutionResult:
     started = venue.now_ms
     active: VenueOrder | None = None
@@ -142,6 +143,7 @@ def execute_adaptive_maker_target(
     last_wait_key: tuple[str, str] | None = None
     last_wait_emitted_ms: int | None = None
     last_position: float | None = None
+    should_stop = stop_requested or (lambda: False)
 
     def record(event: dict[str, object]) -> None:
         events.append(event)
@@ -515,7 +517,45 @@ def execute_adaptive_maker_target(
             return finish("completed", "target_reached", final_position=final_position)
         return finish("failed", "deadline_exceeded")
 
+    def stop_for_request() -> TargetExecutionResult:
+        """Contain an in-flight maker order before returning a stop result.
+
+        The stop callback is intentionally checked inside the adaptive loop rather
+        than only by a caller between legs.  A request may arrive while a live
+        order is waiting for a fill; in that case issue one cancellation and only
+        continue after bounded read-only verification.  We never submit another
+        order from this path.
+        """
+        nonlocal active, cancels, venue_cancels, post_only_rejections
+        record({"event": "stop_requested", "order_id": active.order_id if active is not None else None})
+        if active is not None:
+            verified = cancel_and_verify(active)
+            if verified is None:
+                record({"event": "stop_cancel_not_confirmed", "order_id": active.order_id})
+                return finish("uncertain", "stop_cancel_not_confirmed")
+            observation_error = observe(verified)
+            if observation_error is not None:
+                return finish("failed", observation_error)
+            if verified.status == "canceled" and verified.cancellation_reason == "COULD_NOT_FILL":
+                post_only_rejections += 1
+                venue_cancels += 1
+                return finish("failed", "post_only_rejected")
+            if verified.status not in {"filled", "canceled"}:
+                record({"event": "stop_cancel_not_confirmed", "order_id": active.order_id})
+                return finish("uncertain", "stop_cancel_not_confirmed")
+            if verified.status == "canceled":
+                cancels += 1
+            active = None
+        try:
+            final_position = read_position()
+        except ObservationUnavailableError:
+            return finish("uncertain", "stop_position_observation_unavailable")
+        record({"event": "stop_contained", "final_position": final_position})
+        return finish("stopped", "stop_requested", final_position=final_position)
+
     while venue.now_ms - started <= request.deadline_ms:
+        if should_stop():
+            return stop_for_request()
         try:
             current = read_position(order_id=active.order_id if active is not None else None)
         except ObservationUnavailableError as exc:
@@ -527,6 +567,8 @@ def execute_adaptive_maker_target(
         remaining = abs(request.target_position - current)
 
         if active is not None:
+            if should_stop():
+                return stop_for_request()
             try:
                 order = venue.fetch_order(active.order_id, active.client_order_id)
             except Exception as exc:  # noqa: BLE001 - retry only this read-only observation
@@ -666,12 +708,17 @@ def execute_adaptive_maker_target(
         if remaining <= request.tolerance_quantity:
             return finish("completed", "target_reached")
 
+        if should_stop():
+            return stop_for_request()
+
         # The Demo venue may need to wait 10.1 seconds between submissions.
         # Wait first so the quote is derived from the freshest available book.
         submission_wait_ms = getattr(venue, "submission_wait_ms", lambda: 0)()
         if submission_wait_ms > 0:
             record_wait("submission_slot", submission_wait_ms, force=True)
         venue.wait_for_submission_slot()
+        if should_stop():
+            return stop_for_request()
         if venue.now_ms - started > request.deadline_ms:
             return finish_deadline()
         try:

@@ -47,6 +47,15 @@ class FakeWebSocket:
         return self.messages.pop(0)
 
 
+class AdvancingMonotonic:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        self.value += 1.0
+        return self.value
+
+
 def read_rows(db_path: Path) -> list[tuple[str, float, float, str]]:
     with sqlite3.connect(db_path) as connection:
         return connection.execute("SELECT symbol, price, timestamp, created_at FROM ticks ORDER BY symbol").fetchall()
@@ -173,3 +182,28 @@ def test_websocket_zero_price_frame_keeps_last_valid_price(tmp_path: Path) -> No
 
     assert collector.latest_prices["BTCUSDT"] == 64026.4
     assert collector.ignored_ticks == 1
+
+
+def test_websocket_silence_is_reported_instead_of_reusing_old_prices(
+    tmp_path: Path,
+) -> None:
+    socket = FakeWebSocket([])
+    monotonic = AdvancingMonotonic()
+    db_path = tmp_path / "stream.db"
+    with TickStore(db_path) as store:
+        collector = WebSocketMarketCollector(
+            store,
+            ("BTC", "ETH"),
+            connect_factory=lambda *_args, **_kwargs: socket,
+            monotonic=monotonic,
+        )
+        stats = run_websocket_market_collector(
+            collector,
+            stale_after_seconds=1.0,
+            once=True,
+        )
+
+    assert stats.cycles == 0
+    assert stats.rows_written == 0
+    assert stats.errors == 1
+    assert read_rows(db_path) == []

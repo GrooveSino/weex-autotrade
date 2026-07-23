@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Copy, ExternalLink, LoaderCircle, OctagonAlert, Play, Square, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Copy, ExternalLink, LoaderCircle, OctagonAlert, Play, ShieldCheck, Square, X } from 'lucide-react'
 import type { AccountInstance, BetaCampaign, BetaCampaignPreview } from '../types'
-import { executeBetaCampaign, previewBetaCampaign, stopBetaCampaign } from '../services/controlCenter'
+import { executeBetaCampaign, fetchBetaCampaignEvents, previewBetaCampaign, reconcileBetaCampaign, stopBetaCampaign } from '../services/controlCenter'
 
 interface BetaCampaignDialogProps {
   account: AccountInstance
@@ -29,20 +29,56 @@ export function BetaCampaignDialog({ account, campaign, liveEnabled, onClose, on
   const [gapMin, setGapMin] = useState('5')
   const [gapMax, setGapMax] = useState('7')
   const [preview, setPreview] = useState<BetaCampaignPreview | null>(campaign && campaign.status === 'planned' ? campaign as BetaCampaignPreview : null)
+  const [createNew, setCreateNew] = useState(false)
   const [riskAcknowledged, setRiskAcknowledged] = useState(false)
   const [confirmation, setConfirmation] = useState('')
+  const [stopArmed, setStopArmed] = useState(false)
+  const [stopConfirmation, setStopConfirmation] = useState('')
+  const [reconciliationConfirmation, setReconciliationConfirmation] = useState('')
+  const [loadedEvents, setLoadedEvents] = useState(campaign?.events ?? [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const active = campaign && ['executing', 'stopping'].includes(campaign.status)
-  const terminal = campaign && ['completed', 'stopped', 'uncertain'].includes(campaign.status)
+  const shownCampaign = createNew ? null : campaign
+  const active = shownCampaign && ['executing', 'stopping'].includes(shownCampaign.status)
+  const terminal = shownCampaign && ['completed', 'stopped', 'uncertain'].includes(shownCampaign.status)
   const exactMatch = preview ? confirmation === preview.confirmation : false
   const canExecute = Boolean(preview && riskAcknowledged && exactMatch && !busy)
+  const canStop = Boolean(shownCampaign && stopConfirmation === shownCampaign.stopConfirmation && !busy)
+  const canReconcile = Boolean(
+    shownCampaign?.reconciliationRequired
+    && shownCampaign.reconciliationConfirmation
+    && reconciliationConfirmation === shownCampaign.reconciliationConfirmation
+    && !busy,
+  )
   const progress = useMemo(() => {
-    const current = Number(campaign?.generatedQuote ?? preview?.generatedQuote ?? 0)
-    const target = Number(campaign?.targetQuote ?? preview?.targetQuote ?? targetQuote)
+    const current = Number(shownCampaign?.generatedQuote ?? preview?.generatedQuote ?? 0)
+    const target = Number(shownCampaign?.targetQuote ?? preview?.targetQuote ?? targetQuote)
     return target > 0 ? Math.min(100, current / target * 100) : 0
-  }, [campaign, preview, targetQuote])
+  }, [shownCampaign, preview, targetQuote])
+
+  useEffect(() => {
+    if (!shownCampaign) return
+    let mounted = true
+    let timer: number | undefined
+    const loadEvents = async () => {
+      try {
+        const next = await fetchBetaCampaignEvents(account, shownCampaign.campaignId)
+        if (mounted) setLoadedEvents(next)
+      } catch {
+        // Campaign status remains available through SSE; event history is auxiliary.
+      } finally {
+        if (mounted && ['executing', 'stopping'].includes(shownCampaign.status)) {
+          timer = window.setTimeout(() => void loadEvents(), 2_000)
+        }
+      }
+    }
+    void loadEvents()
+    return () => {
+      mounted = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [account, shownCampaign])
 
   const runPreview = async () => {
     setBusy(true)
@@ -82,14 +118,31 @@ export function BetaCampaignDialog({ account, campaign, liveEnabled, onClose, on
   }
 
   const requestStop = async () => {
-    if (!campaign) return
+    if (!shownCampaign) return
     setBusy(true)
     setError(null)
     try {
-      onChanged(await stopBetaCampaign(account, campaign))
+      onChanged(await stopBetaCampaign(account, shownCampaign, stopConfirmation))
+      setStopArmed(false)
+      setStopConfirmation('')
       onToast('已发出安全停止请求；当前子周期会先完成核对')
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '停止失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reconcile = async () => {
+    if (!shownCampaign) return
+    setBusy(true)
+    setError(null)
+    try {
+      onChanged(await reconcileBetaCampaign(account, shownCampaign, reconciliationConfirmation))
+      setReconciliationConfirmation('')
+      onToast('已确认账号空仓且无挂单；该不确定任务仍保留为审计记录')
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '人工对账失败')
     } finally {
       setBusy(false)
     }
@@ -104,20 +157,24 @@ export function BetaCampaignDialog({ account, campaign, liveEnabled, onClose, on
       {!liveEnabled && <div className="campaign-banner danger"><OctagonAlert size={16} />控制平面尚未开启网页实盘 campaign 能力</div>}
       {error && <div className="campaign-banner danger"><AlertTriangle size={16} />{error}</div>}
 
-      {active && campaign ? (
+      {active && shownCampaign ? (
         <div className="campaign-monitor">
-          <div className="campaign-status-line"><span className={`campaign-status ${campaign.status}`}>{statusLabels[campaign.status]}</span><strong>{campaign.phase}</strong><span>Campaign {campaign.campaignId}</span></div>
+          <div className="campaign-status-line"><span className={`campaign-status ${shownCampaign.status}`}>{statusLabels[shownCampaign.status]}</span><strong>{shownCampaign.phase}</strong><span>Campaign {shownCampaign.campaignId}</span></div>
           <div className="campaign-progress"><span style={{ width: `${progress}%` }} /></div>
-          <div className="campaign-metrics"><div><small>已完成</small><strong>{quote.format(Number(campaign.generatedQuote))} USDT</strong></div><div><small>剩余</small><strong>{quote.format(Number(campaign.remainingQuote))} USDT</strong></div><div><small>当前轮次</small><strong>{campaign.currentRun} / {campaign.maxRuns}</strong></div><div><small>BTC / ETH</small><strong>{quote.format(Number(campaign.btcQuote))} / {quote.format(Number(campaign.ethQuote))}</strong></div><div><small>Maker 成交</small><strong>{campaign.makerCount} / {campaign.fillCount}</strong></div><div><small>Taker / Unknown</small><strong>{campaign.takerCount} / {campaign.unknownCount}</strong></div></div>
-          <div className="campaign-event-list">{campaign.events.slice(-12).reverse().map((event) => <div key={`${event.sequence}-${event.name}`}><time>{new Date(event.atMs).toLocaleTimeString()}</time><span>{event.message ?? event.name}</span></div>)}</div>
-          <footer className="dialog-actions"><button className="button secondary" type="button" onClick={onClose}>关闭</button><button className="button danger-button" type="button" disabled={busy || campaign.status === 'stopping'} onClick={() => void requestStop()}><Square size={14} />安全停止</button></footer>
+          <div className="campaign-metrics"><div><small>已完成</small><strong>{quote.format(Number(shownCampaign.generatedQuote))} USDT</strong></div><div><small>剩余</small><strong>{quote.format(Number(shownCampaign.remainingQuote))} USDT</strong></div><div><small>当前轮次</small><strong>{shownCampaign.currentRun} / {shownCampaign.maxRuns}</strong></div><div><small>BTC / ETH</small><strong>{quote.format(Number(shownCampaign.btcQuote))} / {quote.format(Number(shownCampaign.ethQuote))}</strong></div><div><small>Maker 成交</small><strong>{shownCampaign.makerCount} / {shownCampaign.fillCount}</strong></div><div><small>Taker / Unknown</small><strong>{shownCampaign.takerCount} / {shownCampaign.unknownCount}</strong></div></div>
+          <div className="campaign-event-list">{loadedEvents.slice(-12).reverse().map((event) => <div key={`${event.sequence}-${event.name}`}><time>{new Date(event.atMs).toLocaleTimeString()}</time><span>{event.message ?? event.name}</span></div>)}</div>
+          {stopArmed && <div className="confirmation-box campaign-inline-confirm"><div><span>精确停止短语</span><button className="icon-button" type="button" onClick={() => copyText(shownCampaign.stopConfirmation, onToast)} aria-label="复制精确停止短语"><Copy size={14} /></button></div><code>{shownCampaign.stopConfirmation}</code><input value={stopConfirmation} onChange={(event) => setStopConfirmation(event.target.value)} placeholder="输入完整停止短语" spellCheck={false} /></div>}
+          <footer className="dialog-actions"><button className="button secondary" type="button" onClick={onClose}>关闭</button>{stopArmed ? <><button className="button secondary" type="button" disabled={busy} onClick={() => { setStopArmed(false); setStopConfirmation('') }}>取消停止</button><button className="button danger-button" type="button" disabled={!canStop} onClick={() => void requestStop()}>{busy ? <LoaderCircle size={14} className="spin" /> : <Square size={14} />}确认安全停止</button></> : <button className="button danger-button" type="button" disabled={busy || shownCampaign.status === 'stopping'} onClick={() => setStopArmed(true)}><Square size={14} />安全停止</button>}</footer>
         </div>
-      ) : terminal && campaign ? (
+      ) : terminal && shownCampaign ? (
         <div className="campaign-monitor">
-          <div className="campaign-status-line"><span className={`campaign-status ${campaign.status}`}>{statusLabels[campaign.status]}</span><strong>{campaign.reason ?? campaign.phase}</strong></div>
-          <div className="campaign-metrics"><div><small>已完成</small><strong>{quote.format(Number(campaign.generatedQuote))} USDT</strong></div><div><small>超额</small><strong>{quote.format(Number(campaign.excessQuote))} USDT</strong></div><div><small>BTC / ETH</small><strong>{quote.format(Number(campaign.btcQuote))} / {quote.format(Number(campaign.ethQuote))}</strong></div><div><small>Maker / Taker / Unknown</small><strong>{campaign.makerCount} / {campaign.takerCount} / {campaign.unknownCount}</strong></div><div><small>耗时</small><strong>{campaign.elapsedMs ? `${Math.round(campaign.elapsedMs / 1000)}s` : '-'}</strong></div></div>
-          {campaign.status === 'uncertain' && <div className="campaign-banner danger"><OctagonAlert size={16} />状态不确定：请先在交易所核对仓位、挂单和成交，不提供自动重试。</div>}
-          <footer className="dialog-actions"><button className="button secondary" type="button" onClick={onClose}>关闭</button><button className="button secondary" type="button" onClick={() => copyText(campaign.campaignId, onToast)}><Copy size={14} />复制 Campaign ID</button></footer>
+          <div className="campaign-status-line"><span className={`campaign-status ${shownCampaign.status}`}>{statusLabels[shownCampaign.status]}</span><strong>{shownCampaign.reason ?? shownCampaign.phase}</strong></div>
+          <div className="campaign-metrics"><div><small>已完成</small><strong>{quote.format(Number(shownCampaign.generatedQuote))} USDT</strong></div><div><small>超额</small><strong>{quote.format(Number(shownCampaign.excessQuote))} USDT</strong></div><div><small>BTC / ETH</small><strong>{quote.format(Number(shownCampaign.btcQuote))} / {quote.format(Number(shownCampaign.ethQuote))}</strong></div><div><small>Maker / Taker / Unknown</small><strong>{shownCampaign.makerCount} / {shownCampaign.takerCount} / {shownCampaign.unknownCount}</strong></div><div><small>耗时</small><strong>{shownCampaign.elapsedMs ? `${Math.round(shownCampaign.elapsedMs / 1000)}s` : '-'}</strong></div></div>
+          {shownCampaign.status === 'uncertain' && <div className="campaign-banner danger"><OctagonAlert size={16} />状态不确定：请先核对成交；系统只会只读确认当前仓位和挂单，不提供自动重试。</div>}
+          {shownCampaign.reconciliationRequired && shownCampaign.reconciliationConfirmation && <div className="confirmation-box campaign-inline-confirm"><div><span>人工对账短语</span><button className="icon-button" type="button" onClick={() => copyText(shownCampaign.reconciliationConfirmation ?? '', onToast)} aria-label="复制人工对账短语"><Copy size={14} /></button></div><code>{shownCampaign.reconciliationConfirmation}</code><input value={reconciliationConfirmation} onChange={(event) => setReconciliationConfirmation(event.target.value)} placeholder="确认交易所成交后输入完整短语" spellCheck={false} /><p>提交后服务端会只读检查 BTC/ETH 空仓、无普通挂单、无条件单。检查失败不会解除阻断。</p></div>}
+          {shownCampaign.status === 'uncertain' && !shownCampaign.reconciliationRequired && <div className="campaign-banner verified"><ShieldCheck size={16} />当前账号边界已人工核对；原不确定结果仍保留，不会改写为完成。</div>}
+          <div className="campaign-event-list">{loadedEvents.slice(-12).reverse().map((event) => <div key={`${event.sequence}-${event.name}`}><time>{new Date(event.atMs).toLocaleTimeString()}</time><span>{event.message ?? event.name}</span></div>)}</div>
+          <footer className="dialog-actions"><button className="button secondary" type="button" onClick={onClose}>关闭</button><button className="button secondary" type="button" onClick={() => copyText(shownCampaign.campaignId, onToast)}><Copy size={14} />复制 Campaign ID</button>{shownCampaign.reconciliationRequired ? <button className="button primary" type="button" disabled={!canReconcile} onClick={() => void reconcile()}>{busy ? <LoaderCircle size={14} className="spin" /> : <ShieldCheck size={14} />}确认已人工对账</button> : <button className="button primary" type="button" onClick={() => { setCreateNew(true); setPreview(null); setConfirmation(''); setRiskAcknowledged(false) }}><Play size={14} />新建 Campaign</button>}</footer>
         </div>
       ) : (
         <>

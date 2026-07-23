@@ -14,6 +14,9 @@ from .vault import CredentialMaterial
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
+ACTIVE_SESSION_STATUSES = frozenset({"active", "stopping", "verification_pending", "uncertain"})
+TERMINAL_SESSION_STATUSES = frozenset({"completed", "stopped"})
+
 
 class FillConflictError(RuntimeError):
     pass
@@ -64,6 +67,9 @@ class TradeHistoryPage:
     next_cursor: str | None
     complete: bool = True
     high_watermark_ms: int | None = None
+    # Completeness of the requested scan window, independent from whether the
+    # account's full lifetime history is covered.
+    window_complete: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +116,18 @@ class VolumeSession:
     pending_sync: bool
     maker_only_required: bool
     uncertain_order_state: bool
+    strategy_id: str | None = None
+    strategy_name: str | None = None
+    strategy_version: int | None = None
+    target_mode: str = "incremental"
+    strategy_target_quote_volume: Decimal | None = None
+    baseline_lifetime_quote_volume: Decimal = Decimal(0)
+    finished_at_ms: int | None = None
+    result: str | None = None
+    result_reason: str | None = None
+    final_lifetime_quote_volume: Decimal | None = None
+    starting_available_balance_quote: Decimal | None = None
+    ending_available_balance_quote: Decimal | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -132,6 +150,32 @@ class VolumeSession:
             "pending_sync": self.pending_sync,
             "maker_only_required": self.maker_only_required,
             "uncertain_order_state": self.uncertain_order_state,
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
+            "strategy_version": self.strategy_version,
+            "target_mode": self.target_mode,
+            "strategy_target_quote_volume": str(
+                self.strategy_target_quote_volume or self.target_quote_volume
+            ),
+            "baseline_lifetime_quote_volume": str(self.baseline_lifetime_quote_volume),
+            "finished_at_ms": self.finished_at_ms,
+            "result": self.result,
+            "result_reason": self.result_reason,
+            "final_lifetime_quote_volume": (
+                None
+                if self.final_lifetime_quote_volume is None
+                else str(self.final_lifetime_quote_volume)
+            ),
+            "starting_available_balance_quote": (
+                None
+                if self.starting_available_balance_quote is None
+                else str(self.starting_available_balance_quote)
+            ),
+            "ending_available_balance_quote": (
+                None
+                if self.ending_available_balance_quote is None
+                else str(self.ending_available_balance_quote)
+            ),
         }
 
 
@@ -165,6 +209,13 @@ class TradeVolumeLedger(Protocol):
         target_quote_volume: Decimal,
         *,
         maker_only_required: bool = False,
+        strategy_id: str | None = None,
+        strategy_name: str | None = None,
+        strategy_version: int | None = None,
+        target_mode: str = "incremental",
+        strategy_target_quote_volume: Decimal | None = None,
+        baseline_lifetime_quote_volume: Decimal = Decimal(0),
+        starting_available_balance_quote: Decimal | None = None,
     ) -> VolumeSession: ...
 
     def get_session(self, session_id: str) -> VolumeSession | None: ...
@@ -202,10 +253,26 @@ class TradeVolumeLedger(Protocol):
     ) -> tuple[NormalizedTradeFill, ...]: ...
 
     def refresh_sessions(
-        self, account_id: str, mode: str, *, now_ms: int, source_complete: bool, stale: bool
+        self,
+        account_id: str,
+        mode: str,
+        *,
+        now_ms: int,
+        source_complete: bool,
+        stale: bool,
+        coverage_start_ms: int | None = None,
+        high_watermark_ms: int | None = None,
     ) -> None: ...
 
     def latest_session(self, account_id: str, mode: str) -> dict[str, object] | None: ...
+
+    def active_session(self, account_id: str, mode: str) -> dict[str, object] | None: ...
+
+    def latest_terminal_session(self, account_id: str, mode: str) -> dict[str, object] | None: ...
+
+    def list_sessions(
+        self, account_id: str, mode: str, *, limit: int, cursor: str | None = None
+    ) -> tuple[list[dict[str, object]], str | None]: ...
 
     def mark_sessions_reconciliation(
         self, account_id: str, mode: str, *, discrepancy: Decimal = Decimal(0)
@@ -288,6 +355,13 @@ class InMemoryTradeVolumeLedger:
         target_quote_volume: Decimal,
         *,
         maker_only_required: bool = False,
+        strategy_id: str | None = None,
+        strategy_name: str | None = None,
+        strategy_version: int | None = None,
+        target_mode: str = "incremental",
+        strategy_target_quote_volume: Decimal | None = None,
+        baseline_lifetime_quote_volume: Decimal = Decimal(0),
+        starting_available_balance_quote: Decimal | None = None,
     ) -> VolumeSession:
         if started_at_ms < 0 or target_quote_volume <= 0 or not target_quote_volume.is_finite():
             raise ValueError("invalid volume session parameters")
@@ -295,30 +369,39 @@ class InMemoryTradeVolumeLedger:
             if session_id in self._sessions:
                 raise ValueError(f"session {session_id!r} already exists")
             if any(
-                session.account_id == account_id and session.mode == mode and session.status == "running"
+                session.account_id == account_id
+                and session.mode == mode
+                and _normalized_session_status(session.status) in ACTIVE_SESSION_STATUSES
                 for session in self._sessions.values()
             ):
-                raise ValueError("an account can have only one running volume session")
+                raise ValueError("an account can have only one active volume session")
             session = VolumeSession(
-                session_id,
-                account_id,
-                mode,
-                started_at_ms,
-                target_quote_volume,
-                "running",
-                Decimal(0),
-                target_quote_volume,
-                None,
-                None,
-                False,
-                True,
-                False,
-                Decimal(0),
-                None,
-                None,
-                True,
-                maker_only_required,
-                False,
+                session_id=session_id,
+                account_id=account_id,
+                mode=mode,
+                started_at_ms=started_at_ms,
+                target_quote_volume=target_quote_volume,
+                status="active",
+                verified_quote_volume=Decimal(0),
+                remaining_quote_volume=target_quote_volume,
+                last_sync_at_ms=None,
+                last_reconciliation_at_ms=None,
+                source_complete=False,
+                stale=True,
+                reconciliation_required=False,
+                discrepancy_quote_volume=Decimal(0),
+                cursor=None,
+                high_watermark_ms=None,
+                pending_sync=True,
+                maker_only_required=maker_only_required,
+                uncertain_order_state=False,
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                strategy_version=strategy_version,
+                target_mode=target_mode,
+                strategy_target_quote_volume=strategy_target_quote_volume or target_quote_volume,
+                baseline_lifetime_quote_volume=baseline_lifetime_quote_volume,
+                starting_available_balance_quote=starting_available_balance_quote,
             )
             self._sessions[session_id] = session
             return session
@@ -378,21 +461,39 @@ class InMemoryTradeVolumeLedger:
             value = self._checkpoints.get((account_id, mode))
             return dict(value) if value is not None else None
 
-    def refresh_sessions(self, account_id: str, mode: str, *, now_ms: int, source_complete: bool, stale: bool) -> None:
+    def refresh_sessions(
+        self,
+        account_id: str,
+        mode: str,
+        *,
+        now_ms: int,
+        source_complete: bool,
+        stale: bool,
+        coverage_start_ms: int | None = None,
+        high_watermark_ms: int | None = None,
+    ) -> None:
         with self._lock:
             for session_id, session in tuple(self._sessions.items()):
                 if session.account_id != account_id or session.mode != mode:
                     continue
+                if _normalized_session_status(session.status) in TERMINAL_SESSION_STATUSES:
+                    continue
                 fills = self._session_fills(session)
                 verified = sum((fill.quote_volume for fill in fills if fill.authoritative), Decimal(0))
+                session_window_complete = source_complete and (
+                    session.source_complete
+                    or coverage_start_ms is None
+                    or coverage_start_ms <= session.started_at_ms
+                )
                 updated = replace(
                     session,
                     verified_quote_volume=verified,
                     remaining_quote_volume=max(session.target_quote_volume - verified, Decimal(0)),
                     last_sync_at_ms=now_ms,
-                    source_complete=source_complete,
-                    stale=stale,
-                    pending_sync=stale,
+                    source_complete=session_window_complete,
+                    stale=stale or not session_window_complete,
+                    pending_sync=stale or not session_window_complete,
+                    high_watermark_ms=high_watermark_ms or session.high_watermark_ms,
                 )
                 projected = _session_projection(updated, fills, verified)
                 self._sessions[session_id] = replace(updated, status=str(projected["status"]))
@@ -404,12 +505,64 @@ class InMemoryTradeVolumeLedger:
                 return None
             return self.session_projection(max(sessions, key=lambda item: item.started_at_ms).session_id)
 
+    def active_session(self, account_id: str, mode: str) -> dict[str, object] | None:
+        with self._lock:
+            sessions = [
+                session
+                for session in self._sessions.values()
+                if session.account_id == account_id
+                and session.mode == mode
+                and _normalized_session_status(session.status) in ACTIVE_SESSION_STATUSES
+            ]
+            if not sessions:
+                return None
+            selected = max(sessions, key=lambda item: (item.started_at_ms, item.session_id))
+        return self.session_projection(selected.session_id)
+
+    def latest_terminal_session(self, account_id: str, mode: str) -> dict[str, object] | None:
+        with self._lock:
+            sessions = [
+                session
+                for session in self._sessions.values()
+                if session.account_id == account_id
+                and session.mode == mode
+                and _normalized_session_status(session.status) in TERMINAL_SESSION_STATUSES
+            ]
+            if not sessions:
+                return None
+            selected = max(sessions, key=lambda item: (item.started_at_ms, item.session_id))
+        return self.session_projection(selected.session_id)
+
+    def list_sessions(
+        self, account_id: str, mode: str, *, limit: int, cursor: str | None = None
+    ) -> tuple[list[dict[str, object]], str | None]:
+        with self._lock:
+            sessions = sorted(
+                (
+                    session
+                    for session in self._sessions.values()
+                    if session.account_id == account_id and session.mode == mode
+                ),
+                key=lambda item: (item.started_at_ms, item.session_id),
+                reverse=True,
+            )
+        if cursor is not None:
+            try:
+                index = next(index for index, item in enumerate(sessions) if item.session_id == cursor) + 1
+            except StopIteration:
+                return [], None
+            sessions = sessions[index:]
+        selected = sessions[: limit + 1]
+        next_cursor = selected[limit - 1].session_id if len(selected) > limit else None
+        return [self.session_projection(item.session_id) for item in selected[:limit]], next_cursor
+
     def mark_sessions_reconciliation(self, account_id: str, mode: str, *, discrepancy: Decimal = Decimal(0)) -> None:
         with self._lock:
             for session_id, session in tuple(self._sessions.items()):
                 if session.account_id == account_id and session.mode == mode:
                     self._sessions[session_id] = replace(
                         session,
+                        status="verification_pending",
                         reconciliation_required=True,
                         stale=True,
                         discrepancy_quote_volume=discrepancy,
@@ -482,6 +635,18 @@ class SQLiteTradeVolumeLedger:
                 pending_sync INTEGER NOT NULL DEFAULT 1,
                 maker_only_required INTEGER NOT NULL DEFAULT 0,
                 uncertain_order_state INTEGER NOT NULL DEFAULT 0,
+                strategy_id TEXT,
+                strategy_name TEXT,
+                strategy_version INTEGER,
+                target_mode TEXT NOT NULL DEFAULT 'incremental',
+                strategy_target_quote_volume TEXT,
+                baseline_lifetime_quote_volume TEXT NOT NULL DEFAULT '0',
+                finished_at_ms INTEGER,
+                result TEXT,
+                result_reason TEXT,
+                final_lifetime_quote_volume TEXT,
+                starting_available_balance_quote TEXT,
+                ending_available_balance_quote TEXT,
                 UNIQUE(account_id, mode, session_id)
             );
             CREATE INDEX IF NOT EXISTS idx_volume_sessions_account
@@ -523,6 +688,32 @@ class SQLiteTradeVolumeLedger:
         for name, definition in migrations.items():
             if name not in columns:
                 self._connection.execute(f"ALTER TABLE trade_volume_fills ADD COLUMN {name} {definition}")
+        session_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(volume_sessions)")}
+        session_migrations = {
+            "strategy_id": "TEXT",
+            "strategy_name": "TEXT",
+            "strategy_version": "INTEGER",
+            "target_mode": "TEXT NOT NULL DEFAULT 'incremental'",
+            "strategy_target_quote_volume": "TEXT",
+            "baseline_lifetime_quote_volume": "TEXT NOT NULL DEFAULT '0'",
+            "finished_at_ms": "INTEGER",
+            "result": "TEXT",
+            "result_reason": "TEXT",
+            "final_lifetime_quote_volume": "TEXT",
+            "starting_available_balance_quote": "TEXT",
+            "ending_available_balance_quote": "TEXT",
+        }
+        for name, definition in session_migrations.items():
+            if name not in session_columns:
+                self._connection.execute(f"ALTER TABLE volume_sessions ADD COLUMN {name} {definition}")
+        self._connection.execute("UPDATE volume_sessions SET status = 'active' WHERE status = 'running'")
+        self._connection.execute(
+            "UPDATE volume_sessions SET status = 'verification_pending' WHERE status = 'stale'"
+        )
+        self._connection.execute(
+            "UPDATE volume_sessions SET strategy_target_quote_volume = target_quote_volume "
+            "WHERE strategy_target_quote_volume IS NULL"
+        )
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_trade_volume_fills_account_mode_time "
             "ON trade_volume_fills(instance_id, mode, executed_at_ms)"
@@ -712,6 +903,32 @@ class SQLiteTradeVolumeLedger:
             pending_sync=bool(row["pending_sync"]),
             maker_only_required=bool(row["maker_only_required"]),
             uncertain_order_state=bool(row["uncertain_order_state"]),
+            strategy_id=row["strategy_id"],
+            strategy_name=row["strategy_name"],
+            strategy_version=None if row["strategy_version"] is None else int(row["strategy_version"]),
+            target_mode=str(row["target_mode"] or "incremental"),
+            strategy_target_quote_volume=Decimal(
+                str(row["strategy_target_quote_volume"] or row["target_quote_volume"])
+            ),
+            baseline_lifetime_quote_volume=Decimal(str(row["baseline_lifetime_quote_volume"] or "0")),
+            finished_at_ms=None if row["finished_at_ms"] is None else int(row["finished_at_ms"]),
+            result=row["result"],
+            result_reason=row["result_reason"],
+            final_lifetime_quote_volume=(
+                None
+                if row["final_lifetime_quote_volume"] is None
+                else Decimal(str(row["final_lifetime_quote_volume"]))
+            ),
+            starting_available_balance_quote=(
+                None
+                if row["starting_available_balance_quote"] is None
+                else Decimal(str(row["starting_available_balance_quote"]))
+            ),
+            ending_available_balance_quote=(
+                None
+                if row["ending_available_balance_quote"] is None
+                else Decimal(str(row["ending_available_balance_quote"]))
+            ),
         )
 
     def create_session(
@@ -723,21 +940,32 @@ class SQLiteTradeVolumeLedger:
         target_quote_volume: Decimal,
         *,
         maker_only_required: bool = False,
+        strategy_id: str | None = None,
+        strategy_name: str | None = None,
+        strategy_version: int | None = None,
+        target_mode: str = "incremental",
+        strategy_target_quote_volume: Decimal | None = None,
+        baseline_lifetime_quote_volume: Decimal = Decimal(0),
+        starting_available_balance_quote: Decimal | None = None,
     ) -> VolumeSession:
         if started_at_ms < 0 or target_quote_volume <= 0 or not target_quote_volume.is_finite():
             raise ValueError("invalid volume session parameters")
         with self._lock, self._connection:
             active = self._connection.execute(
-                "SELECT 1 FROM volume_sessions WHERE account_id = ? AND mode = ? AND status = 'running' LIMIT 1",
+                "SELECT 1 FROM volume_sessions WHERE account_id = ? AND mode = ? "
+                "AND status IN ('active', 'stopping', 'verification_pending', 'uncertain') LIMIT 1",
                 (account_id, mode),
             ).fetchone()
             if active is not None:
-                raise ValueError("an account can have only one running volume session")
+                raise ValueError("an account can have only one active volume session")
             self._connection.execute(
                 """INSERT INTO volume_sessions(
                     session_id, account_id, mode, started_at_ms, target_quote_volume, status,
-                    verified_quote_volume, remaining_quote_volume, maker_only_required
-                ) VALUES (?, ?, ?, ?, ?, 'running', '0', ?, ?)""",
+                    verified_quote_volume, remaining_quote_volume, maker_only_required,
+                    strategy_id, strategy_name, strategy_version, target_mode,
+                    strategy_target_quote_volume, baseline_lifetime_quote_volume,
+                    starting_available_balance_quote
+                ) VALUES (?, ?, ?, ?, ?, 'active', '0', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     account_id,
@@ -746,6 +974,13 @@ class SQLiteTradeVolumeLedger:
                     str(target_quote_volume),
                     str(target_quote_volume),
                     int(maker_only_required),
+                    strategy_id,
+                    strategy_name,
+                    strategy_version,
+                    target_mode,
+                    str(strategy_target_quote_volume or target_quote_volume),
+                    str(baseline_lifetime_quote_volume),
+                    None if starting_available_balance_quote is None else str(starting_available_balance_quote),
                 ),
             )
         return self.get_session(session_id)  # type: ignore[return-value]
@@ -772,6 +1007,11 @@ class SQLiteTradeVolumeLedger:
             "high_watermark_ms",
             "pending_sync",
             "uncertain_order_state",
+            "finished_at_ms",
+            "result",
+            "result_reason",
+            "final_lifetime_quote_volume",
+            "ending_available_balance_quote",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -788,7 +1028,15 @@ class SQLiteTradeVolumeLedger:
             int(value)
             if key in {"source_complete", "stale", "reconciliation_required", "pending_sync", "uncertain_order_state"}
             else str(value)
-            if key in {"verified_quote_volume", "remaining_quote_volume", "discrepancy_quote_volume"}
+            if key
+            in {
+                "verified_quote_volume",
+                "remaining_quote_volume",
+                "discrepancy_quote_volume",
+                "final_lifetime_quote_volume",
+                "ending_available_balance_quote",
+            }
+            and value is not None
             else value
             for key, value in changes.items()
         ]
@@ -948,23 +1196,41 @@ class SQLiteTradeVolumeLedger:
             "updated_at_ms": row[6],
         }
 
-    def refresh_sessions(self, account_id: str, mode: str, *, now_ms: int, source_complete: bool, stale: bool) -> None:
+    def refresh_sessions(
+        self,
+        account_id: str,
+        mode: str,
+        *,
+        now_ms: int,
+        source_complete: bool,
+        stale: bool,
+        coverage_start_ms: int | None = None,
+        high_watermark_ms: int | None = None,
+    ) -> None:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ?", (account_id, mode)
+                "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ? "
+                "AND status NOT IN ('completed', 'stopped')",
+                (account_id, mode),
             ).fetchall()
         for row in rows:
             session = self.get_session(str(row[0]))
             assert session is not None
             fills = self.fills_for_account(account_id, mode, session.started_at_ms)
             verified = sum((fill.quote_volume for fill in fills if fill.authoritative), Decimal(0))
+            session_window_complete = source_complete and (
+                session.source_complete
+                or coverage_start_ms is None
+                or coverage_start_ms <= session.started_at_ms
+            )
             self.update_session(
                 session.session_id,
                 verified_quote_volume=verified,
                 last_sync_at_ms=now_ms,
-                source_complete=source_complete,
-                stale=stale,
-                pending_sync=stale,
+                source_complete=session_window_complete,
+                stale=stale or not session_window_complete,
+                pending_sync=stale or not session_window_complete,
+                high_watermark_ms=high_watermark_ms or session.high_watermark_ms,
             )
             projected = self.session_projection(session.session_id)
             if projected["status"] == "completed":
@@ -979,10 +1245,60 @@ class SQLiteTradeVolumeLedger:
             ).fetchone()
         return self.session_projection(str(row[0])) if row else None
 
+    def active_session(self, account_id: str, mode: str) -> dict[str, object] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ? "
+                "AND status IN ('active', 'stopping', 'verification_pending', 'uncertain') "
+                "ORDER BY started_at_ms DESC, session_id DESC LIMIT 1",
+                (account_id, mode),
+            ).fetchone()
+        return self.session_projection(str(row[0])) if row else None
+
+    def latest_terminal_session(self, account_id: str, mode: str) -> dict[str, object] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ? "
+                "AND status IN ('completed', 'stopped') "
+                "ORDER BY started_at_ms DESC, session_id DESC LIMIT 1",
+                (account_id, mode),
+            ).fetchone()
+        return self.session_projection(str(row[0])) if row else None
+
+    def list_sessions(
+        self, account_id: str, mode: str, *, limit: int, cursor: str | None = None
+    ) -> tuple[list[dict[str, object]], str | None]:
+        if limit < 1:
+            raise ValueError("session history limit must be positive")
+        boundary: tuple[int, str] | None = None
+        with self._lock:
+            if cursor is not None:
+                row = self._connection.execute(
+                    "SELECT started_at_ms, session_id FROM volume_sessions WHERE session_id = ? "
+                    "AND account_id = ? AND mode = ?",
+                    (cursor, account_id, mode),
+                ).fetchone()
+                if row is None:
+                    return [], None
+                boundary = (int(row[0]), str(row[1]))
+            query = (
+                "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ?"
+            )
+            parameters: list[object] = [account_id, mode]
+            if boundary is not None:
+                query += " AND (started_at_ms < ? OR (started_at_ms = ? AND session_id < ?))"
+                parameters.extend((boundary[0], boundary[0], boundary[1]))
+            query += " ORDER BY started_at_ms DESC, session_id DESC LIMIT ?"
+            parameters.append(limit + 1)
+            rows = self._connection.execute(query, parameters).fetchall()
+        selected = [str(row[0]) for row in rows[:limit]]
+        next_cursor = selected[-1] if len(rows) > limit and selected else None
+        return [self.session_projection(session_id) for session_id in selected], next_cursor
+
     def mark_sessions_reconciliation(self, account_id: str, mode: str, *, discrepancy: Decimal = Decimal(0)) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                """UPDATE volume_sessions SET reconciliation_required = 1, stale = 1,
+                """UPDATE volume_sessions SET status = 'verification_pending', reconciliation_required = 1, stale = 1,
                    pending_sync = 1, discrepancy_quote_volume = ?
                    WHERE account_id = ? AND mode = ?""",
                 (str(discrepancy), account_id, mode),
@@ -1017,6 +1333,7 @@ class TradeHistorySynchronizer:
         *,
         today_start_ms: int,
         cursor: str | None = None,
+        coverage_start_ms: int | None = None,
     ) -> TradeHistorySyncResult:
         if cursor is None:
             self._ledger.set_complete(instance_id, False)
@@ -1045,6 +1362,8 @@ class TradeHistorySynchronizer:
                     now_ms=int(datetime.now(UTC).timestamp() * 1000),
                     source_complete=False,
                     stale=True,
+                    coverage_start_ms=coverage_start_ms,
+                    high_watermark_ms=high_watermark_ms,
                 )
                 raise
             candidates = [value for value in (high_watermark_ms, page.high_watermark_ms) if value is not None]
@@ -1073,12 +1392,17 @@ class TradeHistorySynchronizer:
                         stale=not page.complete,
                     )
                 if hasattr(self._ledger, "refresh_sessions"):
+                    session_window_complete = (
+                        page.window_complete if page.window_complete is not None else page.complete
+                    )
                     self._ledger.refresh_sessions(
                         instance_id,
                         account_mode,
                         now_ms=int(datetime.now(UTC).timestamp() * 1000),
-                        source_complete=page.complete,
-                        stale=not page.complete,
+                        source_complete=session_window_complete,
+                        stale=not session_window_complete,
+                        coverage_start_ms=coverage_start_ms,
+                        high_watermark_ms=high_watermark_ms,
                     )
                 return TradeHistorySyncResult(
                     aggregate=self._ledger.aggregate(instance_id, today_start_ms),
@@ -1106,6 +1430,8 @@ class TradeHistorySynchronizer:
                         now_ms=int(datetime.now(UTC).timestamp() * 1000),
                         source_complete=False,
                         stale=True,
+                        coverage_start_ms=coverage_start_ms,
+                        high_watermark_ms=high_watermark_ms,
                     )
                 return TradeHistorySyncResult(
                     aggregate=self._ledger.aggregate(instance_id, today_start_ms),
@@ -1134,6 +1460,8 @@ class TradeHistorySynchronizer:
                 now_ms=int(datetime.now(UTC).timestamp() * 1000),
                 source_complete=False,
                 stale=True,
+                coverage_start_ms=coverage_start_ms,
+                high_watermark_ms=high_watermark_ms,
             )
         return TradeHistorySyncResult(
             aggregate=self._ledger.aggregate(instance_id, today_start_ms),
@@ -1159,6 +1487,13 @@ class SessionVolumeService:
         started_at_ms: int,
         target_quote_volume: Decimal,
         maker_only_required: bool = False,
+        strategy_id: str | None = None,
+        strategy_name: str | None = None,
+        strategy_version: int | None = None,
+        target_mode: str = "incremental",
+        strategy_target_quote_volume: Decimal | None = None,
+        baseline_lifetime_quote_volume: Decimal = Decimal(0),
+        starting_available_balance_quote: Decimal | None = None,
     ) -> dict[str, object]:
         session = self.ledger.create_session(
             session_id,
@@ -1167,11 +1502,73 @@ class SessionVolumeService:
             started_at_ms,
             target_quote_volume,
             maker_only_required=maker_only_required,
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            strategy_version=strategy_version,
+            target_mode=target_mode,
+            strategy_target_quote_volume=strategy_target_quote_volume,
+            baseline_lifetime_quote_volume=baseline_lifetime_quote_volume,
+            starting_available_balance_quote=starting_available_balance_quote,
         )
         return self.ledger.session_projection(session.session_id)
 
     def progress(self, session_id: str) -> dict[str, object]:
         return self.ledger.session_projection(session_id)
+
+    def mark_stopping(self, session_id: str) -> dict[str, object]:
+        self.ledger.update_session(session_id, status="stopping")
+        return self.progress(session_id)
+
+    def mark_uncertain(self, session_id: str, *, reason: str, finished_at_ms: int) -> dict[str, object]:
+        self.ledger.update_session(
+            session_id,
+            status="uncertain",
+            result="uncertain",
+            result_reason=reason,
+            finished_at_ms=finished_at_ms,
+            uncertain_order_state=True,
+            source_complete=False,
+            stale=True,
+            reconciliation_required=True,
+            pending_sync=False,
+        )
+        return self.progress(session_id)
+
+    def finalize(
+        self,
+        session_id: str,
+        *,
+        result: str,
+        reason: str | None,
+        finished_at_ms: int,
+        final_lifetime_quote_volume: Decimal,
+        ending_available_balance_quote: Decimal | None = None,
+    ) -> dict[str, object]:
+        if result not in TERMINAL_SESSION_STATUSES:
+            raise ValueError("session result must be completed or stopped")
+        projection = self.progress(session_id)
+        verified = Decimal(str(projection["verified_quote_volume"]))
+        target = Decimal(str(projection["target_quote_volume"]))
+        verified_state = (
+            bool(projection["source_complete"])
+            and not bool(projection["stale"])
+            and not bool(projection["reconciliation_required"])
+            and not bool(projection["pending_sync"])
+            and not bool(projection.get("uncertain_order_state", False))
+        )
+        final_status = result
+        if not verified_state or (result == "completed" and verified < target):
+            final_status = "verification_pending"
+        self.ledger.update_session(
+            session_id,
+            status=final_status,
+            result=result,
+            result_reason=reason,
+            finished_at_ms=finished_at_ms,
+            final_lifetime_quote_volume=final_lifetime_quote_volume,
+            ending_available_balance_quote=ending_available_balance_quote,
+        )
+        return self.progress(session_id)
 
     def reconcile(
         self,
@@ -1205,6 +1602,7 @@ class SessionVolumeService:
         if missing or extra or changed:
             self.ledger.update_session(
                 session_id,
+                status="verification_pending",
                 reconciliation_required=True,
                 stale=True,
                 discrepancy_quote_volume=discrepancy,
@@ -1308,9 +1706,19 @@ def _session_projection(
         and not session.uncertain_order_state
         and (not session.maker_only_required or eligible_maker)
     )
-    status = "completed" if complete else session.status
-    if session.stale or session.reconciliation_required or not session.source_complete:
-        status = "stale" if session.stale or not session.source_complete else "uncertain"
+    status = _normalized_session_status(session.status)
+    available_balance_change = (
+        None
+        if session.starting_available_balance_quote is None or session.ending_available_balance_quote is None
+        else session.ending_available_balance_quote - session.starting_available_balance_quote
+    )
+    if status not in TERMINAL_SESSION_STATUSES:
+        if session.uncertain_order_state or status == "uncertain":
+            status = "uncertain"
+        elif session.stale or session.reconciliation_required or not session.source_complete:
+            status = "verification_pending"
+        elif complete:
+            status = "completed"
     return {
         **session.as_dict(),
         **summary,
@@ -1318,5 +1726,18 @@ def _session_projection(
         "remaining_quote_volume": str(remaining),
         "status": status,
         "maker_only_verified": eligible_maker,
+        "available_balance_change_quote": (
+            None if available_balance_change is None else str(available_balance_change)
+        ),
         "retry_allowed": False,
     }
+
+
+def _normalized_session_status(status: str) -> str:
+    if status == "running":
+        return "active"
+    if status == "stale" or status.startswith("uncertain:"):
+        return "verification_pending"
+    if status == "paused":
+        return "stopped"
+    return status

@@ -43,7 +43,7 @@ class AvailableAllocationProvider:
 
 def test_event_broker_coalesces_slow_subscribers_to_latest_public_snapshot() -> None:
     async def scenario() -> None:
-        broker = InstanceEventBroker()
+        broker = InstanceEventBroker("generation-test")
         queue = await broker.subscribe()
         await broker.publish([public_instance(name="Old")])
         await broker.publish(
@@ -63,6 +63,8 @@ def test_event_broker_coalesces_slow_subscribers_to_latest_public_snapshot() -> 
         assert payload["instances"][0]["name"] == "Latest"
         assert payload["runtime"]["maxParallelPolls"] == 8
         assert payload["runtime"]["lastRoundDurationMs"] == 87
+        assert payload["sequence"] == 2
+        assert payload["executorGeneration"] == "generation-test"
         assert "credentials" not in payload["instances"][0]
         assert broker.subscriber_count == 1
         await broker.unsubscribe(queue)

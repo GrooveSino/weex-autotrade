@@ -1,9 +1,13 @@
 import time
+from concurrent.futures import Future
 from decimal import Decimal
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
+import fleet_api.campaigns as campaigns_module
 import fleet_api.main as main_module
 from fleet_api.config import ControlPlaneSettings
 from fleet_api.execution import CycleExecutionStatus, PairCyclePlan
@@ -19,6 +23,78 @@ from fleet_api.repository import InMemoryAccountRepository
 from fleet_api.service import FleetControlService
 from fleet_api.vault import CredentialMaterial, EphemeralCredentialVault
 from fleet_api.volume_history import NormalizedTradeFill, utc_day_start_ms
+
+
+class LivePreviewGateway:
+    def order_book(self, symbol: str, _limit: int = 5) -> dict[str, object]:
+        return {"bids": [["100", "10"]], "asks": [["101", "10"]]}
+
+    def amount_step(self, _symbol: str) -> Decimal:
+        return Decimal("0.001")
+
+    def amount_to_precision(self, _symbol: str, amount: Decimal) -> Decimal:
+        return amount.quantize(Decimal("0.001"))
+
+    def account_balance_rows(self, _mode: str) -> list[dict[str, str]]:
+        return [{"asset": "USDT", "availableBalance": "1000"}]
+
+    def positions(self, _mode: str, _symbol: str) -> list[dict[str, str]]:
+        return []
+
+    def open_orders(self, _symbol: str, *, mode: str = "live") -> list[dict[str, str]]:
+        return []
+
+    def algo_orders(self, _symbol: str) -> list[dict[str, str]]:
+        return []
+
+    def fork(self):
+        return self
+
+    def close(self) -> None:
+        return None
+
+
+class LivePreviewProvider:
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    def get(self):
+        from weex_cli.beta_allocation import BetaAllocation
+
+        return BetaAllocation(
+            beta=Decimal("0.4"),
+            btc_long_weight=Decimal("0.7142857142857142857142857143"),
+            eth_short_weight=Decimal("0.2857142857142857142857142857"),
+            version="fake-beta:1",
+            as_of_ms=int(time.time() * 1000),
+            confidence=Decimal("1"),
+            confidence_threshold=Decimal("0"),
+            source="fake",
+        )
+
+
+class UnavailableLivePreviewProvider:
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    def get(self):
+        from weex_cli.beta_allocation import BetaUnavailable
+
+        raise BetaUnavailable("beta_request_failed:httperror")
+
+
+class HeldWorkerExecutor:
+    """Accepts work without running it, so API lifecycle tests cannot place orders."""
+
+    def __init__(self) -> None:
+        self.submissions = 0
+
+    def submit(self, *_args, **_kwargs) -> Future[None]:
+        self.submissions += 1
+        return Future()
+
+    def shutdown(self, **_kwargs) -> None:
+        return None
 
 
 class ExpectedWriteFailure(RuntimeError):
@@ -114,6 +190,392 @@ def strategy_payload(*, name: str = "20k shared", target: str = "20000") -> dict
     }
 
 
+def test_strategy_monitor_is_idle_without_a_run_and_never_exposes_credentials() -> None:
+    with client() as api:
+        instance = api.post("/api/v1/instances", json=create_payload()).json()
+        response = api.get(f"/api/v1/instances/{instance['id']}/strategy-monitor")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["instanceId"] == instance["id"]
+    assert payload["status"] == "idle"
+    assert payload["timeline"] == []
+    assert "secret-never-return" not in response.text
+    assert "pass-never-return" not in response.text
+    assert "proxy-password" not in response.text
+
+
+def test_beta_source_settings_update_runtime_without_storing_endpoint_credentials() -> None:
+    class NoNetworkProvider:
+        last_refresh_error = None
+
+        async def refresh(self) -> bool:
+            return True
+
+        def seconds_until_refresh(self, maximum_seconds: float) -> float:
+            return maximum_seconds
+
+        async def aclose(self) -> None:
+            return None
+
+    app = create_app(ControlPlaneSettings(seed_demo_data=False))
+    runtime = app.state.beta_source_runtime
+    runtime._provider = NoNetworkProvider()  # type: ignore[attr-defined]
+    runtime._provider_factory = lambda _settings: NoNetworkProvider()  # type: ignore[attr-defined]
+    with TestClient(app) as api:
+        current = api.get("/api/v1/beta/source")
+        assert current.status_code == 200
+        assert current.json()["url"] == "http://127.0.0.1:5888/api/v1/hedge-ratio"
+
+        rejected = api.patch(
+            "/api/v1/beta/source",
+            json={
+                "url": "https://user:password@beta.example.test/ratio",
+                "timeoutSeconds": 2,
+                "refreshIntervalSeconds": 5,
+                "backgroundRefreshEnabled": True,
+            },
+        )
+        assert rejected.status_code == 422
+
+        updated = api.patch(
+            "/api/v1/beta/source",
+            json={
+                "url": "https://beta.example.test/api/v1/ratio",
+                "timeoutSeconds": 2.5,
+                "refreshIntervalSeconds": 5,
+                "backgroundRefreshEnabled": True,
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["url"] == "https://beta.example.test/api/v1/ratio"
+        assert updated.json()["timeoutSeconds"] == 2.5
+        assert api.get("/api/v1/beta/source").json()["url"] == "https://beta.example.test/api/v1/ratio"
+
+
+def test_bound_strategy_live_preview_is_read_only_and_confirmation_gated(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"), default_mode="live", live_trading_enabled=True
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(settings)
+    with TestClient(app) as api:
+        health = api.get("/api/v1/health").json()
+        assert health["boundStrategyExecutionEnabled"] is True
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="1250")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        created = api.post("/api/v1/instances", json=payload)
+        assert created.status_code == 201
+        instance = created.json()
+        preview = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={})
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert body["strategyId"] == strategy["id"]
+        assert body["strategyVersion"] == 1
+        assert body["targetMode"] == "incremental"
+        assert body["runDisposition"] == "new_incremental"
+        assert body["strategyTargetQuoteVolume"] == "1250"
+        assert body["executionTargetQuoteVolume"] == "1250"
+        assert body["roundTurnoverQuoteMin"] == "500"
+        assert body["cycleVolume"] == "750"
+        assert "STRATEGY" in body["confirmation"]
+        changed = strategy_payload(name="Changed after preview", target="1250")
+        updated = api.patch(f"/api/v1/strategies/{strategy['id']}", json=changed)
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["version"] == 2
+        projection = api.get(f"/api/v1/instances/{instance['id']}")
+        assert projection.status_code == 200
+        assert projection.json()["strategy"]["name"] == "Changed after preview"
+        assert projection.json()["strategy"]["version"] == 2
+        executions = api.get(f"/api/v1/instances/{instance['id']}/strategy-executions")
+        assert executions.status_code == 200
+        assert executions.json()[0]["status"] == "stopped"
+        assert executions.json()[0]["reason"] == "shared_strategy_updated"
+        invalidation_events = api.get(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/{body['campaignId']}/events"
+        )
+        assert invalidation_events.status_code == 200
+        assert invalidation_events.json()[-1]["name"] == "bound_strategy_preview_invalidated"
+        refreshed = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={})
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["campaignId"] != body["campaignId"]
+        assert refreshed.json()["strategyVersion"] == 2
+        assert refreshed.json()["strategyName"] == "Changed after preview"
+        stale = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/{body['campaignId']}/execute",
+            json={"riskAcknowledged": True, "confirmation": body["confirmation"]},
+        )
+        assert stale.status_code == 409
+        assert "changed since preview" in stale.json()["detail"]
+        assert (
+            api.post(
+                f"/api/v1/instances/{instance['id']}/strategy-executions/{body['campaignId']}/execute",
+                json={"riskAcknowledged": False, "confirmation": body["confirmation"]},
+            ).status_code
+            == 409
+        )
+        assert api.get("/api/v1/health").json()["liveCampaignActiveWorkerCount"] == 0
+
+
+def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"), default_mode="live", live_trading_enabled=True
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", UnavailableLivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+
+    with TestClient(create_app(settings)) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="1250")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        preview = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={})
+
+    assert preview.status_code == 503
+    assert preview.json()["detail"] == "final beta source unavailable: beta_request_failed:httperror"
+
+
+def test_reassigning_a_shared_strategy_invalidates_old_planned_preview(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"), default_mode="live", live_trading_enabled=True
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    with TestClient(create_app(settings)) as api:
+        first = api.post("/api/v1/strategies", json=strategy_payload(name="First", target="1250")).json()
+        second = api.post("/api/v1/strategies", json=strategy_payload(name="Second", target="1250")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = first["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        old_preview = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={}).json()
+
+        assigned = api.post(
+            f"/api/v1/strategies/{second['id']}/assign",
+            json={"instanceIds": [instance["id"]]},
+        )
+        assert assigned.status_code == 200, assigned.text
+        old = api.get(f"/api/v1/instances/{instance['id']}/strategy-executions/{old_preview['campaignId']}").json()
+        assert old["status"] == "stopped"
+        assert old["reason"] == "strategy_binding_changed"
+
+        rebound = api.post(
+            f"/api/v1/strategies/{first['id']}/assign",
+            json={"instanceIds": [instance["id"]]},
+        )
+        assert rebound.status_code == 200, rebound.text
+        projection = api.get(f"/api/v1/instances/{instance['id']}").json()
+        assert projection["strategyId"] == first["id"]
+        assert projection["strategy"]["version"] == 1
+        current_preview = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={})
+        assert current_preview.status_code == 200, current_preview.text
+        assert current_preview.json()["campaignId"] != old_preview["campaignId"]
+        assert current_preview.json()["strategyId"] == first["id"]
+
+
+def test_shared_strategy_update_is_rejected_while_bound_execution_is_active(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"), default_mode="live", live_trading_enabled=True
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(settings)
+    with TestClient(app) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="1250")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        preview = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={}).json()
+        assert app.state.campaign_journal.claim_execution(preview["campaignId"], started_at_ms=1) is True
+
+        changed = api.patch(
+            f"/api/v1/strategies/{strategy['id']}",
+            json=strategy_payload(name="must not apply", target="1250"),
+        )
+        assert changed.status_code == 409
+        assert "active" in changed.json()["detail"]
+        assert api.get("/api/v1/strategies").json()[0]["name"] != "must not apply"
+
+
+def test_bound_strategy_execution_creates_session_only_after_confirmed_idempotent_claim(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"), default_mode="live", live_trading_enabled=True
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(settings, require_command_id=True)
+    held_executor = HeldWorkerExecutor()
+    app.state.campaign_manager._executor = held_executor
+    with TestClient(app) as api:
+        strategy = api.post(
+            "/api/v1/strategies",
+            json=strategy_payload(target="1250"),
+            headers={"X-Fleet-Command-Id": "strategy-create"},
+        ).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post(
+            "/api/v1/instances",
+            json=payload,
+            headers={"X-Fleet-Command-Id": "account-create"},
+        ).json()
+        preview = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/preview",
+            json={},
+            headers={"X-Fleet-Command-Id": "bound-preview"},
+        ).json()
+        assert app.state.trade_volume_ledger.latest_session(instance["id"], "live") is None
+        assert api.get("/api/v1/health").json()["liveCampaignActiveWorkerCount"] == 0
+
+        headers = {"X-Fleet-Command-Id": "bound-execute-once"}
+        execution = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/{preview['campaignId']}/execute",
+            json={"riskAcknowledged": True, "confirmation": preview["confirmation"]},
+            headers=headers,
+        )
+        assert execution.status_code == 200, execution.text
+        session = app.state.trade_volume_ledger.latest_session(instance["id"], "live")
+        assert session is not None
+        assert session["target_quote_volume"] == "1250"
+        assert held_executor.submissions == 1
+        assert api.get("/api/v1/health").json()["liveCampaignActiveWorkerCount"] == 1
+
+        duplicate = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/{preview['campaignId']}/execute",
+            json={"riskAcknowledged": True, "confirmation": preview["confirmation"]},
+            headers=headers,
+        )
+        assert duplicate.status_code == 409
+        assert held_executor.submissions == 1
+
+
 def test_strategy_target_mode_and_funding_preflight_are_exposed_and_enforced() -> None:
     with client() as api:
         payload = strategy_payload(name="Impossible round", target="200000")
@@ -165,7 +627,19 @@ def test_lifetime_target_requires_complete_trade_history_before_start() -> None:
 def test_health_proves_live_trading_is_disabled() -> None:
     response = client().get("/api/v1/health")
     assert response.status_code == 200
-    assert response.json() == {
+    payload = response.json()
+    assert {
+        key: payload[key]
+        for key in (
+            "status",
+            "adapter",
+            "storage",
+            "liveTradingEnabled",
+            "executionEnabled",
+            "liveCampaignsEnabled",
+            "liveCampaignWorkerCount",
+        )
+    } == {
         "status": "ok",
         "adapter": "mock",
         "storage": "memory",
@@ -174,6 +648,9 @@ def test_health_proves_live_trading_is_disabled() -> None:
         "liveCampaignsEnabled": False,
         "liveCampaignWorkerCount": 0,
     }
+    assert payload["apiReleaseId"] == "dev"
+    assert payload["executorConnected"] is True
+    assert isinstance(payload["executorGeneration"], str)
 
 
 def test_lifespan_runs_one_central_beta_refresher_at_the_configured_interval(
@@ -206,7 +683,19 @@ def test_lifespan_runs_one_central_beta_refresher_at_the_configured_interval(
 def test_readonly_adapter_exposes_health_but_rejects_execution_actions() -> None:
     app = create_app(ControlPlaneSettings(adapter="weex-readonly", seed_demo_data=False))
     with TestClient(app) as api:
-        assert api.get("/api/v1/health").json() == {
+        payload = api.get("/api/v1/health").json()
+        assert {
+            key: payload[key]
+            for key in (
+                "status",
+                "adapter",
+                "storage",
+                "liveTradingEnabled",
+                "executionEnabled",
+                "liveCampaignsEnabled",
+                "liveCampaignWorkerCount",
+            )
+        } == {
             "status": "ok",
             "adapter": "weex-readonly",
             "storage": "memory",
@@ -215,6 +704,8 @@ def test_readonly_adapter_exposes_health_but_rejects_execution_actions() -> None
             "liveCampaignsEnabled": False,
             "liveCampaignWorkerCount": 0,
         }
+        assert payload["executorConnected"] is True
+        assert isinstance(payload["executorGeneration"], str)
         created = api.post("/api/v1/instances", json=create_payload(mode="live"))
         assert created.status_code == 201
         assert created.json()["mockCycleTotalQuote"] is None
@@ -332,6 +823,41 @@ def test_create_returns_only_redacted_account_and_keeps_secrets_in_ephemeral_vau
     assert len(app.state.credential_vault) == 1
 
 
+def test_create_http_proxy_preserves_the_http_connection_scheme() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False))
+    payload = create_payload()
+    payload["proxy"] = {
+        "type": "http",
+        "url": "proxy-user:proxy-password@proxy.example.com:8080",
+    }
+
+    with TestClient(app) as api:
+        response = api.post("/api/v1/instances", json=payload)
+
+    assert response.status_code == 201
+    instance_id = response.json()["id"]
+    material = app.state.credential_vault.get(instance_id)
+    assert material is not None
+    assert material.proxy_url.get_secret_value() == "http://proxy-user:proxy-password@proxy.example.com:8080"
+
+
+def test_create_without_proxy_keeps_direct_connection_out_of_the_vault() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False))
+    payload = create_payload()
+    payload["proxy"] = {"type": "none"}
+
+    with TestClient(app) as api:
+        response = api.post("/api/v1/instances", json=payload)
+
+    assert response.status_code == 201
+    instance_id = response.json()["id"]
+    assert response.json()["proxy"]["type"] == "none"
+    assert response.json()["proxy"]["host"] == "不使用代理"
+    material = app.state.credential_vault.get(instance_id)
+    assert material is not None
+    assert material.proxy_url is None
+
+
 def test_shared_strategy_is_created_once_and_updates_every_assigned_account_projection() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
 
@@ -362,6 +888,7 @@ def test_shared_strategy_is_created_once_and_updates_every_assigned_account_proj
     assert second.json()["strategyId"] == strategy_id
     assert updated.status_code == 200
     assert updated.json()["id"] == strategy_id
+    assert updated.json()["version"] == 2
     assert updated.json()["targetVolumeQuote"] == "25000"
     assert updated.json()["roundTurnoverQuoteMin"] == "800"
     assert {instance["strategy"]["name"] for instance in instances} == {"25k shared"}
@@ -655,6 +1182,84 @@ def test_incremental_log_updates_are_account_scoped_and_cursor_safe() -> None:
     assert reset.json()["cursor"] == incremental_body["cursor"]
 
 
+def test_clearing_logs_is_account_scoped_and_new_events_continue_from_an_empty_cursor() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
+    with TestClient(app) as api:
+        first = api.post("/api/v1/instances", json=create_payload()).json()
+        second_payload = create_payload()
+        second_payload["name"] = "Other account"
+        second_payload["credentials"] = {
+            "apiKey": "other-key-EFGH",
+            "apiSecret": "other-secret",
+            "passphrase": "other-passphrase",
+        }
+        second = api.post("/api/v1/instances", json=second_payload).json()
+        old_cursor = api.get(f"/api/v1/instances/{first['id']}/log-updates?limit=50").json()["cursor"]
+
+        cleared = api.delete(f"/api/v1/instances/{first['id']}/log-updates")
+        first_after_clear = api.get(
+            f"/api/v1/instances/{first['id']}/log-updates",
+            params={"limit": 50, "after": old_cursor},
+        ).json()
+        second_logs = api.get(f"/api/v1/instances/{second['id']}/log-updates?limit=50").json()
+
+        app.state.fleet_service.record_campaign_progress(
+            first["id"],
+            {"name": "campaign_run_started", "run": 1, "fields": {"remaining_quote": "500"}},
+        )
+        new_logs = api.get(f"/api/v1/instances/{first['id']}/log-updates?limit=50").json()
+
+    assert cleared.status_code == 204
+    assert first_after_clear == {"lines": [], "cursor": None, "reset": True}
+    assert len(second_logs["lines"]) == 1
+    assert [line["message"] for line in new_logs["lines"]] == ["实盘执行：运行 1 开始；剩余目标 500 USDT"]
+
+
+def test_explicit_refresh_is_visible_in_realtime_logs() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
+    with TestClient(app) as api:
+        created = api.post("/api/v1/instances", json=create_payload()).json()
+        initial = api.get(f"/api/v1/instances/{created['id']}/log-updates?limit=50").json()
+        refreshed = api.post(f"/api/v1/instances/{created['id']}/refresh")
+        updates = api.get(
+            f"/api/v1/instances/{created['id']}/log-updates",
+            params={"limit": 50, "after": initial["cursor"]},
+        ).json()
+
+    assert refreshed.status_code == 200
+    assert [line["message"] for line in updates["lines"]] == ["刷新成功：价格、钱包与仓位已同步"]
+
+
+def test_campaign_progress_is_projected_to_account_log_updates() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
+    with TestClient(app) as api:
+        created = api.post("/api/v1/instances", json=create_payload()).json()
+        initial = api.get(f"/api/v1/instances/{created['id']}/log-updates?limit=50").json()
+        app.state.fleet_service.record_campaign_progress(
+            created["id"],
+            {
+                "name": "leg_completed",
+                "fields": {
+                    "symbol": "BTCUSDT",
+                    "action": "open",
+                    "quote_volume": "250",
+                    "fill_count": 2,
+                    "api_secret": "must-not-appear",
+                },
+            },
+        )
+        updates = api.get(
+            f"/api/v1/instances/{created['id']}/log-updates",
+            params={"limit": 50, "after": initial["cursor"]},
+        ).json()
+
+    assert updates["reset"] is False
+    assert len(updates["lines"]) == 1
+    assert updates["lines"][0]["level"] == "success"
+    assert updates["lines"][0]["message"] == "实盘执行：BTCUSDT open 成交已核验；250 USDT / 2 笔"
+    assert "must-not-appear" not in str(updates["lines"])
+
+
 def test_execution_history_is_account_scoped_read_only_and_marks_uncertain_cycles() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
@@ -717,6 +1322,49 @@ def test_execution_history_is_account_scoped_read_only_and_marks_uncertain_cycle
     assert missing.status_code == 404
 
 
+def test_strategy_run_history_is_session_scoped_and_hides_cycle_details() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False))
+    with TestClient(app) as api:
+        created = api.post("/api/v1/instances", json=create_payload()).json()
+        ledger = app.state.trade_volume_ledger
+        session = app.state.session_volume
+        session.start(
+            session_id="history-run",
+            account_id=created["id"],
+            mode="demo",
+            started_at_ms=1_000,
+            target_quote_volume=Decimal("25"),
+            strategy_id=created["strategyId"],
+            strategy_name=created["strategy"]["name"],
+            strategy_version=created["strategy"]["version"],
+            target_mode="incremental",
+            strategy_target_quote_volume=Decimal("25"),
+            baseline_lifetime_quote_volume=Decimal("100"),
+            starting_available_balance_quote=Decimal("42.50"),
+        )
+        ledger.update_session("history-run", source_complete=True, stale=False, pending_sync=False)
+        session.finalize(
+            "history-run",
+            result="stopped",
+            reason="manual_stop",
+            finished_at_ms=2_000,
+            final_lifetime_quote_volume=Decimal("100"),
+            ending_available_balance_quote=Decimal("42.17"),
+        )
+        response = api.get(f"/api/v1/instances/{created['id']}/strategy-runs?limit=10")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["nextCursor"] is None
+    assert body["items"][0]["sessionId"] == "history-run"
+    assert body["items"][0]["result"] == "stopped"
+    assert body["items"][0]["startingAvailableBalanceQuote"] == "42.50"
+    assert body["items"][0]["endingAvailableBalanceQuote"] == "42.17"
+    assert body["items"][0]["availableBalanceChangeQuote"] == "-0.33"
+    assert "cycleId" not in body["items"][0]
+    assert "orderId" not in body["items"][0]
+
+
 def test_demo_instance_lifecycle_and_exact_global_stop() -> None:
     with client() as api:
         instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
@@ -765,6 +1413,71 @@ def test_stopped_instance_can_replace_proxy_without_echoing_credentials() -> Non
     material = app.state.credential_vault.get(instance_id)
     assert material is not None
     assert material.proxy_url.get_secret_value().endswith("proxy.example.com:1080")
+
+
+def test_stopped_instance_keeps_stored_credentials_when_edit_payload_omits_them() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False))
+    with TestClient(app) as api:
+        instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
+        before = app.state.credential_vault.get(instance_id)
+        response = api.patch(
+            f"/api/v1/instances/{instance_id}",
+            json={"name": "Renamed without credential rotation", "accountTag": "edited"},
+        )
+        after = app.state.credential_vault.get(instance_id)
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Renamed without credential rotation"
+    assert "apiSecret" not in response.text
+    assert before is not None and after is not None
+    assert after.api_key.get_secret_value() == before.api_key.get_secret_value()
+    assert after.api_secret.get_secret_value() == before.api_secret.get_secret_value()
+    assert after.passphrase.get_secret_value() == before.passphrase.get_secret_value()
+
+
+def test_stopped_instance_can_disable_proxy_without_replacing_credentials() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False))
+    with TestClient(app) as api:
+        instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
+        before = app.state.credential_vault.get(instance_id)
+        response = api.patch(f"/api/v1/instances/{instance_id}", json={"proxy": {"type": "none"}})
+        after = app.state.credential_vault.get(instance_id)
+
+    assert response.status_code == 200
+    assert response.json()["proxy"]["type"] == "none"
+    assert response.json()["proxy"]["host"] == "不使用代理"
+    assert before is not None and after is not None
+    assert after.proxy_url is None
+    assert after.api_key.get_secret_value() == before.api_key.get_secret_value()
+    assert after.api_secret.get_secret_value() == before.api_secret.get_secret_value()
+    assert after.passphrase.get_secret_value() == before.passphrase.get_secret_value()
+
+
+def test_error_instance_can_recover_http_proxy_without_changing_strategy() -> None:
+    repository = InMemoryAccountRepository()
+    vault = EphemeralCredentialVault()
+    service = FleetControlService(repository, vault)
+    created = service.create_instance(CreateInstanceRequest.model_validate(create_payload(mode="live")))
+    repository.replace(created.model_copy(update={"status": InstanceStatus.ERROR}))
+
+    updated = service.update_instance(
+        created.id,
+        UpdateInstanceRequest.model_validate(
+            {
+                "proxy": {
+                    "type": "http",
+                    "url": "proxy.example.com:8080:user:password",
+                }
+            }
+        ),
+    )
+
+    assert updated.status is InstanceStatus.ERROR
+    assert updated.proxy.type.value == "http"
+    assert updated.strategy_id == created.strategy_id
+    material = vault.get(created.id)
+    assert material is not None
+    assert material.proxy_url.get_secret_value() == "http://user:password@proxy.example.com:8080"
 
 
 def test_update_restores_credentials_when_public_account_write_fails() -> None:

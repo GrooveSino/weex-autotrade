@@ -139,6 +139,11 @@ class MixedFactory(RecordingFactory):
         return super().create(instance_id)
 
 
+class AllFailingFactory(RecordingFactory):
+    def create(self, instance_id: str) -> RecordingAdapter:
+        return FailingAdapter(self, instance_id)
+
+
 class StaticAllocationProvider:
     def __init__(self) -> None:
         self.calls = 0
@@ -412,7 +417,7 @@ def test_runtime_polls_accounts_concurrently_with_account_scoped_credentials_and
     asyncio.run(scenario())
 
 
-def test_runtime_failure_is_isolated_and_error_detail_is_redacted() -> None:
+def test_stopped_runtime_failure_is_isolated_and_error_detail_is_redacted() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
         vault = EphemeralCredentialVault()
@@ -439,7 +444,8 @@ def test_runtime_failure_is_isolated_and_error_detail_is_redacted() -> None:
         assert await runtime.poll_all() is True
         failing_snapshot = service.get_instance(failing.id)
         healthy_snapshot = service.get_instance(healthy.id)
-        assert failing_snapshot.status.value == "error"
+        assert failing_snapshot.status is InstanceStatus.STOPPED
+        assert failing_snapshot.phase == "已停止；数据待核验 (RuntimeError)"
         assert failing_snapshot.runtime.consecutive_failures == 2
         assert failing_snapshot.runtime.last_error_type == "RuntimeError"
         assert failing_snapshot.runtime.last_poll_failed_at_ms is not None
@@ -455,6 +461,129 @@ def test_runtime_failure_is_isolated_and_error_detail_is_redacted() -> None:
         assert "RuntimeError" in serialized_logs
         assert "api-key-FAIL" not in serialized_logs
         assert "private-a" not in serialized_logs
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_legacy_unprotected_telemetry_error_migrates_to_stopped_on_the_next_poll() -> None:
+    repository = InMemoryAccountRepository()
+    service = FleetControlService(repository, EphemeralCredentialVault())
+    instance = service.create_instance(
+        CreateInstanceRequest.model_validate(
+            payload("legacy-telemetry", "api-key-LEGACY", "user:proxy@proxy.example.com:9202")
+        )
+    )
+    repository.replace(
+        instance.model_copy(
+            update={
+                "status": InstanceStatus.ERROR,
+                "phase": "数据同步失败 (NetworkError)",
+                "runtime": instance.runtime.model_copy(update={"last_error_type": "NetworkError"}),
+            },
+            deep=True,
+        )
+    )
+
+    migrated = service.record_runtime_failure(instance.id, "NetworkError")
+
+    assert migrated.status is InstanceStatus.STOPPED
+    assert migrated.phase == "已停止；数据待核验 (NetworkError)"
+
+
+def test_paused_and_running_runtime_failures_preserve_control_state_or_halt_execution() -> None:
+    async def scenario() -> None:
+        repository = InMemoryAccountRepository()
+        service = FleetControlService(repository, EphemeralCredentialVault())
+        paused = service.create_instance(
+            CreateInstanceRequest.model_validate(
+                payload("paused-failure", "api-key-PAUSED", "user:proxy@proxy.example.com:9203")
+            )
+        )
+        running = service.create_instance(
+            CreateInstanceRequest.model_validate(
+                payload("running-failure", "api-key-RUNNING", "user:proxy@proxy.example.com:9204")
+            )
+        )
+        for instance_id, status, phase in (
+            (paused.id, InstanceStatus.PAUSED, "已人工暂停"),
+            (running.id, InstanceStatus.RUNNING, "Mock 成交量策略运行中"),
+        ):
+            current = service.get_instance(instance_id)
+            service.repository.replace(
+                current.model_copy(
+                    update={
+                        "status": status,
+                        "phase": phase,
+                        "cycle": current.cycle.model_copy(update={"next_action_at": "等待规划"}),
+                    },
+                    deep=True,
+                )
+            )
+
+        runtime = AccountRuntimeManager(
+            service,
+            AllFailingFactory(),
+            InMemoryTradeVolumeLedger(),
+            max_parallel_polls=2,
+            poll_timeout_seconds=1,
+        )
+
+        assert await runtime.poll_all() is True
+        paused_snapshot = service.get_instance(paused.id)
+        running_snapshot = service.get_instance(running.id)
+        assert paused_snapshot.status is InstanceStatus.PAUSED
+        assert paused_snapshot.cycle.next_action_at is None
+        assert running_snapshot.status is InstanceStatus.WARNING
+        assert running_snapshot.cycle.next_action_at is None
+        assert running_snapshot.phase == "运行已安全暂停；数据待核验 (RuntimeError)"
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_repeated_stop_after_verified_cancellation_is_idempotent_even_after_telemetry_failure() -> None:
+    async def scenario() -> None:
+        repository = InMemoryAccountRepository()
+        service = FleetControlService(repository, EphemeralCredentialVault())
+        instance = service.create_instance(
+            CreateInstanceRequest.model_validate(
+                payload("idempotent-stop", "api-key-STOP", "user:proxy@proxy.example.com:9205")
+            )
+        )
+        factory = CancelTrackingFactory({instance.id: CancelOrdersOutcome(True, 0, "execution_disabled")})
+        execution = PairedCycleCoordinator(
+            InMemoryExecutionJournal(),
+            InMemoryTradeVolumeLedger(),
+            StaticAllocationProvider(),
+            factory,
+            total_quote=Decimal("20"),
+        )
+        runtime = AccountRuntimeManager(
+            service,
+            MockAccountTelemetryAdapterFactory(),
+            InMemoryTradeVolumeLedger(),
+            execution,
+            max_parallel_polls=2,
+            poll_timeout_seconds=1,
+        )
+
+        first, duplicate = await asyncio.gather(
+            runtime.apply_action(instance.id, InstanceAction.STOP),
+            runtime.apply_action(instance.id, InstanceAction.STOP),
+        )
+        assert first.status is InstanceStatus.STOPPED
+        assert duplicate.status is InstanceStatus.STOPPED
+        assert factory.adapters[instance.id].cancel_calls == 1
+        assert first.runtime.last_stop_verified_at_ms is not None
+
+        service.record_runtime_failure(instance.id, "NetworkError")
+        retry = await runtime.apply_action(instance.id, InstanceAction.STOP)
+        assert retry.status is InstanceStatus.STOPPED
+        assert factory.adapters[instance.id].cancel_calls == 1
+        messages = [line.message for line in service.logs(instance.id, 20)]
+        assert sum(message.startswith("实例操作已接受：停止") for message in messages) == 1
+        assert sum(message.startswith("撤单核验完成：") for message in messages) == 1
         await runtime.close()
 
     asyncio.run(scenario())
@@ -547,7 +676,7 @@ def test_manual_refresh_never_advances_btc_long_eth_short_execution_cycle() -> N
     assert body["exposure"]["btcLong"] == body["exposure"]["ethShort"] == 0
 
 
-def test_manual_pause_verifies_cancellation_and_beta_recovery_does_not_resume_it() -> None:
+def test_manual_pause_ends_incremental_run_and_explicit_start_begins_a_fresh_run() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
         service = FleetControlService(repository, EphemeralCredentialVault())
@@ -587,7 +716,9 @@ def test_manual_pause_verifies_cancellation_and_beta_recovery_does_not_resume_it
 
         resumed = await runtime.apply_action(instance.id, InstanceAction.START)
         assert resumed.status is InstanceStatus.RUNNING
-        assert resumed.strategy_progress.started_at_ms == started_at_ms
+        assert resumed.strategy_progress.started_at_ms is not None
+        assert resumed.strategy_progress.started_at_ms >= started_at_ms
+        assert resumed.strategy_progress.generated_volume_quote == 0
         await runtime.close()
 
     asyncio.run(scenario())
@@ -1055,7 +1186,7 @@ def test_scheduler_uses_each_accounts_independent_mock_cycle_quote() -> None:
     asyncio.run(scenario())
 
 
-def test_runtime_stops_exactly_at_cycle_target_and_does_not_create_another_plan() -> None:
+def test_runtime_stops_exactly_at_incremental_target_and_allows_a_fresh_run() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
         vault = EphemeralCredentialVault()
@@ -1103,8 +1234,10 @@ def test_runtime_stops_exactly_at_cycle_target_and_does_not_create_another_plan(
         assert journal.find(instance.id, 1) is not None
         assert journal.find(instance.id, 2) is None
         assert stopped.strategy_progress.generated_volume_quote == Decimal("40")
-        with pytest.raises(UnsafeOperation, match="volume target has already been reached"):
-            service.apply_action(instance.id, InstanceAction.START)
+        restarted = service.apply_action(instance.id, InstanceAction.START)
+        assert restarted.status is InstanceStatus.RUNNING
+        assert restarted.strategy_progress.generated_volume_quote == 0
+        assert restarted.strategy_progress.started_at_ms is not None
         await runtime.close()
 
     asyncio.run(scenario())
@@ -1121,7 +1254,9 @@ def test_mock_adapter_never_returns_fake_telemetry_for_live_account() -> None:
 
     assert refreshed.status_code == 503
     assert refreshed.json()["detail"] == "telemetry unavailable (MockLiveTelemetryUnavailable)"
-    assert snapshot["status"] == "error"
+    assert snapshot["status"] == "stopped"
+    assert snapshot["phase"] == "已停止；数据待核验 (MockLiveTelemetryUnavailable)"
+    assert snapshot["runtime"]["lastErrorType"] == "MockLiveTelemetryUnavailable"
     assert snapshot["wallet"]["equity"] == 0
     assert snapshot["volume"]["complete"] is False
 

@@ -16,7 +16,7 @@ class CredentialMaterial:
     api_key: SecretStr
     api_secret: SecretStr
     passphrase: SecretStr
-    proxy_url: SecretStr
+    proxy_url: SecretStr | None
 
     def __repr__(self) -> str:
         return "CredentialMaterial(**********)"
@@ -93,7 +93,7 @@ class EncryptedSQLiteCredentialVault:
                 "api_key": material.api_key.get_secret_value(),
                 "api_secret": material.api_secret.get_secret_value(),
                 "passphrase": material.passphrase.get_secret_value(),
-                "proxy_url": material.proxy_url.get_secret_value(),
+                "proxy_url": material.proxy_url.get_secret_value() if material.proxy_url else None,
             },
             separators=(",", ":"),
         ).encode()
@@ -108,7 +108,7 @@ class EncryptedSQLiteCredentialVault:
             api_key=SecretStr(payload["api_key"]),
             api_secret=SecretStr(payload["api_secret"]),
             passphrase=SecretStr(payload["passphrase"]),
-            proxy_url=SecretStr(payload["proxy_url"]),
+            proxy_url=(SecretStr(value) if isinstance((value := payload.get("proxy_url")), str) and value else None),
         )
 
     def put(self, instance_id: str, material: CredentialMaterial) -> None:

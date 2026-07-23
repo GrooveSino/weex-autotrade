@@ -13,7 +13,10 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-weex-autotrade = { path = "../.." }
+# The control plane and executor share the CLI's execution-event projection.
+# Keep this local source editable so a service release cannot silently use a
+# stale wheel after the shared event schema changes.
+weex-autotrade = { path = "../..", editable = true }
 
 [dependency-groups]
 dev = [

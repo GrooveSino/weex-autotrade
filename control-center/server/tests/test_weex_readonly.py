@@ -113,6 +113,20 @@ class FakeReadonlyGateway:
         self.closed = True
 
 
+class HistoryFailingGateway(FakeReadonlyGateway):
+    def trade_rows(
+        self,
+        mode: str,
+        symbol: str | None,
+        *,
+        start_time: int,
+        end_time: int,
+        limit: int,
+        page: int | None = None,
+    ) -> list[dict[str, Any]]:
+        raise IndexError("fixture-only malformed history response")
+
+
 def test_live_readonly_adapter_maps_wallet_positions_and_exact_fill_volume() -> None:
     async def scenario() -> None:
         ledger = InMemoryTradeVolumeLedger()
@@ -188,6 +202,29 @@ def test_history_start_older_than_retention_is_clamped_and_explained() -> None:
     asyncio.run(scenario())
 
 
+def test_history_failure_keeps_wallet_and_positions_available_but_marks_volume_unverified() -> None:
+    async def scenario() -> None:
+        adapter = WeexReadonlyAccountTelemetryAdapterFactory(
+            InMemoryTradeVolumeLedger(),
+            history_lookback_days=1,
+            gateway_factory=lambda credentials, timeout_ms: HistoryFailingGateway(),
+        ).create("ins-live")
+
+        first = await adapter.collect(AccountTelemetryContext(account(), material()))
+        second = await adapter.collect(AccountTelemetryContext(account(), material()))
+
+        assert first.wallet.equity == 98
+        assert first.exposure.btc_long == 123.45
+        assert first.exposure.eth_short == 67.89
+        assert first.volume.complete is False
+        assert "成交历史待核验 (IndexError)" in first.phase
+        assert first.activity_log is not None and "IndexError" in first.activity_log
+        # The repeated failing history sync is deliberately not logged again.
+        assert second.activity_log is None
+
+    asyncio.run(scenario())
+
+
 def test_each_account_gets_an_independent_gateway_and_proxy_material() -> None:
     async def scenario() -> None:
         ledger = InMemoryTradeVolumeLedger()
@@ -195,7 +232,7 @@ def test_each_account_gets_an_independent_gateway_and_proxy_material() -> None:
         proxy_urls: list[str] = []
 
         def gateway_factory(credentials: CredentialMaterial, timeout_ms: int):
-            assert timeout_ms == 5_000
+            assert timeout_ms == 15_000
             proxy_urls.append(credentials.proxy_url.get_secret_value())
             gateway = FakeReadonlyGateway()
             gateways.append(gateway)

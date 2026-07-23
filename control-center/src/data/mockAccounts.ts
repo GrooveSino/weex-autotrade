@@ -2,6 +2,7 @@ import type { AccountInstance, VolumeStrategy } from '../types'
 
 const standardStrategy: VolumeStrategy = {
     id: 'strategy-standard-20k',
+    version: 1,
     name: '标准 20K 双币策略',
     targetMode: 'incremental',
     targetVolumeQuote: '20000',
@@ -69,6 +70,7 @@ function runtimeHealth(
     lastPollDurationMs: durationMs,
     consecutiveFailures,
     lastErrorType,
+    lastStopVerifiedAtMs: null,
   }
 }
 

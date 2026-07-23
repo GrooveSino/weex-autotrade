@@ -4,6 +4,7 @@ import time
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic.alias_generators import to_camel
@@ -28,6 +29,8 @@ class InstanceStatus(StrEnum):
 
 
 class ProxyType(StrEnum):
+    NONE = "none"
+    HTTP = "http"
     HTTPS = "https"
     SOCKS5 = "socks5"
 
@@ -77,7 +80,18 @@ class CredentialInput(CamelModel):
 
 class ProxyInput(CamelModel):
     type: ProxyType
-    url: SecretStr = Field(min_length=1)
+    url: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_proxy_url(self) -> Self:
+        value = self.url.get_secret_value().strip() if self.url is not None else ""
+        if self.type is ProxyType.NONE:
+            if value:
+                raise ValueError("proxy URL must be empty when proxy type is none")
+            return self
+        if not value:
+            raise ValueError("proxy URL is required")
+        return self
 
 
 class VolumeStrategyInput(CamelModel):
@@ -104,6 +118,11 @@ class VolumeStrategyInput(CamelModel):
 
 class VolumeStrategy(VolumeStrategyInput):
     id: str = Field(min_length=1, max_length=80)
+    # Server-managed ownership boundary. Requests never accept this field.
+    owner_user_id: str = Field(default="gg", min_length=1, max_length=48)
+    # Each shared-strategy edit creates the next immutable audit version.
+    # Existing SQLite payloads omit it and therefore deserialize as version 1.
+    version: int = Field(default=1, ge=1)
 
 
 class StrategyProgress(CamelModel):
@@ -205,10 +224,34 @@ class FundingPreflightSnapshot(CamelModel):
 
 class SessionVolumeProjection(CamelModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, serialize_by_alias=True, extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy_projection(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        strategy_target = value.get("strategyTargetQuoteVolume", value.get("strategy_target_quote_volume"))
+        if strategy_target is not None:
+            return value
+        target = value.get("targetQuoteVolume", value.get("target_quote_volume"))
+        if target is None:
+            return value
+        return {**value, "strategyTargetQuoteVolume": target}
+
     session_id: str
     account_id: str
     mode: str
     started_at_ms: int
+    finished_at_ms: int | None = None
+    strategy_id: str | None = None
+    strategy_name: str | None = None
+    strategy_version: int | None = None
+    target_mode: StrategyTargetMode = StrategyTargetMode.INCREMENTAL
+    strategy_target_quote_volume: Decimal
+    baseline_lifetime_quote_volume: Decimal = Decimal(0)
+    final_lifetime_quote_volume: Decimal | None = None
+    result: str | None = None
+    result_reason: str | None = None
     target_quote_volume: Decimal
     verified_quote_volume: Decimal
     remaining_quote_volume: Decimal
@@ -233,6 +276,13 @@ class VolumeSnapshot(CamelModel):
     today: float = 0
     complete: bool = False
     session: SessionVolumeProjection | None = Field(default=None, exclude_if=lambda value: value is None)
+    active_session: SessionVolumeProjection | None = Field(default=None, exclude_if=lambda value: value is None)
+    last_run: SessionVolumeProjection | None = Field(default=None, exclude_if=lambda value: value is None)
+    lifetime_source_complete: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    strategy_target_quote_volume: Decimal | None = Field(default=None, exclude_if=lambda value: value is None)
+    strategy_verified_quote_volume: Decimal | None = Field(default=None, exclude_if=lambda value: value is None)
+    strategy_remaining_quote_volume: Decimal | None = Field(default=None, exclude_if=lambda value: value is None)
+    strategy_target_reached: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ExposureSnapshot(CamelModel):
@@ -253,6 +303,8 @@ class RuntimeHealthSnapshot(CamelModel):
     last_poll_duration_ms: int | None = Field(default=None, ge=0)
     consecutive_failures: int = Field(default=0, ge=0)
     last_error_type: str | None = None
+    # A verified stop is a safety checkpoint, not a telemetry health signal.
+    last_stop_verified_at_ms: int | None = None
 
 
 class SchedulerMetrics(CamelModel):
@@ -273,6 +325,9 @@ class SchedulerMetrics(CamelModel):
 
 class AccountInstance(CamelModel):
     id: str
+    # Server-managed and returned only to the owning local user. This lets
+    # independent executor workers retain the correct persistent identity.
+    owner_user_id: str = Field(default="gg", min_length=1, max_length=48)
     name: str
     account_tag: str
     api_key_tail: str
@@ -314,6 +369,67 @@ class LogBatch(CamelModel):
     lines: list[LogLine]
     cursor: str | None
     reset: bool = False
+
+
+class ActiveExecutionWait(CamelModel):
+    key: str
+    label: str
+    updated_at_ms: int
+    elapsed_ms: int = 0
+    remaining_ms: int | None = None
+    detail: str = ""
+    symbol: str | None = None
+    action: str | None = None
+
+
+class ExecutionTimelineEntry(CamelModel):
+    id: str
+    sequence: int
+    at_ms: int
+    level: LogLevel
+    event_name: str
+    title: str
+    detail: str = ""
+
+
+class StrategyMonitorSnapshot(CamelModel):
+    schema_version: int = 2
+    instance_id: str
+    session_id: str | None = None
+    execution_id: str | None = None
+    executor_generation: str
+    status: str
+    phase: str
+    current_run: int = 0
+    current_round: int = 0
+    target_quote_volume: Decimal = Decimal(0)
+    verified_quote_volume: Decimal = Decimal(0)
+    ledger_verified_quote_volume: Decimal = Decimal(0)
+    remaining_quote_volume: Decimal = Decimal(0)
+    volume_source: Literal["ledger", "execution_journal", "pending"] = "pending"
+    source_complete: bool = False
+    stale: bool = True
+    reconciliation_required: bool = False
+    btc_quote_volume: Decimal = Decimal(0)
+    eth_quote_volume: Decimal = Decimal(0)
+    maker_fill_count: int = 0
+    taker_fill_count: int = 0
+    unknown_fill_count: int = 0
+    submissions: int = 0
+    cancels: int = 0
+    requotes: int = 0
+    active_waits: list[ActiveExecutionWait] = Field(default_factory=list)
+    timeline: list[ExecutionTimelineEntry] = Field(default_factory=list)
+    cursor: str | None = None
+    has_more: bool = False
+
+
+class StrategyMonitorEvent(CamelModel):
+    type: str
+    cursor: str | None = None
+    snapshot: StrategyMonitorSnapshot | None = None
+    timeline: list[ExecutionTimelineEntry] = Field(default_factory=list)
+    active_waits: list[ActiveExecutionWait] = Field(default_factory=list)
 
 
 class ExecutionCycleView(CamelModel):
@@ -381,6 +497,43 @@ class BetaMarketSnapshot(CamelModel):
     max_age_ms: Decimal
 
 
+class BetaSourceSettings(CamelModel):
+    """Non-secret, shared Beta allocation source configuration."""
+
+    url: str = Field(min_length=1, max_length=2_048)
+    timeout_seconds: float = Field(gt=0, le=60)
+    refresh_interval_seconds: float = Field(gt=0, le=3_600)
+    background_refresh_enabled: bool
+    updated_at_ms: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_url(self) -> Self:
+        parsed = urlsplit(self.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Beta source URL must be an absolute HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Beta source URL must not contain credentials")
+        return self
+
+
+class BetaSourceSettingsUpdate(CamelModel):
+    url: str = Field(min_length=1, max_length=2_048)
+    timeout_seconds: float = Field(gt=0, le=60)
+    refresh_interval_seconds: float = Field(gt=0, le=3_600)
+    background_refresh_enabled: bool
+
+    @model_validator(mode="after")
+    def validate_url(self) -> Self:
+        BetaSourceSettings(
+            url=self.url,
+            timeout_seconds=self.timeout_seconds,
+            refresh_interval_seconds=self.refresh_interval_seconds,
+            background_refresh_enabled=self.background_refresh_enabled,
+            updated_at_ms=1,
+        )
+        return self
+
+
 class VolumeSessionCreateRequest(CamelModel):
     session_id: str = Field(min_length=1, max_length=128)
     target_quote_volume: Decimal = Field(gt=0, max_digits=30, decimal_places=18)
@@ -394,6 +547,16 @@ class VolumeSessionResponse(CamelModel):
     account_id: str
     mode: str
     started_at_ms: int
+    finished_at_ms: int | None = None
+    strategy_id: str | None = None
+    strategy_name: str | None = None
+    strategy_version: int | None = None
+    target_mode: StrategyTargetMode = StrategyTargetMode.INCREMENTAL
+    strategy_target_quote_volume: Decimal
+    baseline_lifetime_quote_volume: Decimal = Decimal(0)
+    final_lifetime_quote_volume: Decimal | None = None
+    result: str | None = None
+    result_reason: str | None = None
     target_quote_volume: Decimal
     verified_quote_volume: Decimal
     remaining_quote_volume: Decimal
@@ -417,6 +580,36 @@ class VolumeSessionReconcileRequest(CamelModel):
     fills: list[dict[str, object]] = Field(default_factory=list)
 
 
+class StrategyRunSummary(CamelModel):
+    session_id: str
+    strategy_id: str | None = None
+    strategy_name: str | None = None
+    strategy_version: int | None = None
+    target_mode: StrategyTargetMode
+    started_at_ms: int
+    finished_at_ms: int | None = None
+    status: str
+    result: str | None = None
+    result_reason: str | None = None
+    strategy_target_quote_volume: Decimal
+    execution_target_quote_volume: Decimal
+    verified_quote_volume: Decimal
+    remaining_quote_volume: Decimal
+    baseline_lifetime_quote_volume: Decimal
+    final_lifetime_quote_volume: Decimal | None = None
+    starting_available_balance_quote: Decimal | None = None
+    ending_available_balance_quote: Decimal | None = None
+    available_balance_change_quote: Decimal | None = None
+    source_complete: bool
+    stale: bool
+    reconciliation_required: bool
+
+
+class StrategyRunPage(CamelModel):
+    items: list[StrategyRunSummary]
+    next_cursor: str | None = None
+
+
 class HealthResponse(CamelModel):
     status: str = "ok"
     adapter: str
@@ -424,7 +617,16 @@ class HealthResponse(CamelModel):
     live_trading_enabled: bool = False
     execution_enabled: bool = False
     live_campaigns_enabled: bool = False
+    # Public capability for the confirmation-gated, bound-strategy Live path.
+    # Keep `execution_enabled` reserved for the legacy Mock runtime.
+    bound_strategy_execution_enabled: bool = False
+    # Actual in-process campaigns, distinct from the configured thread-pool
+    # capacity exposed below. Release migration uses this to avoid two owners.
+    live_campaign_active_worker_count: int = Field(default=0, ge=0)
     live_campaign_worker_count: int = Field(default=0, ge=0)
+    api_release_id: str | None = None
+    executor_connected: bool = True
+    executor_generation: str | None = None
 
 
 class BetaCampaignStatus(StrEnum):
@@ -455,6 +657,23 @@ class BetaCampaignPreviewRequest(CamelModel):
         return self
 
 
+class BoundStrategyExecutionPreviewRequest(CamelModel):
+    """Intentionally empty: sizing and timing always come from the binding."""
+
+
+class BoundStrategyExecutionExecuteRequest(CamelModel):
+    risk_acknowledged: bool
+    confirmation: str = Field(min_length=1, max_length=200)
+
+
+class BoundStrategyExecutionStopRequest(CamelModel):
+    confirmation: str = Field(min_length=1, max_length=200)
+
+
+class BoundStrategyExecutionReconcileRequest(CamelModel):
+    confirmation: str = Field(min_length=1, max_length=240)
+
+
 class BetaCampaignExecuteRequest(CamelModel):
     risk_acknowledged: bool
     confirmation: str = Field(min_length=1, max_length=200)
@@ -462,6 +681,10 @@ class BetaCampaignExecuteRequest(CamelModel):
 
 class BetaCampaignStopRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=200)
+
+
+class BetaCampaignReconcileRequest(CamelModel):
+    confirmation: str = Field(min_length=1, max_length=240)
 
 
 class BetaCampaignEvent(CamelModel):
@@ -481,7 +704,18 @@ class BetaCampaignView(CamelModel):
     instance_id: str
     status: BetaCampaignStatus
     schema_version: int
+    strategy_id: str | None = None
+    strategy_name: str | None = None
+    strategy_version: int | None = Field(default=None, ge=1)
+    strategy_snapshot: dict[str, object] | None = None
+    session_id: str | None = None
+    target_mode: StrategyTargetMode | None = None
+    run_disposition: str | None = None
+    strategy_target_quote_volume: Decimal | None = None
+    execution_target_quote_volume: Decimal | None = None
+    baseline_lifetime_quote_volume: Decimal | None = None
     target_quote: Decimal
+    round_turnover_quote_min: Decimal | None = None
     cycle_volume: Decimal
     authorized_max_quote: Decimal
     hold_min_seconds: int
@@ -503,6 +737,9 @@ class BetaCampaignView(CamelModel):
     max_supported_turnover_quote: Decimal | None = None
     confirmation: str
     stop_confirmation: str
+    reconciliation_confirmation: str | None = None
+    reconciliation_required: bool = False
+    retry_allowed: bool = False
     risk_acknowledged: bool = False
     current_run: int = 0
     generated_quote: Decimal = Decimal(0)

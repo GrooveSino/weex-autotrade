@@ -1,6 +1,6 @@
 # WEEX Fleet Control Center
 
-多账号交易控制台。前端默认使用浏览器内 Mock 数据，也可以连接本地 Mock 控制平面；另有显式开启的 `weex-readonly` 控制平面，用于只读 Live 账户遥测。`weex-live` 是单独的、默认关闭的实盘 Beta Campaign 控制平面，只有满足全部安全门禁后才允许网页启动一个账号的一条 campaign。
+多账号交易控制台。前端默认使用浏览器内 Mock 数据，也可以连接本地 Mock 控制平面；另有显式开启的 `weex-readonly` 控制平面，用于只读 Live 账户遥测。`weex-live` 是默认关闭的已绑定策略实盘执行面：用户管理共享策略和账号绑定，只有满足全部安全门禁后才允许为一个 Live 账号预览、精确确认并启动其绑定策略。
 
 ## 本地运行
 
@@ -56,7 +56,7 @@ npm run dev:api
 
 该模式只读取 Live 账号余额、仓位和 `userTrades`，每个账号使用自己的 API 凭据与 HTTPS/SOCKS5 代理；网页上的启动和暂停动作会被服务端拒绝，但停止动作仍可用。账号设置可填写“历史起点”：在 WEEX 最近 365 天留存范围内时，扫描完成后累计量可标记为完整；未填写或早于留存边界时会保留“未完整”状态并显示原因。
 
-## 网页 Beta Campaign 实盘
+## 已绑定策略实盘执行
 
 实盘控制平面必须显式配置以下四个门禁，并使用加密 SQLite 存储。默认 `mock` 和 `weex-readonly` 不会创建下单 worker：
 
@@ -69,9 +69,42 @@ export FLEET_DB_PATH=server/data/fleet-control.db
 export FLEET_MASTER_KEY="$(uv run --project server python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 ```
 
-网页端只暴露目标量、每轮量、持仓时间和轮间隔等简单参数。服务端继续调用 CLI 的 `LiveBetaVolumeCampaignService`，自动执行 Beta 锁定、杠杆预检、纯 `POST_ONLY` 开平仓、成交对账和故障收敛。执行前需要预览，并同时勾选风险确认和输入页面生成的完整 confirmation phrase；普通策略启动入口不会触发实盘下单。
+用户先创建共享策略并绑定到账号。Live 账号启动时，服务端只从该绑定策略生成只读预览并冻结策略 ID、版本与快照；页面不能临时修改目标量、每轮范围或时间范围。服务端继续调用 CLI 的 `LiveBetaVolumeCampaignService`，自动执行 Beta 锁定、杠杆预检、纯 `POST_ONLY` 开平仓、成交对账和故障收敛。执行前需要预览，并同时勾选风险确认和输入页面生成的完整 confirmation phrase；策略绑定或版本变化后必须重新预览，普通策略启动入口不会降级为未确认的实盘下单。
 
-首版只允许一个 Live 账号和一个 active campaign。停止是安全边界请求，worker 会先完成当前可确认的撤单/平仓；服务重启会把 `executing`/`stopping` 标记为 `uncertain`，该状态只允许人工核对，不提供自动重试、补单或继续执行按钮。`POST_ONLY` 拒绝、撤单/仓位/成交无法确认和网络不确定结果均不会自动重提订单。
+每个 Live 账号同时至多拥有一个 active bound-strategy execution。批量“启动所选”会逐账号生成预览、逐账号精确确认、逐账号启动，一个失败不会影响其他账号。停止是安全边界请求：立即阻断新开仓、撤销普通单和条件单、以 `POST_ONLY` 处理残仓，并在最终边界核验后才进入 stopped；任一撤单、仓位或成交无法确认时进入 `uncertain`，该状态只允许人工核对，不提供自动重试、补单或继续执行按钮。`POST_ONLY` 拒绝和网络不确定结果均不会自动重提订单。
+
+每轮会保留策略定义的总交易量最小/最大范围。执行器会在开仓前为该轮选定并持久化实际计划值，BTC 多、ETH 空以及两腿平仓都使用同一轮计划。计划值只用于下单规划，绝不作为已成交交易量；会话进度只来自权威成交明细。
+
+## macOS 稳定发布
+
+生产运行拆为三个独立进程：网页静态服务、TCP 控制 API 和私有 Unix Socket 执行器。执行器独占 SQLite、加密凭据库、会话成交账本与 Campaign worker；API 只转发 REST/SSE，不直接提交交易所命令。网页 release 原子切换时不会重启 API 或执行器；API 重启也不会自动恢复、重提或改变执行器中的订单动作。
+
+先安装稳定 LaunchAgent runner，再构建 service release。两个步骤都不会启动策略：
+
+```bash
+control-center/scripts/macos/install-launch-agents.zsh --install
+control-center/scripts/macos/deploy-service-release.zsh
+```
+
+服务仅从 `~/Library/Application Support/WEEXFleet/service-current` 运行，不依赖 `Documents` 工作区。启动前需要由现有的受控部署凭据流程提供 `~/Library/Application Support/WEEXFleet/.env.live`，其中至少包含上述 `weex-live` / SQLite 门禁，以及与现有加密 SQLite 凭据库匹配的 `FLEET_MASTER_KEY`。该文件、数据库、日志、账户 API Key、Passphrase 和代理密码都不得提交或放入 release。
+
+激活脚本会先确认旧 API 没有实际活动 Campaign，再启动执行器并只通过 owner-only Unix Socket 做本机 health 校验，最后才切换 API：
+
+```bash
+control-center/scripts/macos/activate-service-release.zsh
+```
+
+如果新 API 未通过 health，脚本会原子恢复 `service-previous`。执行器重启时，未完成任务会进入 `uncertain`，需要人工对账；不会自动恢复下单、补单、平仓或修改仓位。只有 API 与执行器 health 都正确后，才发布网页静态 release。
+
+拿到源码后的本机部署可使用一个显式命令完成。准备一份**未跟踪**的 `.env.live`，写入上述 `weex-live`、SQLite、主密钥和 Beta 来源变量后执行：
+
+```bash
+control-center/scripts/macos/deploy-local-live.zsh \
+  --env /absolute/path/to/.env.live \
+  --apply
+```
+
+该脚本只读取你显式传入的环境文件，将它以 `0600` 权限复制到 `~/Library/Application Support/WEEXFleet/.env.live`，随后构建并原子切换 service/web release，安装 LaunchAgent 并做本机 API、执行器与网页健康检查。若已有活动 Live worker，它会拒绝重启执行器，避免发布中断现有策略。Beta 来源也可在网页顶部 Final Beta 旁的设置按钮中修改；设置会持久化在本地 SQLite 中，立即用于集中遥测与后续新预览，已经运行的任务保持其启动时的冻结快照。
 
 默认使用内存存储。需要在重启后保留账号时，先生成并妥善保存主密钥，再启动 SQLite 模式：
 

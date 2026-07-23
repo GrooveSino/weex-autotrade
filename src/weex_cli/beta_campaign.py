@@ -55,6 +55,9 @@ class BetaVolumeCampaign:
     expires_at_ms: int
     profile_fingerprint: str
     target_turnover_quote: Decimal
+    # This is the persisted lower bound for a round's total BTC + ETH turnover.
+    # `round_turnover_quote` remains the upper bound for compatibility with v1/v2.
+    round_turnover_quote_min: Decimal
     round_turnover_quote: Decimal
     max_position_quote: Decimal
     timeout_seconds: int
@@ -81,6 +84,7 @@ class BetaVolumeCampaign:
         profile_fingerprint: str,
         target_turnover_quote: str | Decimal,
         round_turnover_quote: str | Decimal,
+        round_turnover_quote_min: str | Decimal | None = None,
         max_position_quote: str | Decimal = DEFAULT_MAX_POSITION_QUOTE,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         recovery_attempts: int = DEFAULT_RECOVERY_ATTEMPTS,
@@ -96,8 +100,17 @@ class BetaVolumeCampaign:
     ) -> BetaVolumeCampaign:
         target = decimal_value(target_turnover_quote, name="target_turnover_quote")
         round_quote = decimal_value(round_turnover_quote, name="round_turnover_quote")
+        round_quote_min = decimal_value(
+            round_turnover_quote if round_turnover_quote_min is None else round_turnover_quote_min,
+            name="round_turnover_quote_min",
+        )
         max_position = decimal_value(max_position_quote, name="max_position_quote")
-        assert target is not None and round_quote is not None and max_position is not None
+        assert (
+            target is not None
+            and round_quote is not None
+            and round_quote_min is not None
+            and max_position is not None
+        )
         if not profile_fingerprint or len(profile_fingerprint) < 12:
             raise ValidationError("profile fingerprint is invalid")
         if not 1 <= max_runs <= MAX_CAMPAIGN_RUNS:
@@ -107,6 +120,9 @@ class BetaVolumeCampaign:
         _validate_delay_range("hold", hold_min_seconds, hold_max_seconds, MAX_HOLD_SECONDS)
         _validate_delay_range("round_gap", round_gap_min_seconds, round_gap_max_seconds, MAX_ROUND_GAP_SECONDS)
         round_quote = min(round_quote, target)
+        round_quote_min = min(round_quote_min, target)
+        if round_quote_min <= 0 or round_quote_min > round_quote:
+            raise ValidationError("round turnover minimum must be positive and cannot exceed the maximum")
 
         # Reuse the production sizing validator so campaign and child plans cannot drift apart.
         preview = BetaVolumePlan.create(
@@ -124,12 +140,13 @@ class BetaVolumeCampaign:
         )
         created_at_ms = preview.created_at_ms
         campaign = cls(
-            schema_version=2,
+            schema_version=3,
             campaign_id="",
             created_at_ms=created_at_ms,
             expires_at_ms=created_at_ms + authorization_minutes * 60_000,
             profile_fingerprint=profile_fingerprint,
             target_turnover_quote=target,
+            round_turnover_quote_min=round_quote_min,
             round_turnover_quote=round_quote,
             max_position_quote=max_position,
             timeout_seconds=timeout_seconds,
@@ -163,6 +180,7 @@ class BetaVolumeCampaign:
             "strategy": "btc_long_eth_short",
             "profile_fingerprint": self.profile_fingerprint,
             "target_turnover_quote": decimal_text(self.target_turnover_quote),
+            "round_turnover_quote_min": decimal_text(self.round_turnover_quote_min),
             "round_turnover_quote": decimal_text(self.round_turnover_quote),
             "authorized_max_turnover_quote": decimal_text(self.authorized_max_turnover_quote),
             "max_position_quote": decimal_text(self.max_position_quote),
@@ -209,6 +227,9 @@ class BetaVolumeCampaign:
                 expires_at_ms=int(payload["expires_at_ms"]),
                 profile_fingerprint=str(payload["profile_fingerprint"]),
                 target_turnover_quote=Decimal(str(payload["target_turnover_quote"])),
+                round_turnover_quote_min=Decimal(
+                    str(payload.get("round_turnover_quote_min", payload["round_turnover_quote"]))
+                ),
                 round_turnover_quote=Decimal(str(payload["round_turnover_quote"])),
                 max_position_quote=Decimal(str(payload["max_position_quote"])),
                 timeout_seconds=int(payload["timeout_seconds"]),
@@ -229,12 +250,14 @@ class BetaVolumeCampaign:
         except (DecimalException, KeyError, TypeError, ValueError) as exc:
             raise ValidationError("stored campaign payload is invalid") from exc
         if (
-            campaign.schema_version not in {1, 2}
+            campaign.schema_version not in {1, 2, 3}
             or not 1 <= campaign.max_runs <= MAX_CAMPAIGN_RUNS
             or campaign.expires_at_ms <= campaign.created_at_ms
             or campaign.expires_at_ms - campaign.created_at_ms > 86_400_000
             or campaign.target_turnover_quote <= 0
             or campaign.round_turnover_quote <= 0
+            or campaign.round_turnover_quote_min <= 0
+            or campaign.round_turnover_quote_min > campaign.round_turnover_quote
             or campaign.round_turnover_quote > campaign.target_turnover_quote
             or campaign.max_position_quote <= 0
             or not _valid_delay_range(
@@ -278,6 +301,8 @@ class BetaVolumeCampaign:
                     str(self.round_gap_max_seconds),
                 )
             )
+        if self.schema_version >= 3:
+            fields.append(decimal_text(self.round_turnover_quote_min) or "0")
         fields.extend(
             (
                 str(self.max_runs),
@@ -373,7 +398,7 @@ class BetaVolumeCampaignStore:
         if not isinstance(payload, Mapping):
             raise ValidationError("stored campaign schema is invalid")
         campaign_row = payload.get("campaign")
-        if payload.get("schema_version") not in {1, 2} or not isinstance(campaign_row, Mapping):
+        if payload.get("schema_version") not in {1, 2, 3} or not isinstance(campaign_row, Mapping):
             raise ValidationError("stored campaign schema is invalid")
         return BetaVolumeCampaignRecord(
             campaign=BetaVolumeCampaign.from_dict(campaign_row),
@@ -632,7 +657,7 @@ class LiveBetaVolumeCampaignService:
         )
 
     def _validate_authorization(self, campaign: BetaVolumeCampaign) -> None:
-        if campaign.schema_version not in {1, 2}:
+        if campaign.schema_version not in {1, 2, 3}:
             raise SafetyError("unsupported campaign schema")
         if campaign.profile_fingerprint != self.profile_fingerprint:
             raise SafetyError("campaign was authorized for a different live profile")
@@ -645,12 +670,13 @@ class LiveBetaVolumeCampaignService:
 
     def _create_child(self, campaign: BetaVolumeCampaign, target: Decimal, run_number: int) -> BetaVolumePlan:
         created_at_ms = self.now_ms() + run_number
+        round_quote = _selected_round_turnover(campaign, target, run_number)
         try:
             return BetaVolumePlan.create(
                 self.gateway,
                 campaign.allocation,
                 target_turnover_quote=target,
-                round_turnover_quote=min(campaign.round_turnover_quote, target),
+                round_turnover_quote=round_quote,
                 max_position_quote=campaign.max_position_quote,
                 timeout_seconds=campaign.timeout_seconds,
                 recovery_attempts=campaign.recovery_attempts,
@@ -665,7 +691,7 @@ class LiveBetaVolumeCampaignService:
         except ValidationError as exc:
             if "below the current" not in str(exc):
                 raise
-            fallback_target = min(campaign.round_turnover_quote, campaign.authorized_max_turnover_quote - target)
+            fallback_target = min(round_quote, campaign.authorized_max_turnover_quote - target)
             if fallback_target <= 0:
                 raise
             return BetaVolumePlan.create(
@@ -743,6 +769,7 @@ class LiveBetaVolumeCampaignService:
             lane_gateways=self.lane_gateways,
             market_data=self.market_data,
             order_updates=self.order_updates,
+            stop_requested=self.stop_requested,
             now_ms=self.now_ms,
             sleep=self.sleep,
             hold_delay_seconds=lambda round_number: self._sample_delay(
@@ -943,6 +970,24 @@ def _authoritative_child_quote(result: Mapping[str, Any]) -> Decimal:
     if not _child_is_authoritative(result):
         raise SafetyError("child volume is not verified pure Maker userTrades volume")
     return quote
+
+
+def _selected_round_turnover(campaign: BetaVolumeCampaign, target: Decimal, run_number: int) -> Decimal:
+    """Choose a restart-stable total-turnover amount for one BTC/ETH round.
+
+    The selection is deliberately derived from durable campaign identity and run
+    number instead of a process-local RNG. The child plan persists this value
+    before any submission; it is never used as executed-volume accounting.
+    """
+    upper = min(campaign.round_turnover_quote, target)
+    lower = min(campaign.round_turnover_quote_min, upper)
+    if lower == upper:
+        return upper
+    cents_low = int((lower * 100).to_integral_value())
+    cents_high = int((upper * 100).to_integral_value())
+    digest = hashlib.sha256(f"{campaign.campaign_id}:{run_number}".encode()).digest()
+    selected = cents_low + (int.from_bytes(digest[:8], "big") % (cents_high - cents_low + 1))
+    return Decimal(selected) / Decimal(100)
 
 
 def _validate_delay_range(name: str, minimum: float, maximum: float, ceiling: float) -> None:

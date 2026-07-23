@@ -31,6 +31,29 @@
 
 多账号 API Key、独立 HTTPS/SOCKS5 代理、余额/成交量遥测和按需日志控制台位于 [`control-center/`](control-center/README.md)。Beta 比例服务地址必须通过本地配置显式提供；仓库不包含私人部署地址或账户资料。
 
+本地多终端并行运行 Beta Campaign 可使用 Textual TUI。账户格式见
+[`config/tui-accounts.example.toml`](config/tui-accounts.example.toml)；复制为 `config/tui-accounts.toml`、填写账户并确保权限为
+`0600`。每个终端选择一个不同账户，同一账户会被系统文件锁拒绝重复进入：
+
+每个 `[[accounts]]` 区块代表一个账户，只需要给它一个唯一的 `name`；继续复制该区块即可添加第二、第三个账户。
+程序会从名称生成仅供内部锁和运行目录使用的稳定标识，不需要在 TOML 中维护 `id`。
+共用的 API Passphrase 可写在 `[defaults]` 的 `passphrase` 中；账户区块默认继承，只有不同的账户才需要单独覆盖。
+私有 Beta 服务地址写在同一文件的 `[beta].url` 中。公开模板只保留空值，真实地址仅存在于被 Git 忽略的本机实例。
+
+```bash
+cp config/tui-accounts.example.toml config/tui-accounts.toml
+chmod 600 config/tui-accounts.toml
+WEEX_LIVE_TRADING_ENABLED=true ./weex tui
+
+# 也可以显式指定项目内的另一个账户文件
+WEEX_LIVE_TRADING_ENABLED=true ./weex tui --accounts-file config/my-tui-accounts.toml
+```
+
+TUI 只运行 Live Beta Campaign：账户预检、参数、预览、精确确认、运行事件和安全停止都在同一终端内完成。
+实际交易继续调用 CLI 的 `LiveBetaVolumeCampaignService`，不会复制策略或降低 `POST_ONLY`、Live 环境门禁和
+不确定提交禁止重试等约束。账户凭据不会进入页面日志；`uncertain` 必须先在交易所人工核对空仓和全部挂单，
+再输入界面生成的人工核对短语，原 campaign 仍保持 `uncertain`。
+
 ## 环境要求
 
 - macOS 或 Linux

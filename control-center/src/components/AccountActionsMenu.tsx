@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CircleX, MoreHorizontal, ScrollText, Settings2, SlidersHorizontal, Target } from 'lucide-react'
+import { CircleX, MoreHorizontal, ScrollText, Settings2, SlidersHorizontal } from 'lucide-react'
 import type { AccountInstance } from '../types'
 
 interface AccountActionsMenuProps {
@@ -10,9 +10,6 @@ interface AccountActionsMenuProps {
   onOpenExecutions: (account: AccountInstance) => void
   onAssignStrategy: (account: AccountInstance) => void
   onEdit: (account: AccountInstance) => void
-  onOpenBetaCampaign: (account: AccountInstance) => void
-  betaCampaignAvailable: boolean
-  betaCampaignActive: boolean
 }
 
 const menuWidth = 216
@@ -26,9 +23,6 @@ export function AccountActionsMenu({
   onOpenExecutions,
   onAssignStrategy,
   onEdit,
-  onOpenBetaCampaign,
-  betaCampaignAvailable,
-  betaCampaignActive,
 }: AccountActionsMenuProps) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ left: 0, top: 0 })
@@ -69,7 +63,7 @@ export function AccountActionsMenu({
     }
     const rect = triggerRef.current?.getBoundingClientRect()
     if (!rect) return
-    const itemCount = canShowClose ? 5 : 4
+    const itemCount = canShowClose ? 4 : 3
     const estimatedHeight = itemCount * menuItemHeight + (canShowClose ? 17 : 8)
     const left = Math.min(
       window.innerWidth - menuWidth - viewportGap,
@@ -120,19 +114,14 @@ export function AccountActionsMenu({
               >
                 <CircleX size={15} />
                 <span>一键平仓</span>
-                {executionDisabled && <small>只读模式</small>}
+                {executionDisabled && <small>由实盘 Campaign 管理</small>}
               </button>
               <div className="action-menu-divider" role="separator" />
             </>
           )}
           <button className="action-menu-item" type="button" role="menuitem" onClick={() => run(onOpenExecutions)}>
-            <ScrollText size={15} /><span>查看执行审计</span>
+            <ScrollText size={15} /><span>策略运行记录</span>
           </button>
-          {betaCampaignAvailable && (
-            <button className="action-menu-item" type="button" role="menuitem" onClick={() => run(onOpenBetaCampaign)}>
-              <Target size={15} /><span>{betaCampaignActive ? 'Beta Campaign 运行中' : 'Beta Campaign'}</span>{betaCampaignActive && <small>查看状态</small>}
-            </button>
-          )}
           <button className="action-menu-item" type="button" role="menuitem" onClick={() => run(onAssignStrategy)}>
             <SlidersHorizontal size={15} /><span>切换绑定策略</span>
           </button>

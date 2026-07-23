@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { ChartNoAxesCombined, Eye, EyeOff, KeyRound, Network, Trash2, X } from 'lucide-react'
+import { ChartNoAxesCombined, Eye, EyeOff, KeyRound, Network, ShieldCheck, Trash2, X } from 'lucide-react'
 import type { AccountDraft, AccountInstance, VolumeStrategy } from '../types'
 import { targetModeLabel } from '../utils/strategy'
 
@@ -14,11 +14,11 @@ interface AccountDialogProps {
 const initialDraft: AccountDraft = {
   name: '',
   accountTag: '',
-  mode: 'demo',
+  mode: 'live',
   apiKey: '',
   apiSecret: '',
   passphrase: '',
-  proxyType: 'https',
+  proxyType: 'http',
   proxyUrl: '',
   strategyId: '',
   historyStartAt: '',
@@ -37,8 +37,8 @@ function draftFor(account: AccountInstance | null | undefined, strategies: Volum
     ...initialDraft,
     name: account?.name ?? '',
     accountTag: account?.accountTag ?? '',
-    mode: account?.mode ?? 'demo',
-    proxyType: account?.proxy.type ?? 'https',
+    mode: account?.mode ?? 'live',
+    proxyType: account?.proxy.type ?? 'http',
     strategyId: account?.strategyId ?? strategies[0]?.id ?? '',
     historyStartAt: localDateTimeInput(account?.historyStartAtMs),
   }
@@ -48,8 +48,9 @@ const quote = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 })
 
 export function AccountDialog({ account, strategies, onClose, onSubmit, onDelete }: AccountDialogProps) {
   const editing = Boolean(account)
+  const recoveryMode = account?.status === 'error'
   const editable = !account || (
-    account.status === 'stopped'
+    (account.status === 'stopped' || recoveryMode)
     && account.strategyProgress.stage !== 'holding'
     && account.exposure.btcLong === 0
     && account.exposure.ethShort === 0
@@ -60,6 +61,7 @@ export function AccountDialog({ account, strategies, onClose, onSubmit, onDelete
   const [formError, setFormError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const credentialUpdateStarted = editing && [draft.apiKey, draft.apiSecret, draft.passphrase].some(Boolean)
   const selectedStrategy = useMemo(
     () => strategies.find((strategy) => strategy.id === draft.strategyId),
     [draft.strategyId, strategies],
@@ -74,8 +76,8 @@ export function AccountDialog({ account, strategies, onClose, onSubmit, onDelete
     if (!editable || busy) return
     setFormError(null)
     const credentialFields = [draft.apiKey, draft.apiSecret, draft.passphrase]
-    if (!editing && (!draft.name.trim() || !credentialFields.every(Boolean) || !draft.proxyUrl.trim())) {
-      setFormError('请完整填写实例名称、API 凭据和代理地址')
+    if (!editing && (!draft.name.trim() || !credentialFields.every(Boolean) || (draft.proxyType !== 'none' && !draft.proxyUrl.trim()))) {
+      setFormError('请完整填写实例名称和 API 凭据；配置代理时还需要填写代理地址')
       return
     }
     if (editing && credentialFields.some(Boolean) && !credentialFields.every(Boolean)) {
@@ -129,21 +131,31 @@ export function AccountDialog({ account, strategies, onClose, onSubmit, onDelete
               <button type="button" disabled={editing || !editable} className={draft.mode === 'live' ? 'active danger-choice' : ''} onClick={() => update('mode', 'live')}>Live</button>
             </div>
 
+            {editing && (
+              <div className={`credential-preservation-note ${credentialUpdateStarted ? 'updating' : ''}`}>
+                <ShieldCheck size={16} />
+                <div>
+                  <strong>{credentialUpdateStarted ? '正在更换 API 凭据' : '现有 API 凭据已安全保留'}</strong>
+                  <span>{credentialUpdateStarted ? '请完整填写 Key、Secret 和 Passphrase 后保存。' : '凭据不会回显到网页；三个字段都留空即可保持当前值。'}</span>
+                </div>
+              </div>
+            )}
+
             <div className="form-grid">
-              <label><span>API Key{editing ? '（留空不更换）' : ''}</span><input required={!editing} disabled={!editable} value={draft.apiKey} onChange={(event) => update('apiKey', event.target.value)} autoComplete="off" spellCheck="false" /></label>
+              <label><span>API Key{editing ? '（留空保持当前值）' : ''}</span><input required={!editing} disabled={!editable} value={draft.apiKey} onChange={(event) => update('apiKey', event.target.value)} placeholder={editing ? '已安全保存；留空保持当前值' : ''} autoComplete="off" spellCheck="false" /></label>
               <label>
-                <span>API Secret</span>
+                <span>API Secret{editing ? '（留空保持当前值）' : ''}</span>
                 <div className="input-with-action">
-                  <input required={!editing} disabled={!editable} type={showSecrets ? 'text' : 'password'} value={draft.apiSecret} onChange={(event) => update('apiSecret', event.target.value)} autoComplete="new-password" />
-                  <button type="button" disabled={!editable} onClick={() => setShowSecrets((value) => !value)} data-tooltip={showSecrets ? '隐藏凭据' : '显示凭据'} aria-label={showSecrets ? '隐藏凭据' : '显示凭据'}>{showSecrets ? <EyeOff size={15} /> : <Eye size={15} />}</button>
+                  <input required={!editing} disabled={!editable} type={showSecrets ? 'text' : 'password'} value={draft.apiSecret} onChange={(event) => update('apiSecret', event.target.value)} placeholder={editing ? '已安全保存；留空保持当前值' : ''} autoComplete="new-password" />
+                  <button type="button" disabled={!editable || !draft.apiSecret} onClick={() => setShowSecrets((value) => !value)} data-tooltip={draft.apiSecret ? (showSecrets ? '隐藏本次输入' : '显示本次输入') : '已保存凭据不会回显'} aria-label={draft.apiSecret ? (showSecrets ? '隐藏本次输入' : '显示本次输入') : '已保存凭据不会回显'}>{showSecrets ? <EyeOff size={15} /> : <Eye size={15} />}</button>
                 </div>
               </label>
-              <label><span>Passphrase</span><input required={!editing} disabled={!editable} type={showSecrets ? 'text' : 'password'} value={draft.passphrase} onChange={(event) => update('passphrase', event.target.value)} autoComplete="new-password" /></label>
+              <label><span>Passphrase{editing ? '（留空保持当前值）' : ''}</span><input required={!editing} disabled={!editable} type={showSecrets ? 'text' : 'password'} value={draft.passphrase} onChange={(event) => update('passphrase', event.target.value)} placeholder={editing ? '已安全保存；留空保持当前值' : ''} autoComplete="new-password" /></label>
             </div>
 
             <div className="form-grid two-columns">
-              <label><span>历史起点（可选）</span><input disabled={!editable} type="datetime-local" value={draft.historyStartAt} max={historyMax} onChange={(event) => update('historyStartAt', event.target.value)} /></label>
-              <label><span>绑定策略</span><select required disabled={!editable || !strategies.length} value={draft.strategyId} onChange={(event) => update('strategyId', event.target.value)}>{strategies.map((strategy) => <option key={strategy.id} value={strategy.id}>{strategy.name}</option>)}</select></label>
+              <label><span>历史起点（可选）</span><input disabled={!editable || recoveryMode} type="datetime-local" value={draft.historyStartAt} max={historyMax} onChange={(event) => update('historyStartAt', event.target.value)} /></label>
+              <label><span>绑定策略</span><select required disabled={!editable || recoveryMode || !strategies.length} value={draft.strategyId} onChange={(event) => update('strategyId', event.target.value)}>{strategies.map((strategy) => <option key={strategy.id} value={strategy.id}>{strategy.name}</option>)}</select></label>
             </div>
 
             {selectedStrategy && (
@@ -156,11 +168,25 @@ export function AccountDialog({ account, strategies, onClose, onSubmit, onDelete
 
             <div className="dialog-section-title"><Network size={14} />代理配置</div>
             <div className="proxy-input-row">
-              <select disabled={!editable} value={draft.proxyType} onChange={(event) => update('proxyType', event.target.value as AccountDraft['proxyType'])} aria-label="代理类型"><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select>
-              <input required={!editing} disabled={!editable} value={draft.proxyUrl} onChange={(event) => update('proxyUrl', event.target.value)} placeholder={editing ? `当前 ${account?.proxy.host}，留空不更换` : 'username:password@host:port'} autoComplete="off" spellCheck="false" />
+              <select
+                disabled={!editable}
+                value={draft.proxyType}
+                onChange={(event) => {
+                  const proxyType = event.target.value as AccountDraft['proxyType']
+                  setDraft((current) => ({ ...current, proxyType, proxyUrl: proxyType === 'none' ? '' : current.proxyUrl }))
+                }}
+                aria-label="代理类型"
+              >
+                <option value="none">无代理</option>
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+              <input required={!editing && draft.proxyType !== 'none'} disabled={!editable || draft.proxyType === 'none'} value={draft.proxyUrl} onChange={(event) => update('proxyUrl', event.target.value)} placeholder={draft.proxyType === 'none' ? '已选择不使用代理' : editing ? `当前 ${account?.proxy.host}，留空不更换` : 'IP:端口:用户名:密码 或 username:password@IP:端口'} autoComplete="off" spellCheck="false" />
             </div>
           </div>
 
+          {recoveryMode && <div className="edit-lock-note">连接异常时仅允许修正 API 凭据或代理配置；保存后请使用行内刷新重新验证。</div>}
           {!editable && <div className="edit-lock-note">请先停止实例并完成双腿平仓。</div>}
           {confirmDelete && <div className="form-error">删除会清除该实例的本地凭据、日志和成交量记录。再次点击删除确认。</div>}
           {formError && <div className="form-error">{formError}</div>}

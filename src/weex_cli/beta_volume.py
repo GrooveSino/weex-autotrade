@@ -481,6 +481,7 @@ class LiveBetaVolumeService:
         round_gap_delay_seconds: DelaySelector | None = None,
         market_data: Any | None = None,
         order_updates: Any | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.gateway = gateway
         self.provider = provider
@@ -498,6 +499,8 @@ class LiveBetaVolumeService:
         self.round_gap_delay_seconds = round_gap_delay_seconds
         self.market_data = market_data
         self.order_updates = order_updates
+        self.stop_requested = stop_requested or (lambda: False)
+        self._stop_callback_configured = stop_requested is not None
         self.timeline: list[dict[str, Any]] = []
         self.current_plan_id: str | None = None
         self._event_lock = threading.Lock()
@@ -542,6 +545,17 @@ class LiveBetaVolumeService:
         self._emit("preflight_completed", message="Account is ready and flat")
         lanes = self._create_lanes()
         try:
+            if self.stop_requested():
+                return self._safe_stop(
+                    plan,
+                    lanes,
+                    preflight,
+                    execution_started_ms,
+                    summaries=[],
+                    cycles=[],
+                    total_quote=Decimal(0),
+                    round_number=0,
+                )
             return self._execute_cycles(plan, lanes, preflight, execution_started_ms)
         finally:
             if self.lane_gateways is None:
@@ -805,6 +819,18 @@ class LiveBetaVolumeService:
 
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="weex-beta") as pool:
             for round_number in range(1, max_rounds + 1):
+                if self.stop_requested():
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
                 if total_quote >= plan.target_turnover_quote:
                     break
                 desired_quote = min(plan.round_turnover_quote, plan.target_turnover_quote - total_quote)
@@ -886,6 +912,19 @@ class LiveBetaVolumeService:
                 open_summaries = [open_results[symbol][0] for symbol in ("BTC", "ETH")]
                 summaries.extend(open_summaries)
 
+                if self.stop_requested():
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
+
                 lane_stops: dict[str, tuple[str, str]] = {
                     symbol: result[1] for symbol, result in open_results.items() if result[1] is not None
                 }
@@ -896,6 +935,18 @@ class LiveBetaVolumeService:
                     btc_plan,
                     eth_plan,
                 )
+                if self.stop_requested():
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
                 close_futures: dict[str, Future[tuple[list[dict[str, Any]], bool, tuple[str, str] | None]]] = {}
                 self._emit("close_barrier_started", round=round_number)
                 for offset, symbol in enumerate(("BTC", "ETH"), 3):
@@ -942,6 +993,19 @@ class LiveBetaVolumeService:
                         lane_stops[symbol] = close_stop
                 self._emit("pair_wait_completed", round=round_number, action="close")
                 summaries.extend(close_summaries)
+
+                if self.stop_requested():
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
 
                 cycle_legs = open_summaries + close_summaries
                 self._refresh_pending_accounting(round_number, cycle_legs, lanes, lane_stops)
@@ -1080,7 +1144,19 @@ class LiveBetaVolumeService:
                     empty_rounds = 0
                 if total_quote < plan.target_turnover_quote and round_gap_seconds:
                     self._emit("round_gap_started", round=round_number, seconds=round_gap_seconds)
-                    self.sleep(round_gap_seconds)
+                    self._wait_for_stop(round_gap_seconds)
+                    if self.stop_requested():
+                        return self._safe_stop(
+                            plan,
+                            lanes,
+                            preflight,
+                            execution_started_ms,
+                            summaries=summaries,
+                            cycles=cycles,
+                            total_quote=total_quote,
+                            round_number=round_number,
+                            pool=pool,
+                        )
                     self._emit("round_gap_completed", round=round_number, seconds=round_gap_seconds)
 
         if total_quote < plan.target_turnover_quote:
@@ -1131,9 +1207,218 @@ class LiveBetaVolumeService:
         seconds = self._delay_seconds(self.hold_delay_seconds, round_number, 0.0)
         if seconds:
             self._emit("hold_started", round=round_number, seconds=seconds)
-            self.sleep(seconds)
+            self._wait_for_stop(seconds)
+            if self.stop_requested():
+                return seconds
             self._emit("hold_completed", round=round_number, seconds=seconds)
         return seconds
+
+    def _wait_for_stop(self, seconds: float) -> None:
+        """Wait without making stop requests wait for a full hold/gap interval."""
+        if seconds <= 0:
+            return
+        if not self._stop_callback_configured:
+            self.sleep(seconds)
+            return
+        remaining = seconds
+        while remaining > 0:
+            if self.stop_requested():
+                return
+            delay = min(0.125, remaining)
+            self.sleep(delay)
+            remaining -= delay
+
+    def _safe_stop(
+        self,
+        plan: BetaVolumePlan,
+        lanes: Mapping[str, _Lane],
+        preflight: Mapping[str, Any],
+        execution_started_ms: int,
+        *,
+        summaries: list[dict[str, Any]],
+        cycles: list[dict[str, Any]],
+        total_quote: Decimal,
+        round_number: int,
+        pool: ThreadPoolExecutor | None = None,
+    ) -> dict[str, Any]:
+        """Cancel all live orders, maker-flatten residuals, then prove the boundary.
+
+        This is deliberately a single convergence path.  It never calls a market
+        close endpoint and it never retries cancellation or submission mutations.
+        The venue's batch cancellation routine sends one regular and one trigger
+        cancellation request, then performs bounded read-only verification.
+        """
+        self._emit("safe_stop_started", round=round_number)
+        cancellation_verified = True
+        for symbol in ("BTC", "ETH"):
+            cleanup = getattr(lanes[symbol].venue, "cancel_all_and_verify", None)
+            if not callable(cleanup):
+                cancellation_verified = False
+                self._emit(
+                    "safe_stop_cancel_unverified",
+                    round=round_number,
+                    symbol=symbol,
+                    reason="cleanup_unavailable",
+                )
+                continue
+            try:
+                verified = bool(cleanup())
+            except Exception as exc:  # noqa: BLE001 - a cancellation may have landed; fail closed
+                verified = False
+                self._emit(
+                    "safe_stop_cancel_unverified",
+                    round=round_number,
+                    symbol=symbol,
+                    reason=f"cleanup_exception:{type(exc).__name__.lower()}",
+                )
+            else:
+                self._emit(
+                    "safe_stop_cancel_verified" if verified else "safe_stop_cancel_unverified",
+                    round=round_number,
+                    symbol=symbol,
+                )
+            cancellation_verified = cancellation_verified and verified
+        if not cancellation_verified:
+            self._emit("safe_stop_uncertain", round=round_number, reason="safe_stop_order_cancellation_unverified")
+            return self._finish(
+                plan,
+                "uncertain",
+                "safe_stop_order_cancellation_unverified",
+                summaries,
+                cycles,
+                total_quote,
+                lanes,
+                preflight,
+                execution_started_ms,
+            )
+
+        jobs: dict[str, Future[tuple[list[dict[str, Any]], bool, tuple[str, str] | None]]] = {}
+        owns_pool = pool is None
+        active_pool = pool or ThreadPoolExecutor(max_workers=2, thread_name_prefix="weex-safe-stop")
+        try:
+            for offset, symbol in enumerate(("BTC", "ETH"), 1):
+                leg_plan = plan.btc if symbol == "BTC" else plan.eth
+                position = self._observe_position(
+                    lanes[symbol].venue,
+                    round_number=round_number,
+                    sequence="safe-stop",
+                    symbol=symbol,
+                    action="safe_stop_check",
+                )
+                if position is None:
+                    self._emit(
+                        "safe_stop_uncertain",
+                        round=round_number,
+                        symbol=symbol,
+                        reason="position_observation_unavailable",
+                    )
+                    return self._finish(
+                        plan,
+                        "uncertain",
+                        "safe_stop_position_observation_unavailable",
+                        summaries,
+                        cycles,
+                        total_quote,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                    )
+                if abs(Decimal(str(position))) <= leg_plan.amount_step / 2:
+                    continue
+                self._emit(
+                    "safe_stop_flattening",
+                    round=round_number,
+                    symbol=symbol,
+                    quantity=decimal_text(abs(Decimal(str(position)))),
+                )
+                jobs[symbol] = active_pool.submit(
+                    self._flatten_lane,
+                    plan,
+                    round_number,
+                    100 + offset,
+                    leg_plan,
+                    lanes[symbol],
+                    respect_stop=False,
+                )
+            for symbol in ("BTC", "ETH"):
+                future = jobs.get(symbol)
+                if future is None:
+                    continue
+                lane_summaries, flat, stop = future.result()
+                summaries.extend(lane_summaries)
+                if not flat or stop is not None:
+                    reason = stop[1] if stop is not None else "safe_stop_flatten_incomplete"
+                    self._emit("safe_stop_uncertain", round=round_number, symbol=symbol, reason=reason)
+                    return self._finish(
+                        plan,
+                        "uncertain",
+                        reason,
+                        summaries,
+                        cycles,
+                        total_quote,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                    )
+                self._emit("safe_stop_leg_completed", round=round_number, symbol=symbol)
+        finally:
+            if owns_pool:
+                active_pool.shutdown(wait=True)
+
+        positions = {
+            symbol: self._observe_position(
+                lane.venue,
+                round_number=round_number,
+                sequence="safe-stop-final",
+                symbol=symbol,
+                action="safe_stop_final_check",
+            )
+            for symbol, lane in lanes.items()
+        }
+        observations = {
+            symbol: self._observe_orders(
+                lane,
+                round_number=round_number,
+                sequence="safe-stop-final",
+                symbol=symbol,
+                action="safe_stop_final_check",
+            )
+            for symbol, lane in lanes.items()
+        }
+        flat = all(
+            positions[symbol] is not None
+            and abs(Decimal(str(positions[symbol]))) <= (plan.btc if symbol == "BTC" else plan.eth).amount_step / 2
+            for symbol in ("BTC", "ETH")
+        )
+        no_orders = all(
+            observation is not None and not observation[0] and _row_count(observation[1]) == 0
+            for observation in observations.values()
+        )
+        if not flat or not no_orders:
+            self._emit("safe_stop_uncertain", round=round_number, reason="safe_stop_final_boundary_unverified")
+            return self._finish(
+                plan,
+                "uncertain",
+                "safe_stop_final_boundary_unverified",
+                summaries,
+                cycles,
+                total_quote,
+                lanes,
+                preflight,
+                execution_started_ms,
+            )
+        self._emit("safe_stop_verified", round=round_number)
+        return self._finish(
+            plan,
+            "stopped",
+            "safe_stop_flattened",
+            summaries,
+            cycles,
+            total_quote,
+            lanes,
+            preflight,
+            execution_started_ms,
+        )
 
     @staticmethod
     def _delay_seconds(selector: DelaySelector | None, round_number: int, fallback: float) -> float:
@@ -1292,6 +1577,7 @@ class LiveBetaVolumeService:
                 spec,
                 lanes[symbol],
                 round_number,
+                respect_stop=True,
             )
             for index, (symbol, spec) in enumerate(specs.items())
         }
@@ -1349,6 +1635,8 @@ class LiveBetaVolumeService:
         sequence_offset: int,
         leg_plan: PairLegPlan,
         lane: _Lane,
+        *,
+        respect_stop: bool = False,
     ) -> tuple[list[dict[str, Any]], bool, tuple[str, str] | None]:
         summaries: list[dict[str, Any]] = []
         for attempt in range(1, plan.recovery_attempts + 1):
@@ -1378,6 +1666,7 @@ class LiveBetaVolumeService:
                 spec,
                 lane,
                 round_number,
+                respect_stop=respect_stop,
             )
             summary["recovery_attempt"] = attempt
             summaries.append(summary)
@@ -1401,6 +1690,8 @@ class LiveBetaVolumeService:
         spec: _LegSpec,
         lane: _Lane,
         round_number: int,
+        *,
+        respect_stop: bool = True,
     ) -> tuple[dict[str, Any], tuple[str, str] | None]:
         venue = lane.venue
         started_at_ms = self.now_ms()
@@ -1447,6 +1738,9 @@ class LiveBetaVolumeService:
             )
 
         try:
+            executor_kwargs: dict[str, Any] = {"progress_sink": progress_sink}
+            if respect_stop and self._stop_callback_configured:
+                executor_kwargs["stop_requested"] = self.stop_requested
             result = execute_adaptive_maker_target(
                 venue,
                 AdaptiveMakerPolicy(REAL_POLICY),
@@ -1459,7 +1753,7 @@ class LiveBetaVolumeService:
                     tolerance_quantity=float(spec.plan.amount_step / 2),
                     client_prefix=spec.client_prefix,
                 ),
-                progress_sink=progress_sink,
+                **executor_kwargs,
             )
         except ObservationUnavailableError as exc:
             reason = exc.reason
@@ -1968,16 +2262,20 @@ def inspect_live_account(
     active_positions = 0
     regular_orders = 0
     trigger_orders = 0
+    position_sizes: dict[str, str | None] = {}
     for symbol in ("BTC", "ETH"):
-        active_positions += sum(
-            1 for row in gateway.positions("live", symbol) if Decimal(summarize_position_size(row)) > 0
-        )
+        position_rows = gateway.positions("live", symbol)
+        sizes = [abs(Decimal(summarize_position_size(row))) for row in position_rows]
+        active_positions += sum(1 for size in sizes if size > 0)
+        position_sizes[symbol] = decimal_text(sum(sizes, Decimal(0)))
         regular_orders += len(gateway.open_orders(symbol, mode="live"))
         trigger_orders += _row_count(gateway.algo_orders(symbol))
     result: dict[str, Any] = {
         "funds_configured": True,
+        "available_quote": decimal_text(available),
         "available_sufficient": available >= required_available,
         "active_position_count": active_positions,
+        "position_sizes": position_sizes,
         "regular_order_count": regular_orders,
         "trigger_order_count": trigger_orders,
     }
