@@ -74,6 +74,10 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
 
   return (
     <div className="table-shell">
+      <label className="mobile-account-select-all">
+        <input type="checkbox" checked={allSelected} onChange={(event) => onSelectAll(event.target.checked)} />
+        <span>选择当前 {accounts.length} 个账号</span>
+      </label>
       <table className="account-table">
         <thead>
           <tr>
@@ -157,8 +161,8 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                           : '启动已绑定策略'
             return (
               <tr key={account.id} className={selectedIds.has(account.id) ? 'selected-row' : ''}>
-                <td className="checkbox-column"><input type="checkbox" checked={selectedIds.has(account.id)} onChange={(event) => onSelect(account.id, event.target.checked)} aria-label={`选择 ${account.name}`} /></td>
-                <td>
+                <td className="checkbox-column account-select-cell"><input type="checkbox" checked={selectedIds.has(account.id)} onChange={(event) => onSelect(account.id, event.target.checked)} aria-label={`选择 ${account.name}`} /></td>
+                <td className="account-info-cell">
                   <div className="account-cell">
                     <span className="account-avatar">{account.name.slice(0, 1)}</span>
                     <div>
@@ -167,25 +171,25 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                     </div>
                   </div>
                 </td>
-                <td>
+                <td className="status-info-cell">
                   <div className="status-cell">
                     <span className={`status-dot ${account.status}`} />
                     <div><strong>{statusLabel[account.status]}</strong><span>{account.phase}</span></div>
                   </div>
                 </td>
-                <td>
+                <td className="proxy-info-cell">
                   <div className="proxy-cell">
                     <div><span className={`proxy-health ${account.proxy.status}`} /> <strong className="proxy-mark" title="代理">P</strong> {account.proxy.host}</div>
                     <span>{account.proxy.location} · {account.proxy.latencyMs ? `${account.proxy.latencyMs} ms` : '未检测'}</span>
                   </div>
                 </td>
-                <td className="numeric">
+                <td className="numeric wallet-info-cell">
                   <strong className="money">${currency.format(account.wallet.equity)}</strong>
                   <span className={account.wallet.unrealizedPnl < 0 ? 'negative' : account.wallet.unrealizedPnl > 0 ? 'positive' : ''}>
                     可用 ${currency.format(account.wallet.available)} · <span className={`funding-state ${funding.status}`}>{fundingLabel}</span>
                   </span>
                 </td>
-                <td className="numeric">
+                <td className="numeric volume-info-cell">
                   <strong className="money">${currency.format(account.volume.lifetime)}</strong>
                   <span>
                     {!account.volume.complete && (
@@ -196,13 +200,13 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                     )} 今日 ${currency.format(account.volume.today)}
                   </span>
                 </td>
-                <td>
+                <td className="exposure-info-cell">
                   <div className="exposure-cell">
                     <span><i className="btc" />BTC <strong>${currency.format(account.exposure.btcLong)}</strong></span>
                     <span><i className="eth" />ETH <strong>${currency.format(account.exposure.ethShort)}</strong></span>
                   </div>
                 </td>
-                <td>
+                <td className="strategy-info-cell">
                   <div className="progress-label"><span>{account.strategy.targetMode === 'incremental' ? session ? '本次新增' : '每次新增' : '累计达到'} ${currency.format(achievedVolume)} / ${currency.format(targetVolume)}</span><span>{progress.toFixed(0)}%</span></div>
                   <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                   <span className={`next-action ${dataNeedsVerification ? 'warning' : ''}`}>
@@ -223,7 +227,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                   </span>
                   <span className="strategy-scope">{account.strategy.name} · {targetModeLabel(account.strategy.targetMode)} · 每轮 {account.strategy.roundTurnoverQuoteMin}-{account.strategy.roundTurnoverQuoteMax} · 约 {estimate ? `${estimate.minimum}-${estimate.maximum}` : '-'} 轮</span>
                 </td>
-                <td>
+                <td className="sync-info-cell">
                   <div className={`runtime-cell ${runtime.consecutiveFailures || historySync?.stale ? 'failed' : ''}`} title={runtime.lastErrorType ?? historySync?.reason ?? '成交同步状态'}>
                     <span><i />{historySyncLabel(account)}</span>
                     <small>{historySync?.nextSyncAtMs ? `下次 ${countdown(historySync.nextSyncAtMs)}` : historySync?.lastSuccessAtMs ? `最近成功 ${relativeTime(historySync.lastSuccessAtMs)}` : '不会自动轮询静默账号'}</small>
@@ -237,12 +241,14 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                         : account.mode === 'live'
                           ? lifecycle.primaryAction === 'stop' ? <Square size={14} /> : <Play size={15} />
                           : account.status === 'running' ? <Square size={14} /> : <Play size={15} />}
+                      <span className="mobile-action-label">{account.mode === 'live' && lifecycle.primaryAction === 'cleanup' ? '清理' : account.status === 'running' || lifecycle.primaryAction === 'stop' ? '停止' : '启动'}</span>
                     </button>
                     <button className="icon-button" type="button" onClick={() => onRefresh(account)} data-tooltip="刷新该账号的价格、钱包与仓位" aria-label="刷新该账号的价格、钱包与仓位" disabled={refreshingIds.has(account.id)}>
                       <RefreshCw size={15} className={refreshingIds.has(account.id) ? 'spin' : ''} />
+                      <span className="mobile-action-label">刷新</span>
                     </button>
                     <button className="icon-button log-button" type="button" onClick={() => onOpenLogs(account)} data-tooltip="查看实例日志" aria-label="查看实例日志">
-                      <FileTerminal size={15} />{account.unreadLogs > 0 && <span className="unread-dot">{account.unreadLogs}</span>}
+                      <FileTerminal size={15} /><span className="mobile-action-label">监控</span>{account.unreadLogs > 0 && <span className="unread-dot">{account.unreadLogs}</span>}
                     </button>
                     <AccountActionsMenu
                       account={account}

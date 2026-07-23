@@ -94,6 +94,7 @@ export function AccountActionsMenu({
         aria-expanded={open}
       >
         <MoreHorizontal size={16} />
+        <span className="mobile-action-label">更多</span>
       </button>
       {open && createPortal(
         <div

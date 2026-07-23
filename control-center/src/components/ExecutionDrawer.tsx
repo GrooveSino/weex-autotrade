@@ -138,14 +138,14 @@ export function ExecutionDrawer({ account, onClose, onOpenMonitor }: ExecutionDr
                       : Number(balanceDelta) > 0 ? 'positive' : Number(balanceDelta) < 0 ? 'negative' : ''
                     return (
                       <tr key={run.sessionId} className={run.stale || run.reconciliationRequired ? 'needs-reconciliation' : ''}>
-                        <td><strong>{run.strategyName ?? '历史策略'}{run.strategyVersion ? ` v${run.strategyVersion}` : ''}</strong><span>{run.targetMode === 'incremental' ? '每次新增' : '累计达到'}</span></td>
-                        <td><time>{formatTime(run.startedAtMs)}</time><span>{formatTime(run.finishedAtMs)}</span></td>
-                        <td><span className={`execution-status ${run.status}`}><MetaIcon size={12} />{meta.label}</span></td>
-                        <td className="numeric"><strong>{formatQuote(run.executionTargetQuoteVolume)}</strong><span>USDT</span></td>
-                        <td className="numeric"><strong>{formatQuote(run.verifiedQuoteVolume)}</strong><span>USDT</span></td>
-                        <td className="numeric"><strong>{formatQuote(run.baselineLifetimeQuoteVolume)}</strong><span>{lifetimeEnd ? `→ ${formatQuote(lifetimeEnd)}` : '→ --'}</span></td>
-                        <td className="numeric balance-change"><strong>{balanceStart === null ? '--' : formatQuote(balanceStart)} → {balanceEnd === null ? '--' : formatQuote(balanceEnd)}</strong><span className={balanceTone}>{balanceDelta === null ? (balanceStart === null ? '历史未记录' : '结束快照缺失') : `变化 ${formatSignedQuote(balanceDelta)} USDT`}</span></td>
-                        <td><button className="icon-button compact" type="button" onClick={() => onOpenMonitor(account, run.sessionId)} data-tooltip="查看执行监控" aria-label="查看执行监控"><Terminal size={13} /></button></td>
+                        <td className="run-strategy-cell" data-label="策略"><strong>{run.strategyName ?? '历史策略'}{run.strategyVersion ? ` v${run.strategyVersion}` : ''}</strong><span>{run.targetMode === 'incremental' ? '每次新增' : '累计达到'}</span></td>
+                        <td className="run-time-cell" data-label="时间"><time>{formatTime(run.startedAtMs)}</time><span>{formatTime(run.finishedAtMs)}</span></td>
+                        <td className="run-status-cell" data-label="结果"><span className={`execution-status ${run.status}`}><MetaIcon size={12} />{meta.label}</span></td>
+                        <td className="numeric run-target-cell" data-label="任务目标"><strong>{formatQuote(run.executionTargetQuoteVolume)}</strong><span>USDT</span></td>
+                        <td className="numeric run-verified-cell" data-label="权威完成"><strong>{formatQuote(run.verifiedQuoteVolume)}</strong><span>USDT</span></td>
+                        <td className="numeric run-lifetime-cell" data-label="累计变化"><strong>{formatQuote(run.baselineLifetimeQuoteVolume)}</strong><span>{lifetimeEnd ? `→ ${formatQuote(lifetimeEnd)}` : '→ --'}</span></td>
+                        <td className="numeric balance-change run-balance-cell" data-label="余额变化"><strong>{balanceStart === null ? '--' : formatQuote(balanceStart)} → {balanceEnd === null ? '--' : formatQuote(balanceEnd)}</strong><span className={balanceTone}>{balanceDelta === null ? (balanceStart === null ? '历史未记录' : '结束快照缺失') : `变化 ${formatSignedQuote(balanceDelta)} USDT`}</span></td>
+                        <td className="run-monitor-cell"><button className="icon-button compact" type="button" onClick={() => onOpenMonitor(account, run.sessionId)} data-tooltip="查看执行监控" aria-label="查看执行监控"><Terminal size={13} /><span className="mobile-action-label">监控</span></button></td>
                       </tr>
                     )
                   })}

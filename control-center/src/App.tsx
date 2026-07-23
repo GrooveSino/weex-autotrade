@@ -171,7 +171,7 @@ function BetaStatus({ snapshot, available, loading, receivedAtMs }: BetaStatusPr
             <div className="filter-tabs" aria-label="状态筛选">
               {filters.map((item) => <button key={item.value} className={filter === item.value ? 'active' : ''} type="button" onClick={() => setFilter(item.value)}>{item.label}<span>{item.value === 'all' ? accounts.length : accounts.filter((account) => account.status === item.value).length}</span></button>)}
             </div>
-            <div className="bulk-actions">
+            <div className={`bulk-actions ${selectedIds.size ? 'has-selection' : ''}`}>
               <span>已选 {selectedIds.size}</span>
               <button className="button compact-button" type="button" disabled={!selectedIds.size || !strategies.length} onClick={() => setAssignmentAccounts(accounts.filter((account) => selectedIds.has(account.id)))}><SlidersHorizontal size={14} />应用策略</button>
               <button className="icon-button" type="button" disabled={!canStartSelected || (!boundStrategyExecutionEnabled && executionDisabled)} onClick={() => void updateStatuses(selectedIds, 'running')} data-tooltip="启动所选" aria-label="启动所选"><Play size={14} /></button>

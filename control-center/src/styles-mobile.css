@@ -1,0 +1,143 @@
+.mobile-account-select-all,
+.mobile-action-label { display: none; }
+
+@media (max-width: 680px) {
+  html, body, #root { min-width: 0; min-height: 100%; overflow-x: hidden; }
+  .app-shell { min-height: 100dvh; }
+  .button, .icon-button, .filter-tabs button, .monitor-tabs button { touch-action: manipulation; }
+  .icon-button[data-tooltip]::after, .input-with-action button[data-tooltip]::after { display: none; }
+  .topbar { min-height: 48px; padding: 6px 8px; align-items: center; gap: 6px; }
+  .brand { min-width: 0; }
+  .brand-mark { width: 30px; height: 30px; }
+  .brand div strong { font-size: 12px; white-space: nowrap; }
+  .topbar-right { min-width: 0; gap: 5px; }
+  .beta-state { min-width: 112px; height: 34px; }
+  .topbar-tool, .button.emergency { width: 34px; height: 34px; }
+  .local-user { max-width: 54px; overflow: hidden; text-overflow: ellipsis; }
+
+  .summary-band { min-height: 52px; display: flex; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .summary-band::-webkit-scrollbar { display: none; }
+  .summary-heading, .metric { min-width: 116px; min-height: 52px; padding: 7px 10px; flex: 0 0 auto; border-bottom: 0 !important; }
+  .summary-heading { min-width: 96px; }
+  .summary-heading strong, .metric strong { font-size: 13px; }
+  .summary-heading span, .metric div > span { font-size: 10px; }
+  .metric { gap: 6px; }
+  .metric-icon { width: 24px; height: 24px; flex-basis: 24px; }
+  .metric-icon svg { width: 13px; height: 13px; }
+
+  .workspace { margin-top: 6px; }
+  .workspace-title-row { min-height: 48px; padding: 7px 8px; align-items: center; }
+  .workspace-title-row h1 { margin: 0; font-size: 14px; }
+  .workspace-actions { gap: 4px; }
+  .workspace-actions .button { width: 36px; height: 36px; padding: 0; font-size: 0; }
+  .workspace-actions .button svg { width: 15px; height: 15px; }
+  .toolbar { padding: 6px 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .search-box { height: 36px; grid-column: auto; }
+  .search-box kbd { display: none; }
+  .filter-tabs { margin: 0 -8px; padding: 0 8px; }
+  .filter-tabs button { height: 34px; }
+  .bulk-actions { min-height: 40px; margin: 0; padding: 4px 0 0; display: none; border: 0; border-top: 1px solid var(--line); }
+  .bulk-actions.has-selection { display: flex; }
+  .bulk-actions .compact-button { width: auto; min-width: 92px; height: 34px; padding: 0 10px; font-size: 11px; }
+  .bulk-actions .icon-button { width: 36px; height: 34px; }
+
+  .table-shell { overflow: visible; background: #f1f4f5; }
+  .mobile-account-select-all { min-height: 38px; padding: 0 11px; display: flex; align-items: center; gap: 8px; color: var(--muted); background: #fff; border-bottom: 1px solid var(--line); font-size: 11px; }
+  .mobile-account-select-all input, .account-select-cell input { width: 18px; height: 18px; }
+  .account-table { min-width: 0; display: block; }
+  .account-table thead { display: none; }
+  .account-table tbody { padding: 7px; display: grid; gap: 7px; }
+  .account-table tbody tr { min-width: 0; position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "account select" "status wallet" "strategy strategy" "exposure volume" "sync sync" "actions actions"; background: #fff; border: 1px solid #d8dfe3; border-radius: 6px; overflow: hidden; }
+  .account-table tbody tr.selected-row { border-color: #72a891; box-shadow: inset 3px 0 #26805f; }
+  .account-table td { width: auto !important; height: auto; min-width: 0; padding: 8px 10px; position: static !important; display: block; border: 0; background: transparent !important; box-shadow: none !important; text-align: left !important; }
+  .account-select-cell { grid-area: select; padding: 10px 10px 0 4px !important; }
+  .account-info-cell { grid-area: account; padding-bottom: 5px !important; }
+  .status-info-cell { grid-area: status; padding-top: 2px !important; }
+  .wallet-info-cell { grid-area: wallet; padding-top: 2px !important; text-align: right !important; }
+  .strategy-info-cell { grid-area: strategy; padding-top: 8px !important; border-top: 1px solid var(--soft-line) !important; }
+  .exposure-info-cell { grid-area: exposure; }
+  .volume-info-cell { grid-area: volume; text-align: right !important; }
+  .sync-info-cell { grid-area: sync; padding-top: 5px !important; padding-bottom: 7px !important; border-top: 1px solid var(--soft-line) !important; }
+  .proxy-info-cell { display: none !important; }
+  .actions-column { grid-area: actions; padding: 0 !important; border-top: 1px solid var(--line) !important; }
+  .account-avatar { width: 30px; height: 30px; }
+  .account-cell strong, .status-cell strong { font-size: 12px; }
+  .account-cell span, .status-cell span, .money + span { font-size: 10px; }
+  .wallet-info-cell .money, .volume-info-cell .money { font-size: 12px; }
+  .exposure-cell { gap: 4px; }
+  .exposure-cell span { font-size: 10px; }
+  .progress-label { font-size: 11px; }
+  .progress-track { height: 5px; }
+  .strategy-scope { margin-top: 4px; font-size: 9px; line-height: 1.35; white-space: normal; }
+  .next-action { font-size: 10px; }
+  .runtime-cell { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .runtime-cell small { margin: 0; text-align: right; }
+  .row-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
+  .row-actions > .icon-button { width: 100%; height: 42px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-right: 1px solid var(--line); border-radius: 0; }
+  .row-actions > .icon-button:last-child { border-right: 0; }
+  .mobile-action-label { display: inline; font-size: 10px; font-weight: 600; }
+  .unread-dot { top: 3px; right: 8px; }
+  .account-actions-menu { width: min(244px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow-y: auto; }
+  .action-menu-item { min-height: 44px; }
+
+  .drawer-backdrop, .modal-backdrop { overscroll-behavior: contain; }
+  .log-drawer, .execution-drawer { width: 100vw; height: 100dvh; border-left: 0; }
+  .drawer-header, .execution-header { min-width: 0; padding-right: max(8px, env(safe-area-inset-right)); padding-left: max(10px, env(safe-area-inset-left)); }
+  .drawer-title div > span { max-width: 150px; }
+  .drawer-actions { gap: 3px; }
+  .drawer-actions .icon-button, .execution-actions .icon-button { width: 36px; height: 36px; }
+  .drawer-actions .icon-button:not(.log-clear-button):nth-child(-n+2) { display: none; }
+  .log-clear-button { width: 74px; }
+  .monitor-tabs { padding: 0 10px; justify-content: stretch; gap: 0; }
+  .monitor-tabs button { min-width: 0; height: 38px; flex: 1; justify-content: center; }
+  .terminal-statusbar { min-height: 26px; padding: 0 10px; }
+  .terminal-statusbar span:last-child { display: none; }
+  .runtime-stage-strip { min-height: 58px; padding: 0 10px; grid-template-columns: minmax(0, 1fr) 88px; }
+  .runtime-stage-main strong { font-size: 11px; white-space: normal; }
+  .runtime-stage-countdown strong { font-size: 15px; }
+  .monitor-body { padding: 0 10px max(24px, env(safe-area-inset-bottom)); }
+  .monitor-summary { margin: 0 -10px; padding: 0 10px 4px; position: sticky; top: 0; display: flex; gap: 0; overflow-x: auto; scroll-snap-type: x proximity; }
+  .monitor-summary > div { min-width: 138px; min-height: 54px; padding: 8px 10px; flex: 0 0 auto; scroll-snap-align: start; border-bottom: 0 !important; }
+  .monitor-summary > div.monitor-metric-primary { min-width: 170px; }
+  .monitor-summary strong { font-size: 11px; }
+  .active-waits, .monitor-timeline { margin-top: 12px; }
+  .active-wait-row { min-height: 52px; }
+  .active-waits > header small, .monitor-timeline > header small { display: none; }
+  .log-line { grid-template-columns: 52px 38px minmax(0, 1fr); gap: 5px; font-size: 10px; }
+  .monitor-entry { min-height: 38px; }
+
+  .execution-drawer { grid-template-rows: 54px 34px minmax(0, 1fr); }
+  .execution-summary { padding: 0 10px; }
+  .execution-body { padding-bottom: env(safe-area-inset-bottom); background: #eef2f3; }
+  .execution-table-shell { min-width: 0; background: transparent; }
+  .execution-table, .execution-table tbody { display: block; }
+  .execution-table thead { display: none; }
+  .execution-table tbody { padding: 7px; }
+  .execution-table tr { margin-bottom: 7px; padding: 10px; position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 9px 12px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+  .execution-table td { width: auto !important; height: auto; min-width: 0; padding: 0; display: flex; flex-direction: column; align-items: flex-start; border: 0; text-align: left !important; }
+  .execution-table td::before { content: attr(data-label); margin-bottom: 3px; color: var(--muted); font-size: 9px; }
+  .run-strategy-cell { padding-right: 70px !important; grid-column: 1 / -1; }
+  .run-status-cell { position: absolute !important; top: 9px; right: 9px; }
+  .run-status-cell::before { display: none; }
+  .run-time-cell, .run-balance-cell { grid-column: 1 / -1; }
+  .run-time-cell { display: grid !important; grid-template-columns: 1fr 1fr; }
+  .run-time-cell::before { grid-column: 1 / -1; }
+  .run-balance-cell strong, .run-balance-cell span { white-space: normal !important; }
+  .run-monitor-cell { position: absolute !important; right: 9px; bottom: 9px; }
+  .run-monitor-cell .icon-button { width: 68px; height: 34px; display: flex; gap: 5px; }
+  .execution-warning { margin: 7px; }
+
+  .modal-backdrop { padding: 0; place-items: end center; }
+  .dialog, .dialog.bound-strategy-execution-dialog, .account-dialog, .strategy-library-dialog { width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; }
+  .dialog { display: flex; flex-direction: column; overflow: hidden; }
+  .dialog-header { min-height: 54px; flex: 0 0 auto; padding-top: max(8px, env(safe-area-inset-top)); }
+  .dialog form, .beta-campaign-body, .close-positions-body, .strategy-library-layout { min-height: 0; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .beta-campaign-body { padding: 8px 10px max(10px, env(safe-area-inset-bottom)); }
+  .beta-campaign-summary > div { min-height: 54px; padding: 7px 9px; }
+  .bound-start-confirmation { min-height: 0; }
+  .dialog-actions { margin-top: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); position: sticky; bottom: 0; z-index: 3; background: #fff; }
+  .dialog-actions .button { min-height: 40px; }
+  .confirmation-phrase { font-size: 10px; overflow-wrap: anywhere; }
+  .confirm-input { min-height: 42px; font-size: 16px; }
+  .toast { width: auto; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); left: 8px; justify-content: center; text-align: center; }
+}

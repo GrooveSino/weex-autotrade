@@ -67,8 +67,8 @@ export function LogDrawerView(props: Props) {
         {tab === 'monitor' ? monitorLoading && !monitor ? <div className="terminal-loading"><span className="terminal-cursor" />正在读取本次任务...</div> : <>
           {monitor && <>
             <section className="monitor-summary" aria-label="任务摘要">
+              <div className="monitor-metric-primary"><span>本次已核验 / 目标</span><strong>{quote(monitor.verifiedQuoteVolume)} / {quote(monitor.targetQuoteVolume)} USDT</strong></div><div className="monitor-metric-primary"><span>剩余目标</span><strong>{quote(monitor.remainingQuoteVolume)} USDT</strong></div>
               <div><span>状态 / 阶段</span><strong>{monitor.status} / {monitor.phase}</strong></div><div><span>运行 / 轮次</span><strong>{monitor.currentRun || '-'} / {monitor.currentRound || '-'}</strong></div>
-              <div><span>本次已核验 / 目标</span><strong>{quote(monitor.verifiedQuoteVolume)} / {quote(monitor.targetQuoteVolume)} USDT</strong></div><div><span>剩余目标</span><strong>{quote(monitor.remainingQuoteVolume)} USDT</strong></div>
               <div><span>BTC / ETH 成交量</span><strong>{quote(monitor.btcQuoteVolume)} / {quote(monitor.ethQuoteVolume)} USDT</strong></div><div><span>Maker / Taker / Unknown</span><strong>{monitor.makerFillCount} / {monitor.takerFillCount} / {monitor.unknownFillCount}</strong></div>
               <div><span>挂单 / 撤单 / requote</span><strong>{monitor.submissions} / {monitor.cancels} / {monitor.requotes}</strong></div><div><span>数据来源</span><strong className={monitor.volumeSource !== 'ledger' || monitor.stale || monitor.reconciliationRequired ? 'monitor-unverified' : 'monitor-verified'}>{volumeState}</strong>{monitor.volumeSource === 'execution_journal' && <small className="monitor-ledger-progress">账本已同步 {quote(monitor.ledgerVerifiedQuoteVolume)} USDT · 最终完成仍待审计</small>}</div>
             </section>
