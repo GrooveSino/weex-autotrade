@@ -18,6 +18,7 @@ from .campaign_contracts import CampaignRecord
 from .campaign_events import _publishes_fleet_snapshot, _sanitize_event
 from .campaign_helpers import (
     _available_quote,
+    _available_quote_from_readiness,
     _account_boundary_is_flat,
     _campaign_result_metrics,
     _normalize_proxy_url,
@@ -197,6 +198,50 @@ class CampaignWorkerRuntimeMixin:
         finally:
             if gateway is not None:
                 gateway.close()
+
+    def verify_bound_strategy_recovery(
+        self,
+        record: CampaignRecord | None,
+        material: CredentialMaterial,
+    ) -> Decimal:
+        """Read and verify the recovery boundary without issuing a mutation."""
+        gateway: WeexGateway | None = None
+        try:
+            profile, gateway = self._profile_and_gateway(material)
+            if record is not None and live_profile_fingerprint(profile) != record.campaign.profile_fingerprint:
+                raise UnsafeOperation("旧任务无法自动收尾：Live 配置已发生变化")
+            boundary = inspect_live_account(gateway, Decimal(0))
+            if not _account_boundary_is_flat(boundary):
+                positions = int(boundary.get("active_position_count") or 0)
+                orders = int(boundary.get("regular_order_count") or 0)
+                triggers = int(boundary.get("trigger_order_count") or 0)
+                raise UnsafeOperation(
+                    f"旧任务尚不能收尾：仍有 {positions} 个持仓、{orders} 个挂单、{triggers} 个条件单"
+                )
+            return _available_quote_from_readiness(boundary)
+        finally:
+            if gateway is not None:
+                gateway.close()
+
+    def archive_bound_strategy_recovery(self, record: CampaignRecord, *, recovered_at_ms: int) -> None:
+        """Make a verified historical Campaign non-blocking and retain its audit trail."""
+        if record.status in {BetaCampaignStatus.EXECUTING.value, BetaCampaignStatus.STOPPING.value}:
+            raise UnsafeOperation("旧任务仍在执行或停止中，不能创建新任务")
+        updates: dict[str, Any] = {
+            "reconciliation_acknowledged_at_ms": recovered_at_ms,
+            "reconciliation_boundary": "btc_eth_flat_no_regular_or_trigger_orders",
+            "reconciliation_source": "automatic_startup_recovery",
+        }
+        if record.status in {BetaCampaignStatus.UNCERTAIN.value, BetaCampaignStatus.PLANNED.value}:
+            updates.update(
+                status=BetaCampaignStatus.STOPPED.value,
+                finished_at_ms=recovered_at_ms,
+                reason="automatic_startup_recovery",
+            )
+        self.journal.update(record.campaign_id, **updates)
+        event = _sanitize_event({"event": "campaign_recovery_archived", "verified": True})
+        event["sequence"] = self._append_monitor_event(record, event)
+        self._notify(record.instance_id)
 
     def _unresolved_uncertain(self, instance_id: str) -> CampaignRecord | None:
         return next(

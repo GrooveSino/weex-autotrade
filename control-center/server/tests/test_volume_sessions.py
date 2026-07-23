@@ -83,6 +83,38 @@ def test_reconcile_marks_missing_fill_as_required() -> None:
     assert projection["stale"] is True
 
 
+def test_recover_stopped_preserves_authoritative_volume_and_unblocks_next_run() -> None:
+    ledger = InMemoryTradeVolumeLedger()
+    service = SessionVolumeService(ledger)
+    service.start(
+        session_id="recoverable",
+        account_id="recover-account",
+        mode="live",
+        started_at_ms=500,
+        target_quote_volume=Decimal("20"),
+    )
+    service.mark_uncertain(
+        "recoverable",
+        reason="control_plane_restart",
+        finished_at_ms=1_500,
+    )
+
+    projection = service.recover_stopped(
+        "recoverable",
+        (fill("recovered-open", "7", "open"), fill("recovered-close", "8", "close")),
+        reconciled_at_ms=2_000,
+        ending_available_balance_quote=Decimal("99.5"),
+    )
+
+    assert projection["status"] == "stopped"
+    assert projection["verified_quote_volume"] == "15"
+    assert projection["remaining_quote_volume"] == "5"
+    assert projection["reconciliation_required"] is False
+    assert projection["uncertain_order_state"] is False
+    assert projection["result_reason"] == "automatic_startup_recovery"
+    assert ledger.active_session("recover-account", "live") is None
+
+
 def test_sqlite_session_and_checkpoint_survive_restart(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
     repository = SQLiteAccountRepository(path)

@@ -383,6 +383,188 @@ def test_bound_strategy_live_preview_is_read_only_and_confirmation_gated(
         assert api.get("/api/v1/health").json()["liveCampaignActiveWorkerCount"] == 0
 
 
+def test_bound_strategy_preview_automatically_converges_a_flat_uncertain_run(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"),
+            default_mode="live",
+            live_trading_enabled=True,
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(settings)
+    with TestClient(app) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="1250")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        first = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/preview",
+            json={},
+        ).json()
+        record = app.state.campaign_journal.get(first["campaignId"])
+        assert record is not None
+        session_id = str(record.metadata["session_id"])
+        started_at_ms = int(time.time() * 1000) - 2_000
+        assert app.state.campaign_journal.claim_execution(
+            first["campaignId"], started_at_ms=started_at_ms
+        )
+        app.state.session_volume.start(
+            session_id=session_id,
+            account_id=instance["id"],
+            mode="live",
+            started_at_ms=started_at_ms,
+            target_quote_volume=Decimal("1250"),
+            strategy_id=strategy["id"],
+            strategy_name=strategy["name"],
+            strategy_version=strategy["version"],
+            target_mode="incremental",
+            strategy_target_quote_volume=Decimal("1250"),
+        )
+        app.state.session_volume.mark_uncertain(
+            session_id,
+            reason="control_plane_restart",
+            finished_at_ms=started_at_ms + 1_000,
+        )
+        app.state.campaign_journal.update(
+            first["campaignId"],
+            status="uncertain",
+            reason="control_plane_restart",
+        )
+        authoritative = (
+            NormalizedTradeFill(
+                identity="recovered-fill",
+                executed_at_ms=started_at_ms + 500,
+                quote_volume=Decimal("12.5"),
+                symbol="BTCUSDT",
+                position_action="open",
+                maker=True,
+            ),
+        )
+
+        async def authoritative_fills(_instance_id: str, _start_ms: int, _end_ms: int):
+            return authoritative, True, "window_complete"
+
+        app.state.account_runtime.authoritative_session_fills = authoritative_fills
+        second = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/preview",
+            json={},
+        )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["campaignId"] != first["campaignId"]
+        assert second.json()["executionTargetQuoteVolume"] == "1250"
+        recovered = app.state.trade_volume_ledger.session_projection(session_id)
+        assert recovered["status"] == "stopped"
+        assert recovered["verified_quote_volume"] == "12.5"
+        assert recovered["result_reason"] == "automatic_startup_recovery"
+        archived = app.state.campaign_journal.get(first["campaignId"])
+        assert archived is not None
+        assert archived.status == "stopped"
+        assert archived.metadata["reconciliation_source"] == "automatic_startup_recovery"
+
+
+def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from weex_cli.config import Credentials, Settings
+    from weex_cli.live_profile import LiveProfile
+
+    settings = ControlPlaneSettings(
+        adapter="weex-live",
+        storage="sqlite",
+        sqlite_path=tmp_path / "fleet.sqlite3",
+        master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        seed_demo_data=False,
+        live_campaigns_enabled=True,
+        live_trading_enabled=True,
+        campaign_data_directory=tmp_path / "campaigns",
+    )
+    profile = LiveProfile(
+        path=tmp_path / "profile.toml",
+        settings=Settings(
+            credentials=Credentials("key", "secret", "pass"),
+            default_mode="live",
+            live_trading_enabled=True,
+        ),
+        proxy_url=None,
+        allow_live_mutations=True,
+        post_only_only=True,
+    )
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(settings)
+    with TestClient(app) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="1250")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        first = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={}
+        ).json()
+        record = app.state.campaign_journal.get(first["campaignId"])
+        assert record is not None
+        session_id = str(record.metadata["session_id"])
+        started_at_ms = int(time.time() * 1000) - 2_000
+        assert app.state.campaign_journal.claim_execution(
+            first["campaignId"], started_at_ms=started_at_ms
+        )
+        app.state.session_volume.start(
+            session_id=session_id,
+            account_id=instance["id"],
+            mode="live",
+            started_at_ms=started_at_ms,
+            target_quote_volume=Decimal("1250"),
+        )
+        app.state.session_volume.mark_uncertain(
+            session_id,
+            reason="control_plane_restart",
+            finished_at_ms=started_at_ms + 1_000,
+        )
+        app.state.campaign_journal.update(first["campaignId"], status="uncertain")
+
+        async def incomplete_fills(_instance_id: str, _start_ms: int, _end_ms: int):
+            return (), False, "page_budget_exhausted"
+
+        app.state.account_runtime.authoritative_session_fills = incomplete_fills
+        blocked = api.post(
+            f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={}
+        )
+
+        assert blocked.status_code == 409
+        assert "成交历史尚未完整返回" in blocked.json()["detail"]
+        assert app.state.trade_volume_ledger.active_session(instance["id"], "live") is not None
+        assert app.state.campaign_journal.get(first["campaignId"]).status == "uncertain"
+
+
 def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailable(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

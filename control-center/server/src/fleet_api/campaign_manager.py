@@ -274,6 +274,18 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
             active_futures = {campaign_id for campaign_id, future in self._futures.items() if not future.done()}
             return len(self._starting | active_futures)
 
+    def has_active_worker(self, instance_id: str) -> bool:
+        """Report whether this process still owns executable work for an account."""
+        with self._lock:
+            campaign_ids = set(self._starting)
+            campaign_ids.update(
+                campaign_id for campaign_id, future in self._futures.items() if not future.done()
+            )
+        return any(
+            (record := self.journal.get(campaign_id)) is not None and record.instance_id == instance_id
+            for campaign_id in campaign_ids
+        )
+
     def close(self) -> None:
         with self._lock:
             self._closing = True

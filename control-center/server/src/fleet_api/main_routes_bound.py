@@ -40,6 +40,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     projected_instances = ctx.projected_instances
     combined_log_updates = ctx.combined_log_updates
     strategy_run_plan = ctx.strategy_run_plan
+    bound_strategy_recovery = ctx.bound_strategy_recovery
     require_command_id = ctx.require_command_id
 
     @app.post(
@@ -53,6 +54,8 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         instance = service.get_instance(instance_id)
         if instance.mode is not TradingMode.LIVE:
             raise UnsafeOperation("bound strategy execution requires a Live account")
+        await bound_strategy_recovery.prepare_for_new_run(instance, vault.get(instance_id))
+        instance = service.get_instance(instance_id)
         plan = strategy_run_plan(instance)
         session_id = f"session-{uuid4().hex}"
         view = await asyncio.to_thread(

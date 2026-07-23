@@ -154,3 +154,44 @@ class SessionVolumeService:
                 pending_sync=False,
             )
         return self.ledger.session_projection(session_id)
+
+    def recover_stopped(
+        self,
+        session_id: str,
+        authoritative_fills: tuple[NormalizedTradeFill, ...],
+        *,
+        reconciled_at_ms: int,
+        ending_available_balance_quote: Decimal | None = None,
+    ) -> dict[str, object]:
+        """Close a recoverable old run after a complete authoritative read.
+
+        This is deliberately a ledger-only transition.  The caller must verify
+        the exchange boundary and source completeness before invoking it.
+        """
+        session = self.ledger.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self.ledger.record_account_fills(session.account_id, session.mode, authoritative_fills)
+        projection = self.reconcile(
+            session_id,
+            authoritative_fills,
+            reconciled_at_ms=reconciled_at_ms,
+        )
+        if bool(projection["reconciliation_required"]):
+            return projection
+        self.ledger.update_session(
+            session_id,
+            uncertain_order_state=False,
+            source_complete=True,
+            stale=False,
+            pending_sync=False,
+        )
+        lifetime = self.ledger.aggregate(session.account_id, 0).lifetime
+        return self.finalize(
+            session_id,
+            result="stopped",
+            reason="automatic_startup_recovery",
+            finished_at_ms=reconciled_at_ms,
+            final_lifetime_quote_volume=lifetime,
+            ending_available_balance_quote=ending_available_balance_quote,
+        )

@@ -11,6 +11,16 @@ current_link="${release_root}/web-current"
 release_id="$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import time; print(time.time_ns())')-$$-${RANDOM}-$(git -C "${control_center_dir:h}" rev-parse --short HEAD 2>/dev/null || print local)"
 release_dir="${web_releases}/${release_id}"
 stage_dir="${web_releases}/.${release_id}.staging"
+python_bin="${FLEET_PYTHON_BIN:-${control_center_dir}/server/.venv/bin/python3}"
+
+if [[ ! -x "${python_bin}" ]]; then
+  stable_python="${release_root}/service-current/control-center/server/.venv/bin/python3"
+  [[ -x "${stable_python}" ]] || {
+    print -u2 "Fleet Python runtime was not found; stage a service release first or set FLEET_PYTHON_BIN"
+    exit 69
+  }
+  python_bin="${stable_python}"
+fi
 
 mkdir -p "${web_releases}"
 [[ ! -e "${release_dir}" ]] || { print -u2 "release already exists: ${release_id}"; exit 1; }
@@ -58,7 +68,7 @@ fi
 mkdir "${stage_dir}"
 cp -R "${build_source}"/. "${stage_dir}/"
 
-"${control_center_dir}/server/.venv/bin/python3" - "${stage_dir}" "${release_id}" <<'PY'
+"${python_bin}" - "${stage_dir}" "${release_id}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -112,7 +122,7 @@ mv "${stage_dir}" "${release_dir}"
 ln -sfn "${release_dir}" "${current_link}.next"
 mv -f -h "${current_link}.next" "${current_link}"
 
-"${control_center_dir}/server/.venv/bin/python3" - "${web_releases}" "${current_link}" <<'PY'
+"${python_bin}" - "${web_releases}" "${current_link}" <<'PY'
 from __future__ import annotations
 
 import shutil

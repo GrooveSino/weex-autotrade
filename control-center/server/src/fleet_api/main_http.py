@@ -27,6 +27,7 @@ def install_http_support(app: FastAPI, ctx: FleetAppContext) -> None:
     app.state.session_volume = ctx.session_volume
     app.state.campaign_journal = ctx.campaign_journal
     app.state.campaign_manager = ctx.campaign_manager
+    app.state.bound_strategy_recovery = ctx.bound_strategy_recovery
     app.state.executor_generation = ctx.executor_generation
     app.state.executor_release_id = ctx.executor_release_id
     app.state.command_ledger = ctx.command_ledger
