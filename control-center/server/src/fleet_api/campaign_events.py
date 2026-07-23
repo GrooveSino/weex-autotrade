@@ -81,6 +81,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "maker_only",
         "verified",
         "maker",
+        "reduce_only",
     }
     fields: dict[str, object] = {}
     if payload.get("sequence") is not None:
@@ -169,7 +170,24 @@ def _publishes_fleet_snapshot(name: str) -> bool:
         "workflow_finished",
         "campaign_finished",
         "campaign_uncertain",
+        "campaign_recovering",
+        "launch_aborted",
     }
+
+
+def submission_attempted(record: CampaignRecord) -> bool:
+    """Return whether the journal crossed the exchange mutation boundary."""
+    for event in record.events:
+        name = str(event.get("name") or "")
+        fields = event.get("fields") if isinstance(event.get("fields"), Mapping) else {}
+        progress_event = str(fields.get("progress_event") or "")
+        if progress_event in {"order_submission_attempted", "submit"}:
+            return True
+        # Releases before the explicit boundary marker only journaled these
+        # events after an accepted submission or reconciled fill.
+        if name in {"leg_completed", "leg_uncertain", "cycle_completed"}:
+            return True
+    return False
 
 
 def _view(record: CampaignRecord | None, *, include_events: bool = True) -> BetaCampaignView:

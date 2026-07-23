@@ -99,6 +99,7 @@ class SQLiteLedgerSessionsMixin:
             pending_sync=bool(row["pending_sync"]),
             maker_only_required=bool(row["maker_only_required"]),
             uncertain_order_state=bool(row["uncertain_order_state"]),
+            audit_status=str(row["audit_status"] or "pending"),
             strategy_id=row["strategy_id"],
             strategy_name=row["strategy_name"],
             strategy_version=None if row["strategy_version"] is None else int(row["strategy_version"]),
@@ -149,7 +150,7 @@ class SQLiteLedgerSessionsMixin:
         with self._lock, self._connection:
             active = self._connection.execute(
                 "SELECT 1 FROM volume_sessions WHERE account_id = ? AND mode = ? "
-                "AND status IN ('active', 'stopping', 'verification_pending', 'uncertain') LIMIT 1",
+                "AND status IN ('active', 'recovering', 'stopping') LIMIT 1",
                 (account_id, mode),
             ).fetchone()
             if active is not None:
@@ -203,6 +204,7 @@ class SQLiteLedgerSessionsMixin:
             "high_watermark_ms",
             "pending_sync",
             "uncertain_order_state",
+            "audit_status",
             "finished_at_ms",
             "result",
             "result_reason",

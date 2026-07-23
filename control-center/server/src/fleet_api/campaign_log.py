@@ -92,7 +92,7 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
                 f"{value('symbol')} {value('action')} 成交已核验；"
                 f"{value('quote_volume')} USDT / {value('fill_count')} 笔",
             )
-        state = "已安全停止" if name == "leg_stopped" else "状态不确定，需要人工对账"
+        state = "已安全停止" if name == "leg_stopped" else "结果待后台只读核验"
         return (
             LogLevel.ERROR if name == "leg_stopped" else LogLevel.WARN,
             f"实盘执行：{value('symbol')} {value('action')} {state}；{value('reason')}",
@@ -116,7 +116,7 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
         )
     if name in {"workflow_finished", "campaign_uncertain"}:
         if name == "campaign_uncertain":
-            return LogLevel.WARN, "实盘执行：工作线程结果不确定，需要人工对账后再继续"
+            return LogLevel.WARN, "实盘执行：工作线程结果待核验，正在后台只读恢复"
         level = LogLevel.SUCCESS if core("status") == "completed" else LogLevel.WARN
         return level, f"实盘执行：流程 {core('status')}；已核验 {value('executed_quote_volume')} USDT"
     presentation = describe_execution_event(event)

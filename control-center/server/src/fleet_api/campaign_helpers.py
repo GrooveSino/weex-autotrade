@@ -75,6 +75,10 @@ def _reconciliation_confirmation(campaign_id: str) -> str:
     return f"RECONCILE WEEX LIVE BETA-CAMPAIGN {campaign_id.upper()} ACCOUNT_FLAT NO_ORDERS"
 
 
+def _cleanup_confirmation(campaign_id: str) -> str:
+    return f"CLEANUP WEEX LIVE STRATEGY {campaign_id.upper()} CANCEL_AND_MAKER_FLATTEN"
+
+
 def _reconciliation_required(record: CampaignRecord) -> bool:
     return (
         record.status == BetaCampaignStatus.UNCERTAIN.value
@@ -186,8 +190,7 @@ def _worker_exception_reason(exc: Exception) -> str:
     Exchange exceptions can embed request URLs, account identifiers, or raw
     responses.  The journal is visible in the control center, so only a small
     vocabulary of known safety conditions is persisted.  Unknown exceptions
-    retain their class only and still require the existing manual reconciliation
-    path.
+    retain their class only and enter read-only recovery after submission.
     """
     if not isinstance(exc, SafetyError):
         return f"worker_exception:{type(exc).__name__.lower()}"

@@ -1,22 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDownToLine,
-  CircleDot,
-  Copy,
-  History,
-  LoaderCircle,
-  RefreshCw,
-  Terminal,
-  Trash2,
-  X,
-} from 'lucide-react'
-import {
   clearInstanceLogs,
   fetchInstanceLogs,
   fetchStrategyMonitor,
   subscribeToStrategyMonitor,
 } from '../services/controlCenter'
 import type { AccountInstance, LogLine, StrategyMonitorSnapshot } from '../types'
+import { LogDrawerView } from './LogDrawerView'
+import { levelLabel, mergeMonitor } from './logDrawerFormat'
 
 interface LogDrawerProps {
   account: AccountInstance | null
@@ -25,58 +16,6 @@ interface LogDrawerProps {
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'retrying'
-
-const levelLabel: Record<LogLine['level'], string> = {
-  info: '信息',
-  success: '成功',
-  warn: '警告',
-  error: '错误',
-}
-
-function displayTime(value: string | number): string {
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleTimeString('zh-CN', { hour12: false })
-}
-
-function quote(value: string): string {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : value
-}
-
-function countdown(valueMs: number | null): string {
-  if (valueMs === null) return '--:--.-'
-  const remaining = Math.max(0, valueMs)
-  const minutes = Math.floor(remaining / 60_000)
-  const seconds = Math.floor((remaining % 60_000) / 1_000)
-  const tenths = Math.floor((remaining % 1_000) / 100)
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${tenths}`
-}
-
-function mergeMonitor(
-  current: StrategyMonitorSnapshot | null,
-  incoming: StrategyMonitorSnapshot,
-  replace: boolean,
-): StrategyMonitorSnapshot {
-  if (!current) return incoming
-  const currentKey = `${current.executorGeneration}:${current.executionId ?? 'idle'}`
-  const incomingKey = `${incoming.executorGeneration}:${incoming.executionId ?? 'idle'}`
-  if (currentKey !== incomingKey) return incoming
-  const entries = new Map(current.timeline.map((entry) => [entry.id, entry]))
-  incoming.timeline.forEach((entry) => entries.set(entry.id, entry))
-  const incomingIsNewer = incoming.projectionSequence > current.projectionSequence
-    || (incoming.projectionSequence === current.projectionSequence && incoming.ledgerRevision > current.ledgerRevision)
-    || (
-      incoming.projectionSequence === current.projectionSequence
-      && incoming.ledgerRevision === current.ledgerRevision
-      && incoming.serverTimeMs >= current.serverTimeMs
-    )
-  const summary = incomingIsNewer ? incoming : current
-  return {
-    ...summary,
-    timeline: [...entries.values()].sort((left, right) => left.sequence - right.sequence).slice(-500),
-    hasMore: replace ? incoming.hasMore : current.hasMore || incoming.hasMore,
-  }
-}
 
 export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps) {
   const accountId = account?.id ?? ''
@@ -316,110 +255,29 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
       ? '执行器已核验 · 成交账本同步中'
       : '等待首笔权威成交'
 
-  return (
-    <div className="drawer-backdrop" role="presentation" onMouseDown={onClose}>
-      <aside className="log-drawer execution-monitor" role="dialog" aria-modal="true" aria-labelledby="log-title" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="drawer-header">
-          <div className="drawer-title">
-            <span className="terminal-mark"><Terminal size={16} /></span>
-            <div><h2 id="log-title">{account.name}</h2><span>{account.id} / 执行监控</span></div>
-          </div>
-          <div className="drawer-actions">
-            <button className="icon-button dark" type="button" onClick={() => navigator.clipboard.writeText(plainText)} data-tooltip="复制当前视图" aria-label="复制当前视图"><Copy size={15} /></button>
-            <button className="icon-button dark" type="button" onClick={download} data-tooltip="下载当前视图" aria-label="下载当前视图"><ArrowDownToLine size={15} /></button>
-            {tab === 'system' && <button className={`icon-button dark log-clear-button ${clearArmed ? 'armed' : ''}`} type="button" onClick={() => void clearSystemLogs()} disabled={clearBusy || (!clearArmed && systemLines.length === 0)} data-tooltip={clearArmed ? '再次点击确认清除' : '清除系统日志'} aria-label={clearArmed ? '确认清除系统日志' : '清除系统日志'}>{clearBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}<span>{clearArmed ? '确认清除' : '清除'}</span></button>}
-            <button className="icon-button dark" type="button" onClick={onClose} data-tooltip="关闭" aria-label="关闭执行监控"><X size={16} /></button>
-          </div>
-        </header>
-
-        <div className="monitor-tabs" role="tablist">
-          <button type="button" className={tab === 'monitor' ? 'active' : ''} onClick={() => setTab('monitor')}><Terminal size={13} />执行监控</button>
-          <button type="button" className={tab === 'system' ? 'active' : ''} onClick={() => setTab('system')}><History size={13} />系统日志</button>
-        </div>
-
-        <div className={`terminal-statusbar ${connection}`}>
-          <span><CircleDot size={12} />{connection === 'connecting' ? '正在建立连接' : connection === 'retrying' ? '监控同步恢复中' : '本地执行器实时连接'}</span>
-          <span>{tab === 'monitor' ? '事件驱动 / 倒计时 8 fps' : '仅当前实例 / 1s 增量读取'}</span>
-        </div>
-
-        <section className={`runtime-stage-strip ${primaryWait ? 'waiting' : ''}`} aria-label="当前运行阶段">
-          <div className="runtime-stage-main">
-            {primaryWait ? <LoaderCircle className="spin" size={15} /> : <CircleDot size={13} />}
-            <span><small>{primaryWait?.label ?? '当前阶段'}</small><strong>{monitor?.phase ?? '等待执行状态'}</strong></span>
-          </div>
-          <div className="runtime-stage-context">
-            <span>运行 <strong>{monitor?.currentRun || '-'}</strong></span>
-            <span>轮次 <strong>{monitor?.currentRound || '-'}</strong></span>
-          </div>
-          <div className="runtime-stage-countdown">
-            <small>{primaryWait ? (primaryWait.key === 'hold' ? '持仓剩余' : primaryWait.key === 'round-gap' ? '下轮开始' : '等待剩余') : '倒计时'}</small>
-            <strong>{countdown(primaryWaitRemaining)}</strong>
-          </div>
-        </section>
-
-        <div className="terminal-body monitor-body" ref={bodyRef} onScroll={(event) => {
-          const node = event.currentTarget
-          followTailRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48
-        }}>
-          {tab === 'monitor' ? (
-            monitorLoading && !monitor ? <div className="terminal-loading"><span className="terminal-cursor" />正在读取本次任务...</div> : <>
-              {monitor && <>
-                <section className="monitor-summary" aria-label="任务摘要">
-                  <div><span>状态 / 阶段</span><strong>{monitor.status} / {monitor.phase}</strong></div>
-                  <div><span>运行 / 轮次</span><strong>{monitor.currentRun || '-'} / {monitor.currentRound || '-'}</strong></div>
-                  <div><span>本次已核验 / 目标</span><strong>{quote(monitor.verifiedQuoteVolume)} / {quote(monitor.targetQuoteVolume)} USDT</strong></div>
-                  <div><span>剩余目标</span><strong>{quote(monitor.remainingQuoteVolume)} USDT</strong></div>
-                  <div><span>BTC / ETH 成交量</span><strong>{quote(monitor.btcQuoteVolume)} / {quote(monitor.ethQuoteVolume)} USDT</strong></div>
-                  <div><span>Maker / Taker / Unknown</span><strong>{monitor.makerFillCount} / {monitor.takerFillCount} / {monitor.unknownFillCount}</strong></div>
-                  <div><span>挂单 / 撤单 / requote</span><strong>{monitor.submissions} / {monitor.cancels} / {monitor.requotes}</strong></div>
-                  <div><span>数据来源</span><strong className={monitor.volumeSource !== 'ledger' || monitor.stale || monitor.reconciliationRequired ? 'monitor-unverified' : 'monitor-verified'}>{volumeState}</strong>{monitor.volumeSource === 'execution_journal' && <small className="monitor-ledger-progress">账本已同步 {quote(monitor.ledgerVerifiedQuoteVolume)} USDT · 最终完成仍待对账</small>}</div>
-                </section>
-
-                <section className="active-waits" aria-label="当前等待">
-                  <header><span>当前活动</span><small>{monitor.activeWaits.length ? `${monitor.activeWaits.length} 项并行等待` : '无活动等待'}</small></header>
-                  {monitor.activeWaits.map((wait) => {
-                    const delta = Math.max(0, serverNowMs - wait.updatedAtMs)
-                    const elapsed = wait.startedAtMs !== null && wait.startedAtMs !== undefined
-                      ? Math.max(0, serverNowMs - wait.startedAtMs)
-                      : wait.elapsedMs + delta
-                    const remaining = wait.remainingMs === null
-                      ? null
-                      : Math.max(
-                        0,
-                        wait.deadlineAtMs !== null && wait.deadlineAtMs !== undefined
-                          ? wait.deadlineAtMs - serverNowMs
-                          : wait.remainingMs - delta,
-                      )
-                    const total = remaining === null ? 0 : Math.max(1, elapsed + remaining)
-                    return <div className="active-wait-row" key={wait.key}>
-                      <LoaderCircle className="spin" size={14} />
-                      <div><strong>{wait.label}</strong>{wait.detail && <span>{wait.detail}</span>}</div>
-                      <time>已等待 {(elapsed / 1000).toFixed(1)}s{remaining !== null && <> / 剩余 {(remaining / 1000).toFixed(1)}s</>}</time>
-                      {remaining !== null && <span className="wait-progress"><i style={{ width: `${Math.min(100, elapsed / total * 100)}%` }} /></span>}
-                    </div>
-                  })}
-                </section>
-
-                <section className="monitor-timeline" aria-label="执行时间线">
-                  <header><span>执行时间线</span><small>只记录状态变化，等待心跳原地更新</small></header>
-                  {monitor.hasMore && <button className="timeline-load-older" type="button" disabled={loadOlderBusy} onClick={() => void loadOlder()}>{loadOlderBusy ? <LoaderCircle className="spin" size={12} /> : <RefreshCw size={12} />}加载更早记录</button>}
-                  {monitor.timeline.map((entry) => <div className={`log-line monitor-entry ${entry.level}`} key={entry.id}>
-                    <time>{displayTime(entry.atMs)}</time><span className="log-level">{levelLabel[entry.level]}</span><span className="log-message"><strong>{entry.title}</strong>{entry.detail && <small>{entry.detail}</small>}</span>
-                  </div>)}
-                  {!monitor.timeline.length && <div className="terminal-empty">等待第一个执行事件...</div>}
-                </section>
-              </>}
-              {error && <div className="terminal-error terminal-retry">执行监控：{error}</div>}
-            </>
-          ) : (
-            systemLoading && !systemLines.length ? <div className="terminal-loading"><span className="terminal-cursor" />正在请求系统日志...</div> : <>
-              {systemLines.map((line) => <div className={`log-line ${line.level}`} key={line.id}><time>{displayTime(line.timestamp)}</time><span className="log-level">{levelLabel[line.level]}</span><span className="log-message">{line.message}</span></div>)}
-              {!systemLines.length && !systemError && <div className="terminal-empty">暂无系统日志</div>}
-              {error && <div className="terminal-error terminal-retry">系统日志：{error}</div>}
-            </>
-          )}
-        </div>
-      </aside>
-    </div>
-  )
+  return <LogDrawerView
+    account={account}
+    tab={tab}
+    setTab={setTab}
+    connection={connection}
+    monitor={monitor}
+    monitorLoading={monitorLoading}
+    systemLines={systemLines}
+    systemLoading={systemLoading}
+    error={error}
+    clearArmed={clearArmed}
+    clearBusy={clearBusy}
+    loadOlderBusy={loadOlderBusy}
+    primaryWait={primaryWait}
+    primaryWaitRemaining={primaryWaitRemaining}
+    serverNowMs={serverNowMs}
+    volumeState={volumeState}
+    plainText={plainText}
+    bodyRef={bodyRef}
+    followTailRef={followTailRef}
+    onClose={onClose}
+    onDownload={download}
+    onClear={() => void clearSystemLogs()}
+    onLoadOlder={() => void loadOlder()}
+  />
 }

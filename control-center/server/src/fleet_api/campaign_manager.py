@@ -22,6 +22,7 @@ from .campaign_helpers import (
     _reconciliation_required,
 )
 from .campaign_manager_bound import CampaignBoundStrategyMixin
+from .campaign_manager_cleanup import CampaignCleanupMixin
 from .campaign_manager_worker import CampaignWorkerRuntimeMixin
 from .config import ControlPlaneSettings
 from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignPreviewRequest, BetaCampaignStatus, BetaCampaignView
@@ -29,7 +30,7 @@ from .ownership import LEGACY_OWNER_USER_ID
 from .service import BetaSourceUnavailable, UnsafeOperation, ValidationFailed
 from .vault import CredentialMaterial, CredentialVault
 
-class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMixin):
+class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignCleanupMixin, CampaignWorkerRuntimeMixin):
     def __init__(
         self,
         settings: ControlPlaneSettings,
@@ -57,6 +58,7 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
         self._futures: dict[str, Future[None]] = {}
         self._leases: dict[str, _AccountLease] = {}
         self._starting: set[str] = set()
+        self._cleaning: set[str] = set()
         self._closing = False
         self._lock = RLock()
 
@@ -155,6 +157,12 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
         submitted = False
         try:
             if int(time.time() * 1000) >= record.campaign.expires_at_ms:
+                self.journal.update(
+                    campaign_id,
+                    status=BetaCampaignStatus.STOPPED.value,
+                    finished_at_ms=int(time.time() * 1000),
+                    reason="launch_aborted:authorization_expired",
+                )
                 raise UnsafeOperation("campaign authorization has expired")
             if confirmation != str(record.metadata["confirmation"]):
                 raise UnsafeOperation("exact campaign confirmation does not match")
@@ -167,7 +175,20 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
                 campaign_id,
             )
             lease.acquire()
-            starting_available_balance = self._verify_execution_boundary(record, material)
+            try:
+                starting_available_balance = self._verify_execution_boundary(record, material)
+            except Exception as exc:
+                reason = f"launch_aborted:execution_boundary:{type(exc).__name__.lower()}"
+                self.journal.update(
+                    campaign_id,
+                    status=BetaCampaignStatus.STOPPED.value,
+                    finished_at_ms=int(time.time() * 1000),
+                    reason=reason,
+                )
+                event = _sanitize_event({"event": "launch_aborted", "reason": reason})
+                event["sequence"] = self._append_monitor_event(record, event)
+                self._notify(instance_id)
+                raise UnsafeOperation("启动条件已变化，请重新确认") from exc
             self.journal.update(
                 campaign_id,
                 starting_available_balance_quote=str(starting_available_balance),
@@ -183,8 +204,9 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
                 except Exception as exc:
                     self.journal.update(
                         campaign_id,
-                        status=BetaCampaignStatus.UNCERTAIN.value,
-                        reason=f"execution_claim_callback_failed:{type(exc).__name__.lower()}",
+                        status=BetaCampaignStatus.STOPPED.value,
+                        finished_at_ms=int(time.time() * 1000),
+                        reason=f"launch_aborted:execution_claim_callback_failed:{type(exc).__name__.lower()}",
                     )
                     raise UnsafeOperation("execution could not establish its local ledger session") from exc
                 self._stops[campaign_id] = stop
@@ -197,12 +219,11 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
                     self._leases.pop(campaign_id, None)
                     self.journal.update(
                         campaign_id,
-                        status=BetaCampaignStatus.UNCERTAIN.value,
-                        reason=f"worker_submit_failed:{type(exc).__name__.lower()}",
+                        status=BetaCampaignStatus.STOPPED.value,
+                        finished_at_ms=int(time.time() * 1000),
+                        reason=f"launch_aborted:worker_submit_failed:{type(exc).__name__.lower()}",
                     )
-                    raise UnsafeOperation(
-                        "campaign worker could not be started; manual reconciliation is required"
-                    ) from exc
+                    raise UnsafeOperation("campaign worker could not be started; start can be prepared again") from exc
                 self._futures[campaign_id] = future
                 submitted = True
         finally:
@@ -237,28 +258,6 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMix
     def events(self, instance_id: str, campaign_id: str) -> list[BetaCampaignEvent]:
         record = self._require_record(instance_id, campaign_id)
         return [BetaCampaignEvent.model_validate(event) for event in record.events]
-
-    def reconcile(
-        self,
-        instance_id: str,
-        campaign_id: str,
-        confirmation: str,
-        material: CredentialMaterial | None,
-    ) -> BetaCampaignView:
-        self._require_live_gate()
-        record = self._require_record(instance_id, campaign_id)
-        if record.status != BetaCampaignStatus.UNCERTAIN.value:
-            raise UnsafeOperation("manual reconciliation is only available for an uncertain campaign")
-        if not _reconciliation_required(record):
-            return _view(record)
-        expected = _reconciliation_confirmation(record.campaign_id)
-        if confirmation != expected:
-            raise UnsafeOperation("exact reconciliation confirmation does not match")
-        if material is None:
-            raise UnsafeOperation("account credentials are unavailable")
-
-        self._acknowledge_recovered_uncertain(record, material, source="manual")
-        return _view(self.journal.get(campaign_id))  # type: ignore[arg-type]
 
     def public_snapshot(self) -> list[dict[str, Any]]:
         if not hasattr(self.journal, "list_all"):

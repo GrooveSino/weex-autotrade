@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from uuid import uuid4
 from fastapi import Query
-from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignView, BoundStrategyExecutionExecuteRequest, BoundStrategyExecutionPreviewRequest, BoundStrategyExecutionReconcileRequest, BoundStrategyExecutionStopRequest, StrategyMonitorSnapshot, StrategyRunPage, StrategyRunSummary, TradingMode
-from .service import InstanceNotFound, UnsafeOperation
+from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignView, BoundStrategyExecutionExecuteRequest, BoundStrategyExecutionPreviewRequest, BoundStrategyExecutionStopRequest, StrategyMonitorSnapshot, StrategyRunCleanupRequest, StrategyRunPage, StrategyRunPrepareResponse, StrategyRunSummary, TradingMode
+from .service import BetaSourceUnavailable, InstanceNotFound, UnsafeOperation
 
 from fastapi import FastAPI
 from .main_context import FleetAppContext
@@ -40,8 +40,69 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     projected_instances = ctx.projected_instances
     combined_log_updates = ctx.combined_log_updates
     strategy_run_plan = ctx.strategy_run_plan
-    bound_strategy_recovery = ctx.bound_strategy_recovery
+    strategy_run_lifecycle = ctx.strategy_run_lifecycle
     require_command_id = ctx.require_command_id
+
+    async def prepare_strategy_run(instance_id: str) -> StrategyRunPrepareResponse:
+        instance = service.get_instance(instance_id)
+        if instance.mode is not TradingMode.LIVE:
+            raise UnsafeOperation("bound strategy execution requires a Live account")
+        prepared = await strategy_run_lifecycle.prepare(instance, vault.get(instance_id))
+        if prepared.disposition != "idle":
+            if prepared.disposition == "ready" and prepared.execution is not None:
+                preview = BetaCampaignPreview.model_validate(
+                    {
+                        **prepared.execution.model_dump(),
+                        "warnings": ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"],
+                        "blockers": [],
+                    }
+                )
+                return StrategyRunPrepareResponse(disposition="ready", preview=preview)
+            return StrategyRunPrepareResponse(
+                disposition=prepared.disposition,
+                current=prepared.execution,
+                reason_code=prepared.reason_code,
+                message=prepared.message,
+                position_count=prepared.position_count,
+                regular_order_count=prepared.regular_order_count,
+                trigger_order_count=prepared.trigger_order_count,
+                cleanup_confirmation=prepared.cleanup_confirmation,
+            )
+        instance = service.get_instance(instance_id)
+        plan = strategy_run_plan(instance)
+        session_id = f"session-{uuid4().hex}"
+        try:
+            view = await asyncio.to_thread(
+                strategy_run_lifecycle.create_run_preview,
+                instance,
+                plan,
+                vault.get(instance_id),
+                session_id=session_id,
+            )
+        except BetaSourceUnavailable as exc:
+            return StrategyRunPrepareResponse(
+                disposition="unavailable",
+                reason_code="final_beta_unavailable",
+                message=str(exc),
+            )
+        preview = BetaCampaignPreview.model_validate(
+            {
+                **view.model_dump(),
+                "warnings": ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"],
+                "blockers": [],
+            }
+        )
+        return StrategyRunPrepareResponse(disposition="ready", preview=preview)
+
+    @app.post(
+        "/api/v1/instances/{instance_id}/strategy-run/prepare",
+        response_model=StrategyRunPrepareResponse,
+    )
+    async def prepare_bound_strategy_run(
+        instance_id: str,
+        _payload: BoundStrategyExecutionPreviewRequest,
+    ) -> StrategyRunPrepareResponse:
+        return await prepare_strategy_run(instance_id)
 
     @app.post(
         "/api/v1/instances/{instance_id}/strategy-executions/preview",
@@ -51,33 +112,30 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         instance_id: str,
         _payload: BoundStrategyExecutionPreviewRequest,
     ) -> BetaCampaignPreview:
+        prepared = await prepare_strategy_run(instance_id)
+        if prepared.disposition != "ready" or prepared.preview is None:
+            if prepared.reason_code == "final_beta_unavailable":
+                raise BetaSourceUnavailable(prepared.message or "Final Beta source unavailable")
+            raise UnsafeOperation(prepared.message or f"strategy run is {prepared.disposition}")
+        return prepared.preview
+
+    @app.post(
+        "/api/v1/instances/{instance_id}/strategy-run/cleanup",
+        response_model=StrategyRunPrepareResponse,
+    )
+    async def cleanup_bound_strategy_run(
+        instance_id: str,
+        payload: StrategyRunCleanupRequest,
+    ) -> StrategyRunPrepareResponse:
         instance = service.get_instance(instance_id)
-        if instance.mode is not TradingMode.LIVE:
-            raise UnsafeOperation("bound strategy execution requires a Live account")
-        await bound_strategy_recovery.prepare_for_new_run(instance, vault.get(instance_id))
-        instance = service.get_instance(instance_id)
-        plan = strategy_run_plan(instance)
-        session_id = f"session-{uuid4().hex}"
-        view = await asyncio.to_thread(
-            campaign_manager.preview_bound_strategy,
-            instance_id,
-            instance.strategy,
-            plan.execution_target_quote_volume,
+        await asyncio.to_thread(
+            strategy_run_lifecycle.cleanup_run,
+            instance,
+            payload.confirmation,
             vault.get(instance_id),
-            session_id=session_id,
-            target_mode=plan.target_mode.value,
-            run_disposition=plan.run_disposition,
-            strategy_target_quote=plan.strategy_target_quote_volume,
-            baseline_lifetime_quote=plan.baseline_lifetime_quote_volume,
-            owner_user_id=instance.owner_user_id,
         )
-        return BetaCampaignPreview.model_validate(
-            {
-                **view.model_dump(),
-                "warnings": ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"],
-                "blockers": [],
-            }
-        )
+        await publish_snapshot()
+        return await prepare_strategy_run(instance_id)
 
     @app.post(
         "/api/v1/instances/{instance_id}/strategy-executions/{execution_id}/execute",
@@ -89,17 +147,10 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         payload: BoundStrategyExecutionExecuteRequest,
     ) -> BetaCampaignView:
         instance = service.get_instance(instance_id)
-        if instance.mode is not TradingMode.LIVE:
-            raise UnsafeOperation("bound strategy execution requires a Live account")
-        preview = campaign_manager.get(instance_id, execution_id)
-        if preview.strategy_id is None:
-            raise UnsafeOperation("execution was not created from this account's bound strategy")
-        if preview.strategy_id != instance.strategy_id or preview.strategy_version != instance.strategy.version:
-            raise UnsafeOperation("bound strategy changed since preview; create a new preview and confirm again")
         try:
             return await asyncio.to_thread(
-                campaign_manager.start,
-                instance_id,
+                strategy_run_lifecycle.start_run,
+                instance,
                 execution_id,
                 payload.confirmation,
                 payload.risk_acknowledged,
@@ -117,36 +168,10 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         execution_id: str,
         payload: BoundStrategyExecutionStopRequest,
     ) -> BetaCampaignView:
-        preview = campaign_manager.get(instance_id, execution_id)
-        if preview.strategy_id is None:
-            raise UnsafeOperation("execution was not created from this account's bound strategy")
-        try:
-            return await asyncio.to_thread(campaign_manager.stop, instance_id, execution_id, payload.confirmation)
-        finally:
-            await publish_snapshot()
-
-    @app.post(
-        "/api/v1/instances/{instance_id}/strategy-executions/{execution_id}/reconcile",
-        response_model=BetaCampaignView,
-    )
-    async def reconcile_bound_strategy_execution(
-        instance_id: str,
-        execution_id: str,
-        payload: BoundStrategyExecutionReconcileRequest,
-    ) -> BetaCampaignView:
         instance = service.get_instance(instance_id)
-        if instance.mode is not TradingMode.LIVE:
-            raise UnsafeOperation("bound strategy reconciliation requires a Live account")
-        preview = campaign_manager.get(instance_id, execution_id)
-        if preview.strategy_id is None:
-            raise UnsafeOperation("execution was not created from this account's bound strategy")
         try:
             return await asyncio.to_thread(
-                campaign_manager.reconcile,
-                instance_id,
-                execution_id,
-                payload.confirmation,
-                vault.get(instance_id),
+                strategy_run_lifecycle.stop_run, instance, execution_id, payload.confirmation
             )
         finally:
             await publish_snapshot()
@@ -186,6 +211,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                     "started_at_ms": row["started_at_ms"],
                     "finished_at_ms": row.get("finished_at_ms"),
                     "status": row["status"],
+                    "audit_status": row.get("audit_status", "pending"),
                     "result": row.get("result"),
                     "result_reason": row.get("result_reason"),
                     "strategy_target_quote_volume": row["strategy_target_quote_volume"],

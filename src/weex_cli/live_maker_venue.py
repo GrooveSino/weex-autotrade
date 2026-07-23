@@ -197,6 +197,19 @@ class LiveAdaptiveMakerVenue:
             client_order_id=client_order_id,
             reduce_only=reduce_only,
         )
+        # This event is the durable boundary between read-only preparation and
+        # a call that may have created exchange-side state.  Emit it only after
+        # every local POST_ONLY check has passed and immediately before submit.
+        if self._progress_sink is not None:
+            self._progress_sink(
+                {
+                    "event": "order_submission_attempted",
+                    "symbol": self.symbol,
+                    "side": side,
+                    "position_side": self.position_side,
+                    "reduce_only": reduce_only,
+                }
+            )
         self._last_submit_at = self.clock()
         submission = self.trading.submit_order(intent, allow_existing=True)
         raw = submission.get("result") or submission.get("order")

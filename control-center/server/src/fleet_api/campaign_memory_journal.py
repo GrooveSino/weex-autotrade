@@ -235,7 +235,7 @@ class InMemoryCampaignJournal:
             for record in tuple(self._records.values()):
                 if record.status in {BetaCampaignStatus.EXECUTING.value, BetaCampaignStatus.STOPPING.value}:
                     self.update(
-                        record.campaign_id, status=BetaCampaignStatus.UNCERTAIN.value, reason="control_plane_restart"
+                        record.campaign_id, status=BetaCampaignStatus.RECOVERING.value, reason="control_plane_restart"
                     )
                     count += 1
         return count

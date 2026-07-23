@@ -8,106 +8,22 @@ from fleet_api.execution import (
     AllocationUnavailable,
     CycleExecutionStatus,
     InMemoryExecutionJournal,
-    MockPairedExecutionAdapter,
-    PairAllocation,
     PairCyclePlan,
     PairedCycleCoordinator,
-    PairExecutionOutcome,
     SQLiteExecutionJournal,
 )
-from fleet_api.models import AccountInstance, InstanceStatus, ProxySnapshot, ProxyType, TradingMode
 from fleet_api.repository import SQLiteAccountRepository
 from fleet_api.telemetry import AccountTelemetryContext
 from fleet_api.volume_history import InMemoryTradeVolumeLedger
 
-
-def running_account(instance_id: str = "ins-execution") -> AccountInstance:
-    return AccountInstance(
-        id=instance_id,
-        name="Execution account",
-        account_tag="execution",
-        api_key_tail="ABCD",
-        mode=TradingMode.DEMO,
-        status=InstanceStatus.RUNNING,
-        phase="运行中",
-        proxy=ProxySnapshot(type=ProxyType.HTTPS, host="proxy.example.com:9000"),
-    )
-
-
-class ControlledAdapter:
-    def __init__(self, behavior: str) -> None:
-        self.behavior = behavior
-        self.calls = 0
-        self.open_calls = 0
-        self.close_calls = 0
-        self.cancel_calls = 0
-        self.mock = MockPairedExecutionAdapter()
-
-    async def open_once(self, context, plan):
-        self.calls += 1
-        self.open_calls += 1
-        if self.behavior == "raise":
-            raise ConnectionError("secret transport detail must not be journaled")
-        if self.behavior == "reject":
-            return PairExecutionOutcome(CycleExecutionStatus.REJECTED, "post_only_rejected")
-        return await self.mock.open_once(context, plan)
-
-    async def close_once(self, context, plan):
-        self.calls += 1
-        self.close_calls += 1
-        if self.behavior == "close_raise":
-            raise ConnectionError("secret close transport detail must not be journaled")
-        return await self.mock.close_once(context, plan)
-
-    async def cancel_active_orders(self, context):
-        self.cancel_calls += 1
-        return await self.mock.cancel_active_orders(context)
-
-    async def aclose(self) -> None:
-        return None
-
-
-class SingleAdapterFactory:
-    def __init__(self, adapter: ControlledAdapter) -> None:
-        self.adapter = adapter
-
-    def create(self, instance_id: str) -> ControlledAdapter:
-        return self.adapter
-
-
-class CountingAllocationProvider:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def get(self, context: AccountTelemetryContext):
-        del context
-        self.calls += 1
-        return PairAllocation(Decimal("0.8"), Decimal("0.2"), "test-allocation-v1")
-
-    async def aclose(self) -> None:
-        return None
-
-
-class UnavailableAllocationProvider(CountingAllocationProvider):
-    async def get(self, context: AccountTelemetryContext):
-        del context
-        self.calls += 1
-        raise AllocationUnavailable("beta_unusable")
-
-
-def coordinator(behavior: str = "complete"):
-    journal = InMemoryExecutionJournal()
-    ledger = InMemoryTradeVolumeLedger()
-    adapter = ControlledAdapter(behavior)
-    allocation = CountingAllocationProvider()
-    target = PairedCycleCoordinator(
-        journal,
-        ledger,
-        allocation,
-        SingleAdapterFactory(adapter),
-        total_quote=Decimal("20"),
-    )
-    return target, journal, ledger, adapter, allocation
+from .test_execution_support import (
+    ControlledAdapter,
+    CountingAllocationProvider,
+    SingleAdapterFactory,
+    UnavailableAllocationProvider,
+    coordinator,
+    running_account,
+)
 
 
 def test_completed_pair_latches_one_beta_allocation_for_open_and_close() -> None:
@@ -143,7 +59,6 @@ def test_completed_pair_latches_one_beta_allocation_for_open_and_close() -> None
 
     asyncio.run(scenario())
 
-
 def test_cancel_active_orders_delegates_once_and_returns_verified_outcome() -> None:
     async def scenario() -> None:
         target, _journal, _ledger, adapter, allocation = coordinator()
@@ -159,7 +74,6 @@ def test_cancel_active_orders_delegates_once_and_returns_verified_outcome() -> N
         await target.close()
 
     asyncio.run(scenario())
-
 
 def test_manual_pair_close_reconciles_only_the_matching_opened_cycle_without_submission() -> None:
     async def scenario() -> None:
@@ -193,7 +107,6 @@ def test_manual_pair_close_reconciles_only_the_matching_opened_cycle_without_sub
         await target.close()
 
     asyncio.run(scenario())
-
 
 def test_opened_pair_is_not_closed_before_the_configured_hold_time() -> None:
     async def scenario() -> None:
@@ -236,7 +149,6 @@ def test_opened_pair_is_not_closed_before_the_configured_hold_time() -> None:
 
     asyncio.run(scenario())
 
-
 def test_post_only_rejection_is_terminal_and_never_resubmitted() -> None:
     async def scenario() -> None:
         target, _journal, ledger, adapter, allocation = coordinator("reject")
@@ -255,7 +167,6 @@ def test_post_only_rejection_is_terminal_and_never_resubmitted() -> None:
 
     asyncio.run(scenario())
 
-
 def test_transport_exception_becomes_redacted_uncertain_and_never_resubmits() -> None:
     async def scenario() -> None:
         target, _journal, ledger, adapter, _allocation = coordinator("raise")
@@ -273,7 +184,6 @@ def test_transport_exception_becomes_redacted_uncertain_and_never_resubmits() ->
         await target.close()
 
     asyncio.run(scenario())
-
 
 def test_close_transport_exception_is_uncertain_and_never_retried() -> None:
     async def scenario() -> None:
@@ -295,7 +205,6 @@ def test_close_transport_exception_is_uncertain_and_never_retried() -> None:
         await target.close()
 
     asyncio.run(scenario())
-
 
 def test_allocation_unavailable_stops_before_plan_journal_or_submission() -> None:
     async def scenario() -> None:
@@ -324,7 +233,6 @@ def test_allocation_unavailable_stops_before_plan_journal_or_submission() -> Non
 
     asyncio.run(scenario())
 
-
 def test_preexisting_planned_cycle_is_marked_uncertain_without_adapter_or_ratio_call() -> None:
     async def scenario() -> None:
         target, journal, _ledger, adapter, allocation = coordinator()
@@ -349,7 +257,6 @@ def test_preexisting_planned_cycle_is_marked_uncertain_without_adapter_or_ratio_
         await target.close()
 
     asyncio.run(scenario())
-
 
 def test_sqlite_journal_recovers_planned_cycle_and_cascades_with_account(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
@@ -380,7 +287,6 @@ def test_sqlite_journal_recovers_planned_cycle_and_cascades_with_account(tmp_pat
     assert restored.list_recent(instance.id, 20) == []
     restored.close()
     repository.close()
-
 
 def test_sqlite_journal_marks_opened_pair_uncertain_after_restart(tmp_path: Path) -> None:
     path = tmp_path / "fleet-opened.db"

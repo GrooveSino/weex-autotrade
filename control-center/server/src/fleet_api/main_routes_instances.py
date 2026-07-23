@@ -178,56 +178,6 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         await publish_snapshot()
         return VolumeSessionResponse.model_validate(projection)
 
-    @app.post("/api/v1/volume-sessions/{session_id}/reconcile", response_model=VolumeSessionResponse)
-    async def reconcile_volume_session(session_id: str) -> VolumeSessionResponse:
-        session = owned_volume_session(session_id)
-        now_ms = time.time_ns() // 1_000_000
-        try:
-            fills, complete, reason = await runtime.authoritative_session_fills(
-                session.account_id, session.started_at_ms, now_ms
-            )
-        except Exception:
-            volume_ledger.update_session(
-                session_id,
-                last_reconciliation_at_ms=now_ms,
-                source_complete=False,
-                stale=True,
-                reconciliation_required=True,
-                pending_sync=False,
-            )
-            projection = session_volume.progress(session_id)
-        else:
-            if complete:
-                projection = session_volume.reconcile(session_id, fills, reconciled_at_ms=now_ms)
-                refreshed_session = volume_ledger.get_session(session_id)
-                if (
-                    refreshed_session is not None
-                    and refreshed_session.result in {"completed", "stopped"}
-                    and not projection["reconciliation_required"]
-                ):
-                    aggregate = volume_ledger.aggregate(session.account_id, 0)
-                    projection = session_volume.finalize(
-                        session_id,
-                        result=refreshed_session.result,
-                        reason=refreshed_session.result_reason,
-                        finished_at_ms=refreshed_session.finished_at_ms or now_ms,
-                        final_lifetime_quote_volume=aggregate.lifetime,
-                    )
-            else:
-                volume_ledger.update_session(
-                    session_id,
-                    last_reconciliation_at_ms=now_ms,
-                    source_complete=False,
-                    stale=True,
-                    reconciliation_required=True,
-                    pending_sync=False,
-                    status="verification_pending",
-                    result_reason=f"session_source_incomplete:{reason}"[:160],
-                )
-                projection = session_volume.progress(session_id)
-        await publish_snapshot()
-        return VolumeSessionResponse.model_validate(projection)
-
     @app.get("/api/v1/instances/{instance_id}/volume-history", response_model=dict[str, object])
     def account_volume_history(instance_id: str) -> dict[str, object]:
         instance = service.get_instance(instance_id)

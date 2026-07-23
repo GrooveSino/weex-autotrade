@@ -15,7 +15,7 @@ from weex_cli.live_profile import LiveProfile
 from weex_cli.live_websocket import WeexCampaignWebSocketRuntime
 
 from .campaign_contracts import CampaignRecord
-from .campaign_events import _publishes_fleet_snapshot, _sanitize_event
+from .campaign_events import _publishes_fleet_snapshot, _sanitize_event, submission_attempted
 from .campaign_helpers import (
     _available_quote,
     _available_quote_from_readiness,
@@ -83,6 +83,22 @@ class CampaignWorkerRuntimeMixin:
             status = str(result.get("status") or BetaCampaignStatus.UNCERTAIN.value)
             if status not in {item.value for item in BetaCampaignStatus}:
                 status = BetaCampaignStatus.UNCERTAIN.value
+            latest = self.journal.get(campaign_id) or record
+            if status == BetaCampaignStatus.UNCERTAIN.value:
+                status = (
+                    BetaCampaignStatus.RECOVERING.value
+                    if submission_attempted(latest)
+                    else BetaCampaignStatus.STOPPED.value
+                )
+                result = {
+                    **result,
+                    "status": status,
+                    "reason": (
+                        str(result.get("reason") or "execution_outcome_uncertain")
+                        if status == BetaCampaignStatus.RECOVERING.value
+                        else f"launch_aborted:{result.get('reason') or 'pre_submission_failure'}"
+                    ),
+                }
             metrics = _campaign_result_metrics(result)
             self.journal.update(
                 campaign_id,
@@ -99,19 +115,23 @@ class CampaignWorkerRuntimeMixin:
                 ),
                 **metrics,
             )
-        except Exception as exc:  # noqa: BLE001 - a worker failure is an uncertain live outcome
+        except Exception as exc:  # noqa: BLE001 - classification depends on the durable submission boundary
             reason = _worker_exception_reason(exc)
+            latest = self.journal.get(campaign_id) or record
+            attempted = submission_attempted(latest)
+            status = BetaCampaignStatus.RECOVERING.value if attempted else BetaCampaignStatus.STOPPED.value
+            stored_reason = reason if attempted else f"launch_aborted:{reason}"
             self.journal.update(
                 campaign_id,
-                status=BetaCampaignStatus.UNCERTAIN.value,
+                status=status,
                 finished_at_ms=int(time.time() * 1000),
-                reason=reason,
+                reason=stored_reason,
             )
             event = _sanitize_event(
                 {
-                    "event": "campaign_uncertain",
+                    "event": "campaign_recovering" if attempted else "launch_aborted",
                     "error": type(exc).__name__,
-                    "reason": reason,
+                    "reason": stored_reason,
                 }
             )
             event["sequence"] = self._append_monitor_event(record, event)
@@ -223,6 +243,26 @@ class CampaignWorkerRuntimeMixin:
             if gateway is not None:
                 gateway.close()
 
+    def inspect_bound_strategy_boundary(
+        self,
+        material: CredentialMaterial,
+    ) -> dict[str, object]:
+        """Read the current account boundary without applying any lifecycle transition."""
+        gateway: WeexGateway | None = None
+        try:
+            _, gateway = self._profile_and_gateway(material)
+            boundary = inspect_live_account(gateway, Decimal(0))
+            return {
+                "flat": _account_boundary_is_flat(boundary),
+                "position_count": int(boundary.get("active_position_count") or 0),
+                "regular_order_count": int(boundary.get("regular_order_count") or 0),
+                "trigger_order_count": int(boundary.get("trigger_order_count") or 0),
+                "available_quote": str(_available_quote_from_readiness(boundary)),
+            }
+        finally:
+            if gateway is not None:
+                gateway.close()
+
     def archive_bound_strategy_recovery(self, record: CampaignRecord, *, recovered_at_ms: int) -> None:
         """Make a verified historical Campaign non-blocking and retain its audit trail."""
         if record.status in {BetaCampaignStatus.EXECUTING.value, BetaCampaignStatus.STOPPING.value}:
@@ -232,7 +272,11 @@ class CampaignWorkerRuntimeMixin:
             "reconciliation_boundary": "btc_eth_flat_no_regular_or_trigger_orders",
             "reconciliation_source": "automatic_startup_recovery",
         }
-        if record.status in {BetaCampaignStatus.UNCERTAIN.value, BetaCampaignStatus.PLANNED.value}:
+        if record.status in {
+            BetaCampaignStatus.UNCERTAIN.value,
+            BetaCampaignStatus.RECOVERING.value,
+            BetaCampaignStatus.PLANNED.value,
+        }:
             updates.update(
                 status=BetaCampaignStatus.STOPPED.value,
                 finished_at_ms=recovered_at_ms,

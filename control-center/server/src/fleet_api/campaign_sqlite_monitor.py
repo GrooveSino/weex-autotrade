@@ -7,6 +7,7 @@ from typing import Any
 from weex_cli.execution_progress import ExecutionProgressProjector
 
 from .campaign_contracts import ExecutionMonitorProjection
+from .service import UnsafeOperation
 
 class SQLiteCampaignJournalMonitorMixin:
     def add_event(self, campaign_id: str, event: dict[str, Any]) -> int:

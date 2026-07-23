@@ -126,6 +126,7 @@ class InMemoryTradeVolumeLedger:
                 pending_sync=True,
                 maker_only_required=maker_only_required,
                 uncertain_order_state=False,
+                audit_status="pending",
                 strategy_id=strategy_id,
                 strategy_name=strategy_name,
                 strategy_version=strategy_version,
@@ -293,7 +294,7 @@ class InMemoryTradeVolumeLedger:
                 if session.account_id == account_id and session.mode == mode:
                     self._sessions[session_id] = replace(
                         session,
-                        status="verification_pending",
+                        audit_status="discrepant",
                         reconciliation_required=True,
                         stale=True,
                         discrepancy_quote_volume=discrepancy,

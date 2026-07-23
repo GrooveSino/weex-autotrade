@@ -16,27 +16,15 @@ from fleet_api.repository import SQLiteAccountRepository
 from fleet_api.strategy import StrategyTargetReached, resolve_strategy_run_plan
 from fleet_api.volume_history import (
     InMemoryTradeVolumeLedger,
-    NormalizedTradeFill,
     SessionVolumeService,
     SQLiteTradeVolumeLedger,
     TradeHistoryContext,
-    TradeHistoryPage,
     TradeHistorySynchronizer,
 )
 
-
-def fill(fill_id: str, quote: str, action: str, *, authoritative: bool = True, maker: bool | None = True):
-    return NormalizedTradeFill(
-        identity=fill_id,
-        executed_at_ms=1_000,
-        quote_volume=Decimal(quote),
-        symbol="BTCUSDT",
-        order_id=f"order-{fill_id}",
-        base_quantity=Decimal("0.001"),
-        position_action=action,
-        maker=maker,
-        authoritative=authoritative,
-    )
+from .test_volume_sessions_support import (
+    fill,
+)
 
 
 def test_session_counts_open_and_close_once_and_ignores_planned_amounts() -> None:
@@ -58,7 +46,6 @@ def test_session_counts_open_and_close_once_and_ignores_planned_amounts() -> Non
     ledger.record_account_fills("a1", "live", (fill("open", "7", "open"),))
     assert service.progress("s1")["verified_quote_volume"] == "15"
 
-
 def test_incomplete_source_cannot_complete_target() -> None:
     ledger = InMemoryTradeVolumeLedger()
     service = SessionVolumeService(ledger)
@@ -69,9 +56,9 @@ def test_incomplete_source_cannot_complete_target() -> None:
     projection = service.progress("s2")
     assert projection["verified_quote_volume"] == "0"
     assert projection["remaining_quote_volume"] == "10"
-    assert projection["status"] == "verification_pending"
+    assert projection["status"] == "active"
+    assert projection["audit_status"] == "pending"
     assert projection["retry_allowed"] is False
-
 
 def test_reconcile_marks_missing_fill_as_required() -> None:
     ledger = InMemoryTradeVolumeLedger()
@@ -81,7 +68,6 @@ def test_reconcile_marks_missing_fill_as_required() -> None:
     projection = service.reconcile("s3", (fill("remote", "10", "open"),), reconciled_at_ms=2_000)
     assert projection["reconciliation_required"] is True
     assert projection["stale"] is True
-
 
 def test_recover_stopped_preserves_authoritative_volume_and_unblocks_next_run() -> None:
     ledger = InMemoryTradeVolumeLedger()
@@ -93,7 +79,7 @@ def test_recover_stopped_preserves_authoritative_volume_and_unblocks_next_run() 
         started_at_ms=500,
         target_quote_volume=Decimal("20"),
     )
-    service.mark_uncertain(
+    service.mark_recovering(
         "recoverable",
         reason="control_plane_restart",
         finished_at_ms=1_500,
@@ -113,7 +99,6 @@ def test_recover_stopped_preserves_authoritative_volume_and_unblocks_next_run() 
     assert projection["uncertain_order_state"] is False
     assert projection["result_reason"] == "automatic_startup_recovery"
     assert ledger.active_session("recover-account", "live") is None
-
 
 def test_sqlite_session_and_checkpoint_survive_restart(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
@@ -186,7 +171,6 @@ def test_sqlite_session_and_checkpoint_survive_restart(tmp_path: Path) -> None:
     restored.close()
     repository.close()
 
-
 def test_sync_timeout_marks_previous_session_projection_stale() -> None:
     class TimeoutSource:
         async def fetch_page(self, context, *, cursor, limit):
@@ -222,10 +206,10 @@ def test_sync_timeout_marks_previous_session_projection_stale() -> None:
             )
         projection = service.progress("s5")
         assert projection["stale"] is True
-        assert projection["status"] == "verification_pending"
+        assert projection["status"] == "active"
+        assert projection["audit_status"] == "pending"
 
     asyncio.run(scenario())
-
 
 def test_completed_incremental_run_allows_a_fresh_full_target() -> None:
     ledger = InMemoryTradeVolumeLedger()
@@ -266,7 +250,6 @@ def test_completed_incremental_run_allows_a_fresh_full_target() -> None:
     assert second["target_quote_volume"] == "10"
     assert second["verified_quote_volume"] == "0"
 
-
 def test_stopped_incremental_run_is_archived_and_next_run_does_not_reuse_remaining() -> None:
     ledger = InMemoryTradeVolumeLedger()
     service = SessionVolumeService(ledger)
@@ -298,7 +281,6 @@ def test_stopped_incremental_run_is_archived_and_next_run_does_not_reuse_remaini
     )
     assert next_run["remaining_quote_volume"] == "10"
 
-
 def test_lifetime_run_plan_uses_authoritative_residual_and_blocks_reached_target() -> None:
     instance = AccountInstance(
         id="lifetime",
@@ -329,147 +311,3 @@ def test_lifetime_run_plan_uses_authoritative_residual_and_blocks_reached_target
     )
     with pytest.raises(StrategyTargetReached):
         resolve_strategy_run_plan(reached, None)
-
-
-def test_session_window_can_complete_while_lifetime_history_remains_incomplete() -> None:
-    class SessionWindowSource:
-        async def fetch_page(self, context, *, cursor, limit):
-            return TradeHistoryPage(
-                fills=(fill("window", "10", "close"),),
-                next_cursor=None,
-                complete=False,
-                window_complete=True,
-                high_watermark_ms=1_000,
-            )
-
-    async def scenario() -> None:
-        ledger = InMemoryTradeVolumeLedger()
-        service = SessionVolumeService(ledger)
-        instance = AccountInstance(
-            id="window-account",
-            name="window",
-            account_tag="test",
-            api_key_tail="ABCD",
-            mode=TradingMode.LIVE,
-            status=InstanceStatus.RUNNING,
-            phase="running",
-            proxy=ProxySnapshot(type=ProxyType.HTTPS, host="example:443"),
-        )
-        service.start(
-            session_id="window-session",
-            account_id=instance.id,
-            mode="live",
-            started_at_ms=500,
-            target_quote_volume=Decimal("10"),
-        )
-        await TradeHistorySynchronizer(ledger).sync(
-            instance.id,
-            TradeHistoryContext(instance, None),
-            SessionWindowSource(),
-            today_start_ms=0,
-            coverage_start_ms=500,
-        )
-        projection = service.progress("window-session")
-        assert ledger.aggregate(instance.id, 0).complete is False
-        assert projection["source_complete"] is True
-        assert projection["status"] == "completed"
-
-    asyncio.run(scenario())
-
-
-def test_sqlite_strategy_run_history_uses_stable_cursor_pagination(tmp_path: Path) -> None:
-    path = tmp_path / "history.db"
-    repository = SQLiteAccountRepository(path)
-    repository.create(
-        AccountInstance(
-            id="history-account",
-            name="history",
-            account_tag="test",
-            api_key_tail="ABCD",
-            mode=TradingMode.LIVE,
-            status=InstanceStatus.STOPPED,
-            phase="idle",
-            proxy=ProxySnapshot(type=ProxyType.NONE, host="none"),
-        )
-    )
-    ledger = SQLiteTradeVolumeLedger(path)
-    service = SessionVolumeService(ledger)
-    for index in range(3):
-        session_id = f"run-{index}"
-        service.start(
-            session_id=session_id,
-            account_id="history-account",
-            mode="live",
-            started_at_ms=1_000 + index,
-            target_quote_volume=Decimal("5"),
-        )
-        ledger.update_session(session_id, source_complete=True, stale=False, pending_sync=False)
-        service.finalize(
-            session_id,
-            result="stopped",
-            reason="test",
-            finished_at_ms=2_000 + index,
-            final_lifetime_quote_volume=Decimal(index),
-        )
-
-    first, cursor = ledger.list_sessions("history-account", "live", limit=2)
-    second, final_cursor = ledger.list_sessions("history-account", "live", limit=2, cursor=cursor)
-
-    assert [row["session_id"] for row in first] == ["run-2", "run-1"]
-    assert cursor == "run-1"
-    assert [row["session_id"] for row in second] == ["run-0"]
-    assert final_cursor is None
-    ledger.close()
-    repository.close()
-
-
-@pytest.mark.parametrize("ledger_kind", ["memory", "sqlite"])
-def test_terminal_session_returns_to_verification_pending_on_fill_conflict(
-    tmp_path: Path, ledger_kind: str
-) -> None:
-    repository = None
-    if ledger_kind == "sqlite":
-        path = tmp_path / "conflict.db"
-        repository = SQLiteAccountRepository(path)
-        repository.create(
-            AccountInstance(
-                id="conflict-account",
-                name="conflict",
-                account_tag="test",
-                api_key_tail="ABCD",
-                mode=TradingMode.LIVE,
-                status=InstanceStatus.STOPPED,
-                phase="idle",
-                proxy=ProxySnapshot(type=ProxyType.NONE, host="none"),
-            )
-        )
-        ledger = SQLiteTradeVolumeLedger(path)
-    else:
-        ledger = InMemoryTradeVolumeLedger()
-    service = SessionVolumeService(ledger)
-    service.start(
-        session_id="conflict-run",
-        account_id="conflict-account",
-        mode="live",
-        started_at_ms=500,
-        target_quote_volume=Decimal("5"),
-    )
-    ledger.update_session("conflict-run", source_complete=True, stale=False, pending_sync=False)
-    service.finalize(
-        "conflict-run",
-        result="stopped",
-        reason="manual_stop",
-        finished_at_ms=2_000,
-        final_lifetime_quote_volume=Decimal("5"),
-    )
-
-    ledger.mark_sessions_reconciliation("conflict-account", "live", discrepancy=Decimal("1"))
-    projection = service.progress("conflict-run")
-
-    assert projection["status"] == "verification_pending"
-    assert projection["result"] == "stopped"
-    assert projection["reconciliation_required"] is True
-    assert ledger.active_session("conflict-account", "live") is not None
-    ledger.close()
-    if repository is not None:
-        repository.close()

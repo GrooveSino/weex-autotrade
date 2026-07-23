@@ -53,18 +53,19 @@ class SessionVolumeService:
         self.ledger.update_session(session_id, status="stopping")
         return self.progress(session_id)
 
-    def mark_uncertain(self, session_id: str, *, reason: str, finished_at_ms: int) -> dict[str, object]:
+    def mark_recovering(self, session_id: str, *, reason: str, finished_at_ms: int) -> dict[str, object]:
         self.ledger.update_session(
             session_id,
-            status="uncertain",
-            result="uncertain",
+            status="recovering",
+            audit_status="pending",
+            result=None,
             result_reason=reason,
             finished_at_ms=finished_at_ms,
             uncertain_order_state=True,
             source_complete=False,
             stale=True,
             reconciliation_required=True,
-            pending_sync=False,
+            pending_sync=True,
         )
         return self.progress(session_id)
 
@@ -90,12 +91,11 @@ class SessionVolumeService:
             and not bool(projection["pending_sync"])
             and not bool(projection.get("uncertain_order_state", False))
         )
-        final_status = result
-        if not verified_state or (result == "completed" and verified < target):
-            final_status = "verification_pending"
+        audit_status = "verified" if verified_state and (result != "completed" or verified >= target) else "pending"
         self.ledger.update_session(
             session_id,
-            status=final_status,
+            status=result,
+            audit_status=audit_status,
             result=result,
             result_reason=reason,
             finished_at_ms=finished_at_ms,
@@ -136,7 +136,7 @@ class SessionVolumeService:
         if missing or extra or changed:
             self.ledger.update_session(
                 session_id,
-                status="verification_pending",
+                audit_status="discrepant",
                 reconciliation_required=True,
                 stale=True,
                 discrepancy_quote_volume=discrepancy,
@@ -147,6 +147,7 @@ class SessionVolumeService:
             self.ledger.update_session(
                 session_id,
                 reconciliation_required=False,
+                audit_status="verified",
                 stale=False,
                 source_complete=True,
                 discrepancy_quote_volume=Decimal(0),

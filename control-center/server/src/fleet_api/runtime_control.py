@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from .execution import CancelOrdersOutcome, CycleExecutionStatus, ExecutionStateError
 from .models import AccountInstance, GlobalStopResult, InstanceAction, InstanceStatus, StrategyStage, StrategyTargetMode
-from .runtime_shared import GlobalStopAccountResult
+from .runtime_shared import GlobalStopAccountResult, session_projection_verified
 from .service import InstanceNotFound, TelemetryUnavailable, UnsafeOperation
 from .telemetry import AccountTelemetryContext
 from .volume_history import NormalizedTradeFill, shanghai_day_start_ms
@@ -143,7 +143,7 @@ class RuntimeControlMixin:
                 session = self._volume_ledger.latest_session(instance_id, current.mode.value)
                 if session is None:
                     strategy_generated = current.strategy_progress.generated_volume_quote + result.closed_quote
-                elif _session_projection_verified(session):
+                elif session_projection_verified(session):
                     strategy_generated = Decimal(str(session["verified_quote_volume"]))
             return self._service.record_positions_closed(
                 instance_id,

@@ -11,7 +11,6 @@ from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignB
 
 from .beta_allocation import HttpBetaAllocationProvider
 from .beta_source import BetaSourceRuntime, InMemoryBetaSourceStore, SQLiteBetaSourceStore
-from .bound_strategy_recovery import BoundStrategyRecoveryService
 from .campaigns import CampaignWorkerManager, InMemoryCampaignJournal, SQLiteCampaignJournal
 from .command_ledger import CommandReceiptLedger
 from .config import ControlPlaneSettings
@@ -30,6 +29,7 @@ from .runtime import AccountRuntimeManager
 from .seed import ensure_mock_volume_baselines, seed_mock_instances
 from .service import FleetControlService
 from .strategy_monitor import StrategyMonitorService
+from .strategy_run_lifecycle import StrategyRunLifecycleService
 from .telemetry import AccountTelemetryAdapterFactory, MockAccountTelemetryAdapterFactory
 from .vault import EncryptedSQLiteCredentialVault, EphemeralCredentialVault
 from .volume_history import InMemoryTradeVolumeLedger, SessionVolumeService, SQLiteTradeVolumeLedger
@@ -150,12 +150,14 @@ def finish_context(
         poll_timeout_seconds=settings.account_poll_timeout_seconds,
     )
     ctx.session_volume = SessionVolumeService(ctx.volume_ledger)
-    ctx.bound_strategy_recovery = BoundStrategyRecoveryService(
+    ctx.strategy_run_lifecycle = StrategyRunLifecycleService(
         ctx.volume_ledger,
         ctx.session_volume,
         ctx.runtime,
         ctx.campaign_manager,
         ctx.campaign_journal,
+        ctx.service,
+        ctx.vault,
     )
     ctx.strategy_monitor = StrategyMonitorService(ctx.campaign_journal, ctx.volume_ledger, ctx.executor_generation)
     ctx.strategy_monitor.rebuild_all()

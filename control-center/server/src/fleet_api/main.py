@@ -41,7 +41,7 @@ def create_app(
         version="0.1.0",
         description=(
             "Private executor for WEEX Fleet. Live bound-strategy execution remains "
-            "confirmation-gated, idempotent, POST_ONLY, and subject to manual reconciliation; "
+            "confirmation-gated, idempotent, POST_ONLY, and automatically read-only recovered; "
             "the public API proxy never submits exchange commands itself."
         ),
         lifespan=ctx.lifespan,

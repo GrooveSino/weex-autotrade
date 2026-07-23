@@ -14,7 +14,7 @@ from .funding import funding_preflight
 from .models import (
     AccountInstance, CreateInstanceRequest, CycleSnapshot, ExposureSnapshot, FundingPreflightStatus,
     InstanceAction, InstanceStatus, LogBatch, LogLevel, LogLine, ProxySnapshot, ProxyStatus, ProxyType,
-    RuntimeHealthSnapshot, StrategyProgress, StrategyStage, StrategyTargetMode, UpdateInstanceRequest,
+    RuntimeHealthSnapshot, StrategyProgress, StrategyStage, StrategyTargetMode, TradingMode, UpdateInstanceRequest,
     VolumeSnapshot, VolumeStrategy, VolumeStrategyInput, WalletSnapshot, default_volume_strategy,
 )
 from .ownership import LEGACY_OWNER_USER_ID, current_owner_user_id
@@ -41,12 +41,7 @@ class ServiceTelemetryMixin:
     ) -> AccountInstance:
         instance = self.get_instance(instance_id)
         completed_at_ms = poll_completed_at_ms or time.time_ns() // 1_000_000
-        protected_error = (
-            instance.status is InstanceStatus.ERROR and instance.strategy_progress.system_pause_reason is not None
-        )
-        recovered = instance.status in {InstanceStatus.ERROR, InstanceStatus.WARNING} and not protected_error
-        status = InstanceStatus.STOPPED if recovered else instance.status
-        phase = instance.phase if protected_error else "连接已恢复，等待人工启动" if recovered else telemetry.phase
+        recovered = instance.runtime.consecutive_failures > 0
         log_count = int(telemetry.activity_log is not None) + int(recovered)
         strategy_progress = instance.strategy_progress
         if (
@@ -58,8 +53,9 @@ class ServiceTelemetryMixin:
             )
         updated = instance.model_copy(
             update={
-                "status": status,
-                "phase": phase,
+                # Telemetry owns account observations only. Execution status and
+                # phase are projected from the strategy lifecycle elsewhere.
+                "phase": instance.phase,
                 "wallet": telemetry.wallet,
                 "volume": telemetry.volume,
                 "exposure": telemetry.exposure,
@@ -77,7 +73,8 @@ class ServiceTelemetryMixin:
                         "last_poll_started_at_ms": poll_started_at_ms or completed_at_ms,
                         "last_poll_succeeded_at_ms": completed_at_ms,
                         "last_poll_duration_ms": poll_duration_ms,
-                        **({} if protected_error else {"consecutive_failures": 0, "last_error_type": None}),
+                        "consecutive_failures": 0,
+                        "last_error_type": None,
                     }
                 ),
                 "updated_at": "刚刚",
@@ -88,7 +85,7 @@ class ServiceTelemetryMixin:
         updated = self._with_funding(updated, wallet_known=True)
         self.repository.replace(updated)
         if recovered:
-            self._append_log(instance_id, LogLevel.SUCCESS, "遥测连接已恢复；需要人工启动")
+            self._append_log(instance_id, LogLevel.SUCCESS, "遥测连接已恢复")
         if telemetry.activity_log is not None:
             self._append_log(instance_id, LogLevel.INFO, telemetry.activity_log)
         return updated
@@ -304,13 +301,18 @@ class ServiceTelemetryMixin:
     def reconcile_after_restart(self) -> int:
         reconciled = 0
         for instance in self.repository.list():
+            # Live execution state belongs exclusively to StrategyRunLifecycleService.
+            # Telemetry restart recovery may refresh observations, but must never
+            # stop, resume, or otherwise rewrite a live strategy lifecycle.
+            if instance.mode is TradingMode.LIVE:
+                continue
             if instance.status in {InstanceStatus.STOPPED, InstanceStatus.ERROR}:
                 continue
             reconciled += 1
             updated = instance.model_copy(
                 update={
                     "status": InstanceStatus.STOPPED,
-                    "phase": "服务已重启，等待人工启动",
+                    "phase": "服务已重启，正在恢复运行状态",
                     "cycle": instance.cycle.model_copy(update={"next_action_at": None}),
                     "updated_at": "刚刚",
                     "unread_logs": instance.unread_logs + 1,
@@ -318,5 +320,5 @@ class ServiceTelemetryMixin:
                 deep=True,
             )
             self.repository.replace(updated)
-            self._append_log(instance.id, LogLevel.WARN, "检测到服务重启；需要人工启动")
+            self._append_log(instance.id, LogLevel.WARN, "检测到服务重启；正在只读恢复运行状态")
         return reconciled

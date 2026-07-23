@@ -94,7 +94,7 @@ control-center/scripts/macos/deploy-service-release.zsh
 control-center/scripts/macos/activate-service-release.zsh
 ```
 
-如果新 API 未通过 health，脚本会原子恢复 `service-previous`。执行器重启时，未完成任务会进入 `uncertain`，需要人工对账；不会自动恢复下单、补单、平仓或修改仓位。只有 API 与执行器 health 都正确后，才发布网页静态 release。
+如果新 API 未通过 health，脚本会原子恢复 `service-previous`。执行器重启时，未完成任务会进入后台只读恢复检查；空仓且无挂单时自动收尾为可再次启动，存在真实残留时由统一启动窗口提供显式安全清理。系统不会自动恢复下单、补单、平仓或修改仓位。只有 API 与执行器 health 都正确后，才发布网页静态 release。
 
 拿到源码后的本机部署可使用一个显式命令完成。准备一份**未跟踪**的 `.env.live`，写入上述 `weex-live`、SQLite、主密钥和 Beta 来源变量后执行：
 

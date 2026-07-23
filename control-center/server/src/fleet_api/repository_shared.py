@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Protocol
 
 from .models import AccountInstance, LogLine, VolumeStrategy

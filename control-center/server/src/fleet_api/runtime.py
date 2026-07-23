@@ -8,6 +8,7 @@ from .execution import PairedCycleCoordinator
 from .models import SchedulerMetrics
 from .runtime_control import RuntimeControlMixin
 from .runtime_polling import RuntimePollingMixin
+from .service import FleetControlService
 from .telemetry import AccountTelemetryAdapter, AccountTelemetryAdapterFactory
 from .volume_history import TradeVolumeLedger
 

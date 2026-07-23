@@ -99,19 +99,13 @@ def _session_projection(
         if session.starting_available_balance_quote is None or session.ending_available_balance_quote is None
         else session.ending_available_balance_quote - session.starting_available_balance_quote
     )
-    if status not in TERMINAL_SESSION_STATUSES:
-        if session.uncertain_order_state or status == "uncertain":
-            status = "uncertain"
-        elif session.stale or session.reconciliation_required or not session.source_complete:
-            status = "verification_pending"
-        elif complete:
-            status = "completed"
     return {
         **session.as_dict(),
         **summary,
         "verified_quote_volume": str(verified),
         "remaining_quote_volume": str(remaining),
         "status": status,
+        "audit_status": session.audit_status,
         "maker_only_verified": eligible_maker,
         "available_balance_change_quote": (
             None if available_balance_change is None else str(available_balance_change)
@@ -123,8 +117,10 @@ def _session_projection(
 def _normalized_session_status(status: str) -> str:
     if status == "running":
         return "active"
-    if status == "stale" or status.startswith("uncertain:"):
-        return "verification_pending"
+    if status == "stale" or status == "verification_pending":
+        return "stopped"
+    if status == "uncertain" or status.startswith("uncertain:"):
+        return "recovering"
     if status == "paused":
         return "stopped"
     return status

@@ -110,7 +110,7 @@ class SQLiteLedgerSyncMixin:
         with self._lock:
             row = self._connection.execute(
                 "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ? "
-                "AND status IN ('active', 'stopping', 'verification_pending', 'uncertain') "
+                "AND status IN ('active', 'recovering', 'stopping') "
                 "ORDER BY started_at_ms DESC, session_id DESC LIMIT 1",
                 (account_id, mode),
             ).fetchone()
@@ -159,7 +159,7 @@ class SQLiteLedgerSyncMixin:
     def mark_sessions_reconciliation(self, account_id: str, mode: str, *, discrepancy: Decimal = Decimal(0)) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                """UPDATE volume_sessions SET status = 'verification_pending', reconciliation_required = 1, stale = 1,
+                """UPDATE volume_sessions SET audit_status = 'discrepant', reconciliation_required = 1, stale = 1,
                    pending_sync = 1, discrepancy_quote_volume = ?
                    WHERE account_id = ? AND mode = ?""",
                 (str(discrepancy), account_id, mode),

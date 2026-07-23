@@ -126,6 +126,7 @@ class SessionVolumeProjection(CamelModel):
     verified_quote_volume: Decimal
     remaining_quote_volume: Decimal
     status: str
+    audit_status: Literal["verified", "pending", "discrepant"] = "pending"
     fill_count: int
     opening_quote_volume: Decimal
     closing_quote_volume: Decimal
@@ -185,6 +186,17 @@ class RuntimeHealthSnapshot(CamelModel):
     last_stop_verified_at_ms: int | None = None
 
 
+class ExecutionLifecycleSnapshot(CamelModel):
+    state: Literal["idle", "preparing", "running", "stopping", "recovering", "cleanup_required"] = "idle"
+    primary_action: Literal["start", "stop", "wait", "cleanup"] = "start"
+    execution_id: str | None = None
+    session_id: str | None = None
+    reason_code: str | None = None
+    position_count: int = Field(default=0, ge=0)
+    regular_order_count: int = Field(default=0, ge=0)
+    trigger_order_count: int = Field(default=0, ge=0)
+
+
 class SchedulerMetrics(CamelModel):
     max_parallel_polls: int = Field(ge=1)
     active_polls: int = Field(default=0, ge=0)
@@ -224,6 +236,7 @@ class AccountInstance(CamelModel):
     mock_cycle_total_quote: Decimal | None = Field(default=None, gt=0, le=1_000_000)
     history_start_at_ms: int | None = Field(default=None, gt=0)
     runtime: RuntimeHealthSnapshot = Field(default_factory=RuntimeHealthSnapshot)
+    execution_lifecycle: ExecutionLifecycleSnapshot = Field(default_factory=ExecutionLifecycleSnapshot)
     updated_at: str = "尚未同步"
     unread_logs: int = 0
 

@@ -47,7 +47,9 @@ def install_application_lifecycle(ctx: FleetAppContext) -> None:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         ctx.event_loop = asyncio.get_running_loop()
         for record in ctx.campaign_journal.list_all():
-            if record.metadata.get("strategy_id") and record.status in {"completed", "stopped", "uncertain"}:
+            if record.metadata.get("strategy_id") and record.status in {
+                "completed", "stopped", "recovering", "uncertain"
+            }:
                 ctx.schedule_session_finalization(record)
         beta_task: asyncio.Task[None] | None = None
         if ctx.selected.beta_background_refresh_enabled:

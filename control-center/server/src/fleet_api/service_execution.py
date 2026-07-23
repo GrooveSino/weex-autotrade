@@ -44,7 +44,8 @@ class ServiceExecutionMixin:
             "stopping": InstanceStatus.PAUSED,
             "completed": InstanceStatus.STOPPED,
             "stopped": InstanceStatus.STOPPED,
-            "uncertain": InstanceStatus.WARNING,
+            "recovering": InstanceStatus.PAUSED,
+            "uncertain": InstanceStatus.PAUSED,
         }
         projected = status_map.get(campaign_status)
         if projected is None:
@@ -54,7 +55,8 @@ class ServiceExecutionMixin:
             "stopping": "已绑定策略安全停止中；等待撤单与成交核验",
             "completed": "已绑定策略本次授权完成；请核验成交账本",
             "stopped": "已绑定策略已安全停止",
-            "uncertain": "已绑定策略结果待人工对账",
+            "recovering": "已绑定策略正在后台只读核验",
+            "uncertain": "已绑定策略正在后台只读核验",
         }
         phase = phase_map[campaign_status]
         if reason:

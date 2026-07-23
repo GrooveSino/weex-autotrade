@@ -13,11 +13,10 @@ const quote = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximum
 
 const resultMeta: Record<string, { label: string; icon: typeof Clock3 }> = {
   active: { label: '运行中', icon: Clock3 },
+  recovering: { label: '后台核验', icon: Clock3 },
   stopping: { label: '停止中', icon: Clock3 },
   completed: { label: '已完成', icon: CheckCircle2 },
   stopped: { label: '已停止', icon: CircleStop },
-  verification_pending: { label: '待核验', icon: AlertTriangle },
-  uncertain: { label: '待对账', icon: AlertTriangle },
 }
 
 function formatQuote(value: string): string {
@@ -79,7 +78,7 @@ export function ExecutionDrawer({ account, onClose, onOpenMonitor }: ExecutionDr
   if (!account) return null
 
   const completed = runs.filter((run) => run.status === 'completed').length
-  const needsVerification = runs.filter((run) => run.status === 'verification_pending' || run.status === 'uncertain').length
+  const needsVerification = runs.filter((run) => run.auditStatus !== 'verified').length
 
   const loadMore = async () => {
     if (!cursor || loadingMore) return
@@ -115,7 +114,7 @@ export function ExecutionDrawer({ account, onClose, onOpenMonitor }: ExecutionDr
         </div>
 
         <div className="execution-body" aria-live="polite">
-          {needsVerification > 0 && <div className="execution-warning"><AlertTriangle size={16} /><p>存在待核验任务。它不会被视为完成，也不会自动重试、补单或启动下一任务。</p></div>}
+          {needsVerification > 0 && <div className="execution-warning"><AlertTriangle size={16} /><p>部分历史记录的成交审计尚未完成。审计状态不会自动重试订单，也不会阻止新的增量任务。</p></div>}
           {loading ? (
             <div className="execution-state"><LoaderCircle size={17} className="spin" />正在读取策略运行记录</div>
           ) : error && runs.length === 0 ? (
@@ -128,7 +127,7 @@ export function ExecutionDrawer({ account, onClose, onOpenMonitor }: ExecutionDr
                 <thead><tr><th>策略 / 口径</th><th>开始 / 结束</th><th>结果</th><th className="numeric">任务目标</th><th className="numeric">权威完成</th><th className="numeric">累计变化</th><th className="numeric">可用余额变化</th><th aria-label="查看监控" /></tr></thead>
                 <tbody>
                   {runs.map((run) => {
-                    const meta = resultMeta[run.status] ?? resultMeta.verification_pending
+                    const meta = resultMeta[run.status] ?? resultMeta.stopped
                     const MetaIcon = meta.icon
                     const lifetimeEnd = run.finalLifetimeQuoteVolume
                     const balanceStart = run.startingAvailableBalanceQuote

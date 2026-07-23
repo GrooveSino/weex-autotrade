@@ -19,6 +19,7 @@ ACTIVE_STATUSES = {
     BetaCampaignStatus.PLANNED.value,
     BetaCampaignStatus.EXECUTING.value,
     BetaCampaignStatus.STOPPING.value,
+    BetaCampaignStatus.RECOVERING.value,
 }
 
 class CampaignJournal(Protocol):

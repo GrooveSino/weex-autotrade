@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Protocol
 
-from .models import AccountInstance, SessionVolumeProjection, StrategyStage, StrategyTargetMode
+from .models import AccountInstance, InstanceStatus, SessionVolumeProjection, StrategyStage, StrategyTargetMode
 from .strategy_monitor import StrategyProgressProjection
 
 
@@ -15,6 +15,10 @@ class VolumeLedgerProjection(Protocol):
 
 class MonitorProjection(Protocol):
     def progress_for_session(self, instance_id: str, session_id: str | None) -> StrategyProgressProjection | None: ...
+
+
+class LifecycleProjection(Protocol):
+    def projection(self, instance_id: str, mode: str): ...
 
 
 def optional_available_balance(value: object) -> Decimal | None:
@@ -31,6 +35,7 @@ def project_instance_session(
     instance: AccountInstance,
     volume_ledger: VolumeLedgerProjection,
     strategy_monitor: MonitorProjection,
+    lifecycle: LifecycleProjection | None = None,
 ) -> AccountInstance:
     active = volume_ledger.active_session(instance.id, instance.mode.value)
     last_run = volume_ledger.latest_terminal_session(instance.id, instance.mode.value)
@@ -65,8 +70,16 @@ def project_instance_session(
         strategy_remaining = strategy_target
         target_reached = False
         progress_source = "pending"
+    lifecycle_projection = (
+        lifecycle.projection(instance.id, instance.mode.value)
+        if lifecycle is not None and instance.mode.value == "live"
+        else instance.execution_lifecycle
+    )
+    projected_status, projected_phase = _lifecycle_account_state(instance, lifecycle_projection)
     return instance.model_copy(
         update={
+            "status": projected_status,
+            "phase": projected_phase,
             "volume": instance.volume.model_copy(
                 update={
                     "session": SessionVolumeProjection.model_validate(compatibility_session)
@@ -84,8 +97,23 @@ def project_instance_session(
                 }
             ),
             "strategy_progress": strategy_progress,
+            "execution_lifecycle": lifecycle_projection,
         }
     )
+
+
+def _lifecycle_account_state(instance: AccountInstance, lifecycle: Any) -> tuple[InstanceStatus, str]:
+    if instance.mode.value != "live":
+        return instance.status, instance.phase
+    states = {
+        "idle": (InstanceStatus.STOPPED, "可启动已绑定策略"),
+        "preparing": (InstanceStatus.STOPPED, "正在生成启动确认"),
+        "running": (InstanceStatus.RUNNING, "已绑定策略执行中"),
+        "stopping": (InstanceStatus.PAUSED, "安全停止中"),
+        "recovering": (InstanceStatus.PAUSED, "后台只读核验中"),
+        "cleanup_required": (InstanceStatus.WARNING, "检测到残留订单或仓位，可执行安全清理"),
+    }
+    return states.get(lifecycle.state, (InstanceStatus.STOPPED, "可启动已绑定策略"))
 
 
 def _apply_monitor_progress(

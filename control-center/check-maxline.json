@@ -1,0 +1,11 @@
+{
+  "max_lines": 350,
+  "include_exts": ["py", "ts", "tsx", "css", "zsh"],
+  "exclude_dirs": [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "node_modules"
+  ]
+}

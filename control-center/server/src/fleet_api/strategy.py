@@ -34,14 +34,9 @@ def resolve_strategy_run_plan(
     active_session: dict[str, object] | None,
 ) -> StrategyRunPlan:
     if active_session is not None:
-        status = str(active_session.get("status") or "verification_pending")
-        if status == "uncertain":
-            raise StrategyRunBlocked("the previous strategy run requires manual reconciliation")
-        if status == "stopping":
-            raise StrategyRunBlocked("the previous strategy run is still stopping")
-        if status == "verification_pending":
-            raise StrategyRunBlocked("the previous strategy run data is awaiting verification")
-        raise StrategyRunBlocked("this account already has an active strategy run")
+        status = str(active_session.get("status") or "")
+        if status in {"active", "stopping", "recovering"}:
+            raise StrategyRunBlocked(f"this account already has an operational strategy run ({status})")
 
     strategy_target = Decimal(instance.strategy.target_volume_quote)
     lifetime = Decimal(str(instance.volume.lifetime))

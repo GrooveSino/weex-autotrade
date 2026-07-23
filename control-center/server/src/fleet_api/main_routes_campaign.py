@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from .models import BetaCampaignEvent, BetaCampaignExecuteRequest, BetaCampaignPreview, BetaCampaignPreviewRequest, BetaCampaignReconcileRequest, BetaCampaignStopRequest, BetaCampaignView, TradingMode
+from .models import BetaCampaignEvent, BetaCampaignExecuteRequest, BetaCampaignPreview, BetaCampaignPreviewRequest, BetaCampaignStopRequest, BetaCampaignView, TradingMode
 from .service import UnsafeOperation
 
 from fastapi import FastAPI
@@ -95,26 +95,6 @@ def register_campaign_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     ) -> BetaCampaignView:
         service.get_instance(instance_id)
         return await asyncio.to_thread(campaign_manager.stop, instance_id, campaign_id, payload.confirmation)
-
-    @app.post(
-        "/api/v1/instances/{instance_id}/beta-campaigns/{campaign_id}/reconcile",
-        response_model=BetaCampaignView,
-    )
-    async def reconcile_beta_campaign(
-        instance_id: str,
-        campaign_id: str,
-        payload: BetaCampaignReconcileRequest,
-    ) -> BetaCampaignView:
-        instance = service.get_instance(instance_id)
-        if instance.mode is not TradingMode.LIVE:
-            raise UnsafeOperation("Beta Campaign reconciliation requires a Live account")
-        return await asyncio.to_thread(
-            campaign_manager.reconcile,
-            instance_id,
-            campaign_id,
-            payload.confirmation,
-            vault.get(instance_id),
-        )
 
     @app.get(
         "/api/v1/instances/{instance_id}/beta-campaigns",

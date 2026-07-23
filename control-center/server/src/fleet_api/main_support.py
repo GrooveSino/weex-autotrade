@@ -14,7 +14,15 @@ from .strategy import StrategyRunBlocked, StrategyTargetReached, resolve_strateg
 
 def install_projection_support(ctx: FleetAppContext) -> None:
     def projected_instances() -> list[AccountInstance]:
-        return [project_instance_session(instance, ctx.volume_ledger, ctx.strategy_monitor) for instance in ctx.service.list_instances()]
+        return [
+            project_instance_session(
+                instance,
+                ctx.volume_ledger,
+                ctx.strategy_monitor,
+                ctx.strategy_run_lifecycle,
+            )
+            for instance in ctx.service.list_instances()
+        ]
 
     def combined_log_updates(instance_id: str, limit: int, after: str | None) -> LogBatch:
         ctx.service.get_instance(instance_id)

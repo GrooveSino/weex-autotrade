@@ -745,6 +745,20 @@ class LiveBetaVolumeService:
         self.store.save_recovery(plan, result, normalized_symbol)
         return result
 
+    def cleanup(self, plan: BetaVolumePlan) -> dict[str, Any]:
+        """Run the existing single-pass safe-stop convergence for a persisted plan."""
+        lanes = self._create_lanes()
+        return self._safe_stop(
+            plan,
+            lanes,
+            {},
+            self.now_ms(),
+            summaries=[],
+            cycles=[],
+            total_quote=Decimal(0),
+            round_number=1,
+        )
+
     def _create_lanes(self) -> dict[str, _Lane]:
         external_gateways = self.lane_gateways is not None
         if external_gateways:

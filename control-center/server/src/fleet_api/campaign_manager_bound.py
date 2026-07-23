@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -48,7 +48,6 @@ class CampaignBoundStrategyMixin:
             if active.metadata.get("strategy_id") != strategy.id:
                 raise UnsafeOperation("this account already has an active execution for another bound strategy")
             return _view(active, include_events=False)  # type: ignore[return-value]
-        self._recover_uncertain_before_preview(instance_id, material)
         if invalidated:
             self._notify(instance_id)
         profile, gateway = self._profile_and_gateway(material)
@@ -180,9 +179,12 @@ class CampaignBoundStrategyMixin:
                     raise UnsafeOperation(
                         "cannot change a bound strategy while its Live execution is active; stop and verify it first"
                     )
-                if record.status == BetaCampaignStatus.UNCERTAIN.value and _reconciliation_required(record):
+                if record.status in {
+                    BetaCampaignStatus.RECOVERING.value,
+                    BetaCampaignStatus.UNCERTAIN.value,
+                }:
                     raise UnsafeOperation(
-                        "cannot change a bound strategy while its Live execution requires manual reconciliation"
+                        "cannot change a bound strategy while its Live execution recovery is active"
                     )
 
     def _invalidate_planned_bound_strategy_previews_locked(

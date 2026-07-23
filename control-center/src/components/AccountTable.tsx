@@ -98,37 +98,38 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
             const fundingLabel = funding.status === 'ready'
               ? `自动 ${funding.plannedLeverage}x`
               : funding.status === 'insufficient' ? `资金不足 · 需 ${funding.requiredLeverage ?? '>99'}x` : '资金待同步'
-            const sessionBlocked = Boolean(session && ['stopping', 'verification_pending', 'uncertain'].includes(session.status))
             const targetReached = Boolean(account.volume.strategyTargetReached)
-            const startBlocked = account.status !== 'running' && (
+            const demoStartBlocked = account.status !== 'running' && (
               funding.status !== 'ready'
-              || sessionBlocked
               || targetReached
               || (account.strategy.targetMode === 'lifetime' && !(account.volume.lifetimeSourceComplete ?? account.volume.complete))
             )
             const actionInFlight = actioningIds.has(account.id)
-            const uncertainActionAvailable = session?.status === 'uncertain'
-            const telemetryWarning = account.status === 'warning' && !uncertainActionAvailable
             const executionUnavailable = account.mode === 'live' ? !boundStrategyExecutionEnabled : executionDisabled
-            const actionDisabled = actionInFlight || (
-              executionUnavailable
-              || telemetryWarning
-              || (account.status !== 'running' && startBlocked && !uncertainActionAvailable)
-              || account.status === 'error'
+            const lifecycle = account.executionLifecycle
+            const liveWaiting = account.mode === 'live' && lifecycle.primaryAction === 'wait'
+            const actionDisabled = actionInFlight || executionUnavailable || liveWaiting || (
+              account.mode === 'demo' && (account.status === 'error' || account.status === 'warning' || demoStartBlocked)
             )
             const actionTooltip = executionUnavailable
               ? account.mode === 'live' ? '实盘执行器未连接或实盘门禁未启用' : '当前控制面不允许启动或暂停模拟策略实例'
               : actionInFlight
                 ? '操作处理中'
-                : telemetryWarning
-                  ? '数据待核验，请修复连接后刷新'
+                : account.mode === 'live'
+                  ? lifecycle.primaryAction === 'stop'
+                    ? '安全停止已绑定策略'
+                    : lifecycle.primaryAction === 'cleanup'
+                      ? '安全清理残留后重新准备启动'
+                      : lifecycle.primaryAction === 'wait'
+                        ? lifecycle.state === 'stopping' ? '安全停止中' : '后台只读核验中'
+                        : lastRun ? '再次运行已绑定策略' : '启动已绑定策略'
                   : account.status === 'error'
                     ? '请先处理实例错误'
-                    : sessionBlocked
-                      ? session?.status === 'stopping' ? '安全停止仍在核验中' : '上一任务数据待核验，不能启动下一任务'
+                    : account.status === 'warning'
+                      ? '数据待核验，请修复连接后刷新'
                       : targetReached
                         ? '累计目标已达成；提高目标或改用每次新增后才能再次启动'
-                    : startBlocked
+                    : demoStartBlocked
                       ? funding.status === 'insufficient'
                         ? '资金不足，无法在 99x 内完成最大单轮'
                         : account.strategy.targetMode === 'lifetime' && !account.volume.complete
@@ -216,7 +217,11 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                 <td className="actions-column">
                   <div className="row-actions">
                     <button className="icon-button" type="button" onClick={() => onToggleRunning(account)} disabled={actionDisabled} data-tooltip={actionTooltip} aria-label={actionTooltip}>
-                      {account.status === 'running' ? <Square size={14} /> : <Play size={15} />}
+                      {account.mode === 'live' && lifecycle.primaryAction === 'cleanup'
+                        ? <ShieldAlert size={15} />
+                        : account.mode === 'live'
+                          ? lifecycle.primaryAction === 'stop' ? <Square size={14} /> : <Play size={15} />
+                          : account.status === 'running' ? <Square size={14} /> : <Play size={15} />}
                     </button>
                     <button className="icon-button" type="button" onClick={() => onRefresh(account)} data-tooltip="刷新该账号的价格、钱包与仓位" aria-label="刷新该账号的价格、钱包与仓位" disabled={refreshingIds.has(account.id)}>
                       <RefreshCw size={15} className={refreshingIds.has(account.id) ? 'spin' : ''} />

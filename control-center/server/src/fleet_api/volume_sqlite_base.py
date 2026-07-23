@@ -75,6 +75,7 @@ class SQLiteLedgerBase:
                 pending_sync INTEGER NOT NULL DEFAULT 1,
                 maker_only_required INTEGER NOT NULL DEFAULT 0,
                 uncertain_order_state INTEGER NOT NULL DEFAULT 0,
+                audit_status TEXT NOT NULL DEFAULT 'pending',
                 strategy_id TEXT,
                 strategy_name TEXT,
                 strategy_version INTEGER,
@@ -142,6 +143,7 @@ class SQLiteLedgerBase:
             "final_lifetime_quote_volume": "TEXT",
             "starting_available_balance_quote": "TEXT",
             "ending_available_balance_quote": "TEXT",
+            "audit_status": "TEXT NOT NULL DEFAULT 'pending'",
         }
         for name, definition in session_migrations.items():
             if name not in session_columns:
@@ -149,6 +151,13 @@ class SQLiteLedgerBase:
         self._connection.execute("UPDATE volume_sessions SET status = 'active' WHERE status = 'running'")
         self._connection.execute(
             "UPDATE volume_sessions SET status = 'verification_pending' WHERE status = 'stale'"
+        )
+        self._connection.execute(
+            "UPDATE volume_sessions SET status = 'stopped', result = COALESCE(result, 'stopped'), "
+            "audit_status = 'pending' WHERE status = 'verification_pending'"
+        )
+        self._connection.execute(
+            "UPDATE volume_sessions SET status = 'recovering', audit_status = 'pending' WHERE status = 'uncertain'"
         )
         self._connection.execute(
             "UPDATE volume_sessions SET strategy_target_quote_volume = target_quote_volume "

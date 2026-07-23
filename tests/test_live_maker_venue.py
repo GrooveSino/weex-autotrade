@@ -189,6 +189,35 @@ def test_live_venue_preserves_post_only_and_maps_short_open_close_directions() -
     assert gateway.intents[-1].reduce_only is True
 
 
+def test_submission_boundary_is_emitted_only_immediately_before_exchange_mutation() -> None:
+    events: list[dict[str, object]] = []
+
+    class BoundaryGateway(Gateway):
+        def place_order(self, intent) -> dict:
+            assert events[-1]["event"] == "order_submission_attempted"
+            return super().place_order(intent)
+
+    gateway = BoundaryGateway()
+    venue = LiveAdaptiveMakerVenue(gateway, "BTC", "long", clock=lambda: 0, sleep=lambda _: None)  # type: ignore[arg-type]
+    venue.set_progress_sink(events.append)
+
+    rejected_locally = venue.submit_post_only("buy", 1, 48, "stale-btc-open")
+    assert rejected_locally.status == "not_submitted"
+    assert not any(event.get("event") == "order_submission_attempted" for event in events)
+    assert gateway.intents == []
+
+    venue.submit_post_only("buy", 1, 49, "btc-open")
+    boundary = [event for event in events if event.get("event") == "order_submission_attempted"]
+    assert boundary == [{
+        "event": "order_submission_attempted",
+        "symbol": "BTC",
+        "side": "buy",
+        "position_side": "long",
+        "reduce_only": False,
+    }]
+    assert len(gateway.intents) == 1
+
+
 def test_cancel_is_submitted_once_and_terminal_state_is_returned() -> None:
     gateway = Gateway()
     venue = LiveAdaptiveMakerVenue(gateway, "ETH", "short", clock=lambda: 0, sleep=lambda _: None)  # type: ignore[arg-type]

@@ -12,6 +12,7 @@ from weex_cli.beta_campaign import BetaVolumeCampaign
 
 from .campaign_contracts import ACTIVE_STATUSES, CampaignRecord, ExecutionMonitorProjection
 from .models import BetaCampaignStatus
+from .service import UnsafeOperation
 
 class SQLiteCampaignJournalBase:
     def __init__(self, path: Path) -> None:
@@ -126,7 +127,7 @@ class SQLiteCampaignJournalBase:
         with self._lock:
             row = self._connection.execute(
                 "SELECT * FROM beta_campaigns "
-                "WHERE instance_id = ? AND status IN (?, ?, ?) "
+                "WHERE instance_id = ? AND status IN (?, ?, ?, ?) "
                 "ORDER BY updated_at_ms DESC LIMIT 1",
                 (instance_id, *ACTIVE_STATUSES),
             ).fetchone()
@@ -139,7 +140,7 @@ class SQLiteCampaignJournalBase:
             query += " AND json_extract(metadata_json, '$.session_id') = ?"
             parameters.append(session_id)
         query += (
-            " ORDER BY CASE WHEN status IN ('planned', 'executing', 'stopping') THEN 0 ELSE 1 END, "
+            " ORDER BY CASE WHEN status IN ('planned', 'executing', 'stopping', 'recovering') THEN 0 ELSE 1 END, "
             "updated_at_ms DESC LIMIT 1"
         )
         with self._lock:
@@ -214,7 +215,7 @@ class SQLiteCampaignJournalBase:
                 "UPDATE beta_campaigns SET status = ?, metadata_json = json_set(metadata_json, '$.reason', ?), "
                 "updated_at_ms = ? WHERE status IN (?, ?)",
                 (
-                    BetaCampaignStatus.UNCERTAIN.value,
+                    BetaCampaignStatus.RECOVERING.value,
                     "control_plane_restart",
                     now_ms,
                     BetaCampaignStatus.EXECUTING.value,

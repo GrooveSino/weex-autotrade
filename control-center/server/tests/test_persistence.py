@@ -212,7 +212,7 @@ def test_cleared_logs_remain_empty_after_sqlite_restart(tmp_path: Path) -> None:
         assert api.get(f"/api/v1/instances/{instance_id}/logs").json() == []
 
 
-def test_persisted_running_instance_requires_manual_restart_after_process_restart(tmp_path: Path) -> None:
+def test_persisted_demo_instance_returns_to_stopped_after_process_restart(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
     key = Fernet.generate_key().decode()
     first = create_app(settings(path, key))
@@ -227,8 +227,8 @@ def test_persisted_running_instance_requires_manual_restart_after_process_restar
         logs = api.get(f"/api/v1/instances/{instance_id}/logs").json()
 
     assert restored.json()["status"] == "stopped"
-    assert restored.json()["phase"] == "服务已重启，等待人工启动"
-    assert any("需要人工启动" in line["message"] for line in logs)
+    assert restored.json()["phase"] == "服务已重启，正在恢复运行状态"
+    assert any("正在只读恢复运行状态" in line["message"] for line in logs)
 
 
 def test_process_restart_marks_prepared_execution_uncertain_without_resubmission(tmp_path: Path) -> None:

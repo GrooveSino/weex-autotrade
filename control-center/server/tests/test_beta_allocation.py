@@ -5,79 +5,15 @@ import httpx
 import pytest
 
 from fleet_api.beta_allocation import HttpBetaAllocationProvider
-from fleet_api.config import ControlPlaneSettings
 from fleet_api.execution import AllocationUnavailable
-from fleet_api.models import AccountInstance, InstanceStatus, ProxySnapshot, ProxyType, TradingMode
-from fleet_api.telemetry import AccountTelemetryContext
 
-RATIO_URL = "https://ratio.example.test/api/v1/hedge-ratio"
-
-
-def healthy_payload() -> dict[str, object]:
-    return {
-        "schema_version": "1.0",
-        "status": "ok",
-        "usable": True,
-        "reason_codes": [],
-        "strategy": "btc_long_eth_short",
-        "as_of": 1784370658.59,
-        "generated_at": 1784370658.69,
-        "age_ms": 96,
-        "max_age_ms": 10000,
-        "ratio": {"btc_long": 1.0, "eth_short": 0.2055, "beta": 0.2055},
-        "allocation": {"btc_long_weight": 0.8295, "eth_short_weight": 0.1705},
-        "confidence": 0.75,
-        "confidence_threshold": 0.65,
-        "source": "beta_v2",
-    }
-
-
-def account_context(instance_id: str = "ins-beta") -> AccountTelemetryContext:
-    return AccountTelemetryContext(
-        AccountInstance(
-            id=instance_id,
-            name="Beta account",
-            account_tag="beta",
-            api_key_tail="ABCD",
-            mode=TradingMode.DEMO,
-            status=InstanceStatus.RUNNING,
-            phase="运行中",
-            proxy=ProxySnapshot(type=ProxyType.HTTPS, host="proxy.example.com:9000"),
-        ),
-        None,
-    )
-
-
-async def allocation_from_response(response: httpx.Response):
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response))
-    provider = HttpBetaAllocationProvider(
-        RATIO_URL,
-        timeout_seconds=3,
-        cache_seconds=1,
-        client=client,
-    )
-    try:
-        return await provider.get(account_context())
-    finally:
-        await provider.aclose()
-        await client.aclose()
-
-
-async def snapshot_from_payload(payload: dict[str, object]):
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload, request=request))
-    )
-    provider = HttpBetaAllocationProvider(
-        RATIO_URL,
-        timeout_seconds=3,
-        cache_seconds=1,
-        client=client,
-    )
-    try:
-        return await provider.market_snapshot()
-    finally:
-        await provider.aclose()
-        await client.aclose()
+from .test_beta_allocation_support import (
+    RATIO_URL,
+    account_context,
+    allocation_from_response,
+    healthy_payload,
+    snapshot_from_payload,
+)
 
 
 def test_healthy_response_generates_authoritative_decimal_weights() -> None:
@@ -91,7 +27,6 @@ def test_healthy_response_generates_authoritative_decimal_weights() -> None:
     assert allocation.eth_weight == expected_eth
     assert allocation.btc_weight + allocation.eth_weight == Decimal(1)
     assert allocation.version == "beta-v1:1784370658590"
-
 
 def test_market_snapshot_exposes_final_beta_even_when_upstream_marks_it_unusable() -> None:
     payload = healthy_payload()
@@ -107,7 +42,6 @@ def test_market_snapshot_exposes_final_beta_even_when_upstream_marks_it_unusable
     assert snapshot.btc_long_weight == Decimal("0.8295")
     assert snapshot.eth_short_weight == Decimal("0.1705")
 
-
 def test_status_ok_but_low_confidence_is_accepted_for_execution() -> None:
     payload = healthy_payload()
     payload["confidence"] = 0.60
@@ -116,7 +50,6 @@ def test_status_ok_but_low_confidence_is_accepted_for_execution() -> None:
 
     assert allocation.eth_weight / allocation.btc_weight == Decimal("0.2055")
 
-
 def test_low_confidence_status_and_unusable_flag_are_accepted_for_execution() -> None:
     payload = healthy_payload()
     payload.update({"status": "low_confidence", "usable": False, "confidence": 0.25})
@@ -124,7 +57,6 @@ def test_low_confidence_status_and_unusable_flag_are_accepted_for_execution() ->
     allocation = asyncio.run(allocation_from_response(httpx.Response(200, json=payload)))
 
     assert allocation.version == "beta-v1:1784370658590"
-
 
 @pytest.mark.parametrize(
     ("payload_update", "reason_code"),
@@ -149,7 +81,6 @@ def test_unusable_or_incompatible_payloads_fail_closed(
     assert caught.value.reason_code == reason_code
     assert caught.value.args == (reason_code,)
 
-
 @pytest.mark.parametrize("beta", [0, -1, "NaN", "Infinity", True, None])
 def test_invalid_beta_never_generates_an_allocation(beta: object) -> None:
     payload = healthy_payload()
@@ -158,14 +89,12 @@ def test_invalid_beta_never_generates_an_allocation(beta: object) -> None:
     with pytest.raises(AllocationUnavailable, match="^beta_invalid_ratio$"):
         asyncio.run(allocation_from_response(httpx.Response(200, json=payload)))
 
-
 def test_http_503_fails_closed_without_one_to_one_fallback() -> None:
     with pytest.raises(AllocationUnavailable) as caught:
         asyncio.run(allocation_from_response(httpx.Response(503, text="upstream unavailable details")))
 
     assert caught.value.reason_code == "beta_http_status"
     assert caught.value.args == ("beta_http_status",)
-
 
 def test_timeout_fails_closed() -> None:
     async def scenario() -> None:
@@ -185,11 +114,9 @@ def test_timeout_fails_closed() -> None:
 
     asyncio.run(scenario())
 
-
 def test_invalid_json_fails_closed() -> None:
     with pytest.raises(AllocationUnavailable, match="^beta_invalid_json$"):
         asyncio.run(allocation_from_response(httpx.Response(200, content=b"{not-json")))
-
 
 def test_concurrent_accounts_share_one_upstream_request() -> None:
     async def scenario() -> None:
@@ -215,7 +142,6 @@ def test_concurrent_accounts_share_one_upstream_request() -> None:
             await client.aclose()
 
     asyncio.run(scenario())
-
 
 def test_centralized_refresh_distributes_one_snapshot_without_consumer_network_requests() -> None:
     async def scenario() -> None:
@@ -254,7 +180,6 @@ def test_centralized_refresh_distributes_one_snapshot_without_consumer_network_r
             await client.aclose()
 
     asyncio.run(scenario())
-
 
 def test_centralized_refresh_replaces_the_snapshot_used_by_the_next_cycle() -> None:
     async def scenario() -> None:
@@ -297,7 +222,6 @@ def test_centralized_refresh_replaces_the_snapshot_used_by_the_next_cycle() -> N
 
     asyncio.run(scenario())
 
-
 def test_centralized_low_confidence_snapshot_remains_visible_and_drives_execution() -> None:
     async def scenario() -> None:
         calls = 0
@@ -332,7 +256,6 @@ def test_centralized_low_confidence_snapshot_remains_visible_and_drives_executio
 
     asyncio.run(scenario())
 
-
 def test_centralized_consumers_fail_stale_without_triggering_an_upstream_refresh() -> None:
     async def scenario() -> None:
         calls = 0
@@ -362,7 +285,6 @@ def test_centralized_consumers_fail_stale_without_triggering_an_upstream_refresh
 
     asyncio.run(scenario())
 
-
 def test_concurrent_accounts_share_one_failed_upstream_request() -> None:
     async def scenario() -> None:
         calls = 0
@@ -385,101 +307,6 @@ def test_concurrent_accounts_share_one_failed_upstream_request() -> None:
                 isinstance(result, AllocationUnavailable) and result.reason_code == "beta_http_status"
                 for result in results
             )
-        finally:
-            await provider.aclose()
-            await client.aclose()
-
-    asyncio.run(scenario())
-
-
-def test_expired_success_is_never_used_after_upstream_failure() -> None:
-    async def scenario() -> None:
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return httpx.Response(200, json=healthy_payload(), request=request)
-            return httpx.Response(503, request=request)
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        provider = HttpBetaAllocationProvider(RATIO_URL, timeout_seconds=3, cache_seconds=0.01, client=client)
-        try:
-            await provider.get(account_context())
-            await asyncio.sleep(0.02)
-            with pytest.raises(AllocationUnavailable, match="^beta_http_status$"):
-                await provider.get(account_context())
-            assert calls == 2
-        finally:
-            await provider.aclose()
-            await client.aclose()
-
-    asyncio.run(scenario())
-
-
-def test_cache_never_outlives_upstream_max_age() -> None:
-    async def scenario() -> None:
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                payload = healthy_payload()
-                payload["age_ms"] = 9950
-                return httpx.Response(200, json=payload, request=request)
-            return httpx.Response(503, request=request)
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        provider = HttpBetaAllocationProvider(RATIO_URL, timeout_seconds=3, cache_seconds=1, client=client)
-        try:
-            await provider.get(account_context())
-            await asyncio.sleep(0.06)
-            with pytest.raises(AllocationUnavailable, match="^beta_http_status$"):
-                await provider.get(account_context())
-            assert calls == 2
-        finally:
-            await provider.aclose()
-            await client.aclose()
-
-    asyncio.run(scenario())
-
-
-def test_beta_ratio_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FLEET_BETA_RATIO_URL", "http://127.0.0.1:5888/api/v1/hedge-ratio")
-    monkeypatch.setenv("FLEET_BETA_RATIO_TIMEOUT_SECONDS", "2.5")
-    monkeypatch.setenv("FLEET_BETA_REFRESH_SECONDS", "10")
-    monkeypatch.setenv("FLEET_BETA_BACKGROUND_REFRESH_ENABLED", "true")
-
-    settings = ControlPlaneSettings.load()
-
-    assert settings.beta_ratio_url == "http://127.0.0.1:5888/api/v1/hedge-ratio"
-    assert settings.beta_ratio_timeout_seconds == 2.5
-    assert settings.beta_refresh_interval_seconds == 10
-    assert settings.beta_background_refresh_enabled is True
-
-
-def test_provider_retries_after_unavailable_cache_expires() -> None:
-    async def scenario() -> None:
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return httpx.Response(503, request=request)
-            return httpx.Response(200, json=healthy_payload(), request=request)
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        provider = HttpBetaAllocationProvider(RATIO_URL, timeout_seconds=3, cache_seconds=0.01, client=client)
-        try:
-            with pytest.raises(AllocationUnavailable, match="^beta_http_status$"):
-                await provider.get(account_context())
-            await asyncio.sleep(0.02)
-            allocation = await provider.get(account_context())
-            assert allocation.version == "beta-v1:1784370658590"
-            assert calls == 2
         finally:
             await provider.aclose()
             await client.aclose()

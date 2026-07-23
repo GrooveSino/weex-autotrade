@@ -14,7 +14,7 @@ from .vault import CredentialMaterial
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
-ACTIVE_SESSION_STATUSES = frozenset({"active", "stopping", "verification_pending", "uncertain"})
+ACTIVE_SESSION_STATUSES = frozenset({"active", "recovering", "stopping"})
 TERMINAL_SESSION_STATUSES = frozenset({"completed", "stopped"})
 
 
@@ -116,6 +116,7 @@ class VolumeSession:
     pending_sync: bool
     maker_only_required: bool
     uncertain_order_state: bool
+    audit_status: str = "pending"
     strategy_id: str | None = None
     strategy_name: str | None = None
     strategy_version: int | None = None
@@ -150,6 +151,7 @@ class VolumeSession:
             "pending_sync": self.pending_sync,
             "maker_only_required": self.maker_only_required,
             "uncertain_order_state": self.uncertain_order_state,
+            "audit_status": self.audit_status,
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
             "strategy_version": self.strategy_version,

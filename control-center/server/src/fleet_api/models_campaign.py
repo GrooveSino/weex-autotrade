@@ -17,6 +17,7 @@ class BetaCampaignStatus(StrEnum):
     STOPPING = "stopping"
     COMPLETED = "completed"
     STOPPED = "stopped"
+    RECOVERING = "recovering"
     UNCERTAIN = "uncertain"
 
 
@@ -52,7 +53,7 @@ class BoundStrategyExecutionStopRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=200)
 
 
-class BoundStrategyExecutionReconcileRequest(CamelModel):
+class StrategyRunCleanupRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=240)
 
 
@@ -63,10 +64,6 @@ class BetaCampaignExecuteRequest(CamelModel):
 
 class BetaCampaignStopRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=200)
-
-
-class BetaCampaignReconcileRequest(CamelModel):
-    confirmation: str = Field(min_length=1, max_length=240)
 
 
 class BetaCampaignEvent(CamelModel):
@@ -151,3 +148,17 @@ class BetaCampaignView(CamelModel):
 class BetaCampaignPreview(BetaCampaignView):
     warnings: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+
+
+class StrategyRunPrepareResponse(CamelModel):
+    disposition: Literal[
+        "ready", "running", "stopping", "recovering", "cleanup_required", "unavailable"
+    ]
+    preview: BetaCampaignPreview | None = None
+    current: BetaCampaignView | None = None
+    reason_code: str | None = None
+    message: str | None = None
+    position_count: int = Field(default=0, ge=0)
+    regular_order_count: int = Field(default=0, ge=0)
+    trigger_order_count: int = Field(default=0, ge=0)
+    cleanup_confirmation: str | None = None

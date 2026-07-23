@@ -95,6 +95,7 @@ class VolumeSessionResponse(CamelModel):
     verified_quote_volume: Decimal
     remaining_quote_volume: Decimal
     status: str
+    audit_status: Literal["verified", "pending", "discrepant"] = "pending"
     fill_count: int
     opening_quote_volume: Decimal
     closing_quote_volume: Decimal
@@ -110,10 +111,6 @@ class VolumeSessionResponse(CamelModel):
     retry_allowed: bool = False
 
 
-class VolumeSessionReconcileRequest(CamelModel):
-    fills: list[dict[str, object]] = Field(default_factory=list)
-
-
 class StrategyRunSummary(CamelModel):
     session_id: str
     strategy_id: str | None = None
@@ -123,6 +120,7 @@ class StrategyRunSummary(CamelModel):
     started_at_ms: int
     finished_at_ms: int | None = None
     status: str
+    audit_status: Literal["verified", "pending", "discrepant"] = "pending"
     result: str | None = None
     result_reason: str | None = None
     strategy_target_quote_volume: Decimal

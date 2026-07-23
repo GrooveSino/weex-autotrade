@@ -2,7 +2,7 @@
 
 # Activate an already-staged service release. This never creates or resumes a
 # trading task; a restarted executor recovers incomplete work as uncertain and
-# requires manual reconciliation before any further Live command.
+# enters read-only recovery before any further Live command.
 set -euo pipefail
 umask 077
 
