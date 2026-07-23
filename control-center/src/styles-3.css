@@ -287,9 +287,10 @@
   .residual-policy { align-items: flex-start; padding-top: 8px; padding-bottom: 8px; }
   .residual-policy strong { text-align: right; }
   .dialog { max-height: calc(100vh - 20px); }
+  .dialog.bound-strategy-execution-dialog { height: calc(100dvh - 20px); max-height: calc(100dvh - 20px); }
   .bound-strategy-execution-dialog .dialog-header { min-height: 62px; padding-left: 14px; }
   .bound-strategy-execution-dialog .dialog-header h2 { font-size: 16px; }
-  .beta-campaign-body { padding: 12px 12px 0; }
+  .beta-campaign-body { padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
   .beta-campaign-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .beta-campaign-summary > div { min-height: 62px; padding: 9px 10px; }
   .beta-campaign-summary > div:nth-child(odd):not(.beta-campaign-summary-primary) { border-right: 1px solid #e4eaec; }
