@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
+from decimal import Decimal
+from threading import RLock
+from typing import Any
+
+from weex_cli.beta_allocation import BetaUnavailable, HttpBetaAllocationProvider
+from weex_cli.beta_campaign import BetaVolumeCampaign, BetaVolumeCampaignStore, inspect_live_account, live_profile_fingerprint
+from weex_cli.gateway import WeexGateway
+from weex_cli.live_profile import LiveProfile
+
+from .campaign_contracts import CampaignJournal, CampaignRecord, _AccountLease
+from .campaign_events import _sanitize_event, _view
+from .campaign_helpers import (
+    _available_quote_from_readiness,
+    _preview_metadata,
+    _reconciliation_confirmation,
+    _reconciliation_required,
+)
+from .campaign_manager_bound import CampaignBoundStrategyMixin
+from .campaign_manager_worker import CampaignWorkerRuntimeMixin
+from .config import ControlPlaneSettings
+from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignPreviewRequest, BetaCampaignStatus, BetaCampaignView
+from .ownership import LEGACY_OWNER_USER_ID
+from .service import BetaSourceUnavailable, UnsafeOperation, ValidationFailed
+from .vault import CredentialMaterial, CredentialVault
+
+class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignWorkerRuntimeMixin):
+    def __init__(
+        self,
+        settings: ControlPlaneSettings,
+        vault: CredentialVault,
+        journal: CampaignJournal,
+        beta_provider_factory: Callable[[], HttpBetaAllocationProvider],
+        *,
+        on_change: Callable[[str], None] | None = None,
+        on_progress: Callable[[str, Mapping[str, Any]], None] | None = None,
+        on_execution_claim: Callable[[CampaignRecord, int], None] | None = None,
+        executor_generation: str = "local",
+    ) -> None:
+        self.settings = settings
+        self.vault = vault
+        self.journal = journal
+        self.beta_provider_factory = beta_provider_factory
+        self.on_change = on_change or (lambda _instance_id: None)
+        self.on_progress = on_progress or (lambda _instance_id, _event: None)
+        self.on_execution_claim = on_execution_claim or (lambda _record, _started_at_ms: None)
+        self.executor_generation = executor_generation
+        self._executor = ThreadPoolExecutor(
+            max_workers=settings.live_campaign_worker_count, thread_name_prefix="weex-campaign"
+        )
+        self._stops: dict[str, threading.Event] = {}
+        self._futures: dict[str, Future[None]] = {}
+        self._leases: dict[str, _AccountLease] = {}
+        self._starting: set[str] = set()
+        self._closing = False
+        self._lock = RLock()
+
+    def recover(self) -> int:
+        count = self.journal.recover_incomplete()
+        for record in self.journal.list_all():
+            self._notify(record.instance_id)
+        return count
+
+    def preview(
+        self,
+        instance_id: str,
+        request: BetaCampaignPreviewRequest,
+        material: CredentialMaterial | None,
+        *,
+        owner_user_id: str = LEGACY_OWNER_USER_ID,
+    ) -> BetaCampaignPreview:
+        self._require_live_gate()
+        if material is None:
+            raise UnsafeOperation("account credentials are unavailable")
+        if self.journal.active_for_instance(instance_id) is not None:
+            raise UnsafeOperation("this account already has an active Beta Campaign")
+        self._recover_uncertain_before_preview(instance_id, material)
+        profile, gateway = self._profile_and_gateway(material)
+        provider = self.beta_provider_factory()
+        try:
+            try:
+                allocation = provider.get()
+            except BetaUnavailable as exc:
+                raise BetaSourceUnavailable(f"final beta source unavailable: {exc}") from None
+            campaign = BetaVolumeCampaign.create(
+                gateway,
+                allocation,
+                profile_fingerprint=live_profile_fingerprint(profile),
+                target_turnover_quote=request.target_quote,
+                round_turnover_quote=request.cycle_volume,
+                hold_min_seconds=request.hold_min_seconds,
+                hold_max_seconds=request.hold_max_seconds,
+                round_gap_min_seconds=request.round_gap_min_seconds,
+                round_gap_max_seconds=request.round_gap_max_seconds,
+            )
+            opening_notional = min(campaign.round_turnover_quote, campaign.target_turnover_quote) / Decimal(2)
+            required = opening_notional / Decimal(campaign.max_auto_leverage) * campaign.margin_buffer
+            readiness = inspect_live_account(
+                gateway,
+                required,
+                opening_notional=opening_notional,
+                leverage=campaign.leverage,
+                max_auto_leverage=campaign.max_auto_leverage,
+                margin_buffer=campaign.margin_buffer,
+            )
+            available = _available_quote_from_readiness(readiness)
+            blockers: list[str] = []
+            if not readiness.get("available_sufficient", False):
+                blockers.append("available_balance_insufficient")
+            if (
+                readiness.get("active_position_count", 0)
+                or readiness.get("regular_order_count", 0)
+                or readiness.get("trigger_order_count", 0)
+            ):
+                blockers.append("account_is_not_flat")
+            if blockers:
+                raise UnsafeOperation(f"campaign preview blocked: {','.join(blockers)}")
+            metadata = _preview_metadata(campaign, available, readiness)
+            metadata["owner_user_id"] = owner_user_id
+            self.journal.create(instance_id, campaign, metadata)
+            BetaVolumeCampaignStore(self.settings.campaign_data_directory / instance_id).create(campaign)
+            return _view(self.journal.get(campaign.campaign_id), include_events=False)  # type: ignore[arg-type]
+        finally:
+            gateway.close()
+
+
+    def start(
+        self,
+        instance_id: str,
+        campaign_id: str,
+        confirmation: str,
+        risk_acknowledged: bool,
+        material: CredentialMaterial | None,
+    ) -> BetaCampaignView:
+        self._require_live_gate()
+        if not risk_acknowledged:
+            raise UnsafeOperation("risk acknowledgement is required")
+        record = self._require_record(instance_id, campaign_id)
+        if record.status != BetaCampaignStatus.PLANNED.value:
+            raise UnsafeOperation("campaign is not in planned state")
+        if record.campaign.schema_version not in {2, 3}:
+            raise UnsafeOperation("execution schema is not executable; create a new preview")
+        with self._lock:
+            if self._closing:
+                raise UnsafeOperation("campaign manager is shutting down")
+            if campaign_id in self._starting or campaign_id in self._futures:
+                raise UnsafeOperation("campaign is already starting or running")
+            self._starting.add(campaign_id)
+        lease: _AccountLease | None = None
+        submitted = False
+        try:
+            if int(time.time() * 1000) >= record.campaign.expires_at_ms:
+                raise UnsafeOperation("campaign authorization has expired")
+            if confirmation != str(record.metadata["confirmation"]):
+                raise UnsafeOperation("exact campaign confirmation does not match")
+            if material is None:
+                raise UnsafeOperation("account credentials are unavailable")
+            lease = _AccountLease(
+                self.settings.campaign_data_directory,
+                material.api_key.get_secret_value(),
+                instance_id,
+                campaign_id,
+            )
+            lease.acquire()
+            starting_available_balance = self._verify_execution_boundary(record, material)
+            self.journal.update(
+                campaign_id,
+                starting_available_balance_quote=str(starting_available_balance),
+            )
+            stop = threading.Event()
+            with self._lock:
+                started_at_ms = int(time.time() * 1000)
+                if not self.journal.claim_execution(campaign_id, started_at_ms=started_at_ms):
+                    raise UnsafeOperation("campaign was already claimed by another worker")
+                claimed = self._require_record(instance_id, campaign_id)
+                try:
+                    self.on_execution_claim(claimed, started_at_ms)
+                except Exception as exc:
+                    self.journal.update(
+                        campaign_id,
+                        status=BetaCampaignStatus.UNCERTAIN.value,
+                        reason=f"execution_claim_callback_failed:{type(exc).__name__.lower()}",
+                    )
+                    raise UnsafeOperation("execution could not establish its local ledger session") from exc
+                self._stops[campaign_id] = stop
+                self._leases[campaign_id] = lease
+                claimed = self._require_record(instance_id, campaign_id)
+                try:
+                    future = self._executor.submit(self._run, claimed, material, stop)
+                except Exception as exc:
+                    self._stops.pop(campaign_id, None)
+                    self._leases.pop(campaign_id, None)
+                    self.journal.update(
+                        campaign_id,
+                        status=BetaCampaignStatus.UNCERTAIN.value,
+                        reason=f"worker_submit_failed:{type(exc).__name__.lower()}",
+                    )
+                    raise UnsafeOperation(
+                        "campaign worker could not be started; manual reconciliation is required"
+                    ) from exc
+                self._futures[campaign_id] = future
+                submitted = True
+        finally:
+            with self._lock:
+                self._starting.discard(campaign_id)
+            if lease is not None and not submitted:
+                lease.release()
+        self._notify(instance_id)
+        return _view(self.journal.get(campaign_id), include_events=False)  # type: ignore[arg-type]
+
+    def stop(self, instance_id: str, campaign_id: str, confirmation: str) -> BetaCampaignView:
+        record = self._require_record(instance_id, campaign_id)
+        if record.status not in {BetaCampaignStatus.EXECUTING.value, BetaCampaignStatus.STOPPING.value}:
+            raise UnsafeOperation("campaign is not running")
+        if confirmation != str(record.metadata["stop_confirmation"]):
+            raise UnsafeOperation("exact stop confirmation does not match")
+        with self._lock:
+            event = self._stops.get(campaign_id)
+            if event is None:
+                raise UnsafeOperation("campaign worker is not available")
+            event.set()
+            self.journal.update(campaign_id, status=BetaCampaignStatus.STOPPING.value, reason="stop_requested")
+        self._notify(instance_id)
+        return _view(self.journal.get(campaign_id), include_events=False)  # type: ignore[arg-type]
+
+    def get(self, instance_id: str, campaign_id: str) -> BetaCampaignView:
+        return _view(self._require_record(instance_id, campaign_id))
+
+    def list(self, instance_id: str) -> list[BetaCampaignView]:
+        return [_view(record, include_events=False) for record in self.journal.list_for_instance(instance_id)]
+
+    def events(self, instance_id: str, campaign_id: str) -> list[BetaCampaignEvent]:
+        record = self._require_record(instance_id, campaign_id)
+        return [BetaCampaignEvent.model_validate(event) for event in record.events]
+
+    def reconcile(
+        self,
+        instance_id: str,
+        campaign_id: str,
+        confirmation: str,
+        material: CredentialMaterial | None,
+    ) -> BetaCampaignView:
+        self._require_live_gate()
+        record = self._require_record(instance_id, campaign_id)
+        if record.status != BetaCampaignStatus.UNCERTAIN.value:
+            raise UnsafeOperation("manual reconciliation is only available for an uncertain campaign")
+        if not _reconciliation_required(record):
+            return _view(record)
+        expected = _reconciliation_confirmation(record.campaign_id)
+        if confirmation != expected:
+            raise UnsafeOperation("exact reconciliation confirmation does not match")
+        if material is None:
+            raise UnsafeOperation("account credentials are unavailable")
+
+        self._acknowledge_recovered_uncertain(record, material, source="manual")
+        return _view(self.journal.get(campaign_id))  # type: ignore[arg-type]
+
+    def public_snapshot(self) -> list[dict[str, Any]]:
+        if not hasattr(self.journal, "list_all"):
+            return []
+        return [
+            _view(record, include_events=False).model_dump(mode="json", by_alias=True)
+            for record in self.journal.list_all()
+        ]  # type: ignore[attr-defined]
+
+    def active_worker_count(self) -> int:
+        """Return work currently owned by this process, not executor capacity."""
+        with self._lock:
+            active_futures = {campaign_id for campaign_id, future in self._futures.items() if not future.done()}
+            return len(self._starting | active_futures)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closing = True
+            for stop in self._stops.values():
+                stop.set()
+        self._executor.shutdown(wait=True, cancel_futures=False)
+        self.journal.close()

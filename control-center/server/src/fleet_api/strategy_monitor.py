@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from threading import RLock
 from typing import Any
@@ -15,6 +16,14 @@ from .campaigns import CampaignJournal, CampaignRecord, ExecutionMonitorProjecti
 from .models import ActiveExecutionWait, ExecutionTimelineEntry, LogLevel, StrategyMonitorSnapshot
 from .ownership import LEGACY_OWNER_USER_ID
 from .volume_history import TradeVolumeLedger
+
+
+@dataclass(frozen=True)
+class StrategyProgressProjection:
+    verified_quote_volume: Decimal
+    volume_source: str
+    updated_at_ms: int
+    active_waits: tuple[ActiveExecutionWait, ...]
 
 
 class StrategyMonitorService:
@@ -162,6 +171,23 @@ class StrategyMonitorService:
 
     def cursor(self, campaign_id: str, sequence: int) -> str:
         return f"{self.executor_generation}:{campaign_id}:{sequence}"
+
+    def progress_for_session(self, instance_id: str, session_id: str | None) -> StrategyProgressProjection | None:
+        """Expose the same durable monitor projection used by the live drawer.
+
+        This method performs SQLite-only reads. It never polls WEEX, syncs
+        history, or changes a campaign, so account-list publication can use it
+        to stay in lockstep with the detailed execution view.
+        """
+        snapshot = self.snapshot(instance_id, session_id=session_id, limit=1)
+        if snapshot.execution_id is None:
+            return None
+        return StrategyProgressProjection(
+            verified_quote_volume=snapshot.verified_quote_volume,
+            volume_source=snapshot.volume_source,
+            updated_at_ms=snapshot.updated_at_ms,
+            active_waits=tuple(snapshot.active_waits),
+        )
 
     def parse_cursor(self, cursor: str | None) -> tuple[str, str, int] | None:
         if not cursor:

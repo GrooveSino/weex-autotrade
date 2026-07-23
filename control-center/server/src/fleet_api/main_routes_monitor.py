@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import AsyncIterator
+from fastapi import Query, Request
+from fastapi.responses import StreamingResponse
+
+from fastapi import FastAPI
+from .main_context import FleetAppContext
+from .main_helpers import monitor_sse as _monitor_sse
+
+
+def register_strategy_monitor_routes(app: FastAPI, ctx: FleetAppContext) -> None:
+    selected = ctx.selected
+    service = ctx.service
+    repository = ctx.repository
+    vault = ctx.vault
+    volume_ledger = ctx.volume_ledger
+    execution_journal = ctx.execution_journal
+    execution_coordinator = ctx.execution_coordinator
+    selected_allocation_provider = ctx.selected_allocation_provider
+    runtime = ctx.runtime
+    beta_source_runtime = ctx.beta_source_runtime
+    campaign_journal = ctx.campaign_journal
+    campaign_manager = ctx.campaign_manager
+    app_state_campaign_manager = ctx.campaign_manager
+    broker = ctx.broker
+    session_volume = ctx.session_volume
+    strategy_monitor = ctx.strategy_monitor
+    command_ledger = ctx.command_ledger
+    executor_generation = ctx.executor_generation
+    executor_release_id = ctx.executor_release_id
+    latest_bound_record = ctx.latest_bound_record
+    finalize_bound_strategy_session = ctx.finalize_bound_strategy_session
+    schedule_session_finalization = ctx.schedule_session_finalization
+    notify_campaign_change = ctx.notify_campaign_change
+    establish_bound_strategy_session = ctx.establish_bound_strategy_session
+    publish_snapshot = ctx.publish_snapshot
+    refresh_beta_state = ctx.refresh_beta_state
+    projected_instances = ctx.projected_instances
+    combined_log_updates = ctx.combined_log_updates
+    strategy_run_plan = ctx.strategy_run_plan
+    require_command_id = ctx.require_command_id
+
+    @app.get("/api/v1/instances/{instance_id}/strategy-monitor/events")
+    async def strategy_monitor_events(
+        instance_id: str,
+        request: Request,
+        session_id: str | None = Query(default=None, alias="sessionId", max_length=128),
+        after: str | None = Query(default=None, max_length=256),
+    ) -> StreamingResponse:
+        instance = service.get_instance(instance_id)
+        owner_user_id = instance.owner_user_id
+        requested_cursor = request.headers.get("last-event-id") or after
+
+        async def stream() -> AsyncIterator[str]:
+            strategy_monitor.subscriber_opened()
+            try:
+                heartbeat_at = time.monotonic()
+                initial = await asyncio.to_thread(
+                    strategy_monitor.snapshot,
+                    instance_id,
+                    session_id=session_id,
+                    limit=200,
+                    owner_user_id=owner_user_id,
+                )
+                parsed = strategy_monitor.parse_cursor(requested_cursor)
+                event_type = "snapshot"
+                if parsed is not None:
+                    generation, campaign_id, sequence = parsed
+                    if (
+                        generation != executor_generation
+                        or campaign_id != initial.execution_id
+                        or sequence > initial.projection_sequence
+                    ):
+                        event_type = "reset"
+                        strategy_monitor.reset_recorded()
+                last_campaign_id = initial.execution_id
+                last_sequence = initial.projection_sequence
+                yield _monitor_sse(
+                    event_type,
+                    initial.cursor,
+                    {
+                        "type": event_type,
+                        "snapshot": initial,
+                        "fromSequence": last_sequence,
+                        "toSequence": last_sequence,
+                    },
+                )
+
+                while not await request.is_disconnected():
+                    await asyncio.sleep(0.25)
+                    record = await asyncio.to_thread(campaign_journal.monitor_record, instance_id, session_id)
+                    campaign_id = record.campaign_id if record is not None else None
+                    if campaign_id != last_campaign_id:
+                        reset = await asyncio.to_thread(
+                            strategy_monitor.snapshot,
+                            instance_id,
+                            session_id=session_id,
+                            limit=200,
+                            owner_user_id=owner_user_id,
+                        )
+                        last_campaign_id = reset.execution_id
+                        last_sequence = reset.projection_sequence
+                        strategy_monitor.reset_recorded()
+                        yield _monitor_sse(
+                            "reset",
+                            reset.cursor,
+                            {"type": "reset", "snapshot": reset, "toSequence": last_sequence},
+                        )
+                        heartbeat_at = time.monotonic()
+                        continue
+                    journal_sequence = 0
+                    projection_sequence = 0
+                    if campaign_id is not None:
+                        projection, _unused, journal_sequence = await asyncio.to_thread(
+                            campaign_journal.monitor_read,
+                            campaign_id,
+                            None,
+                            1,
+                        )
+                        projection_sequence = projection.projected_sequence if projection is not None else 0
+                        if journal_sequence != projection_sequence or journal_sequence - last_sequence > 200:
+                            reset = await asyncio.to_thread(
+                                strategy_monitor.snapshot,
+                                instance_id,
+                                session_id=session_id,
+                                limit=200,
+                                owner_user_id=owner_user_id,
+                            )
+                            last_sequence = reset.projection_sequence
+                            strategy_monitor.reset_recorded()
+                            yield _monitor_sse(
+                                "reset",
+                                reset.cursor,
+                                {"type": "reset", "snapshot": reset, "toSequence": last_sequence},
+                            )
+                            heartbeat_at = time.monotonic()
+                            continue
+                        if journal_sequence > last_sequence:
+                            rows = await asyncio.to_thread(
+                                campaign_journal.events_after,
+                                campaign_id,
+                                last_sequence,
+                                200,
+                            )
+                            if (
+                                not rows
+                                or int(rows[0].get("sequence") or 0) != last_sequence + 1
+                                or int(rows[-1].get("sequence") or 0) != journal_sequence
+                            ):
+                                reset = await asyncio.to_thread(
+                                    strategy_monitor.snapshot,
+                                    instance_id,
+                                    session_id=session_id,
+                                    limit=200,
+                                    owner_user_id=owner_user_id,
+                                )
+                                last_sequence = reset.projection_sequence
+                                strategy_monitor.reset_recorded()
+                                yield _monitor_sse(
+                                    "reset",
+                                    reset.cursor,
+                                    {"type": "reset", "snapshot": reset, "toSequence": last_sequence},
+                                )
+                                heartbeat_at = time.monotonic()
+                                continue
+                            from_sequence = last_sequence + 1
+                            last_sequence = journal_sequence
+                            delta = await asyncio.to_thread(
+                                strategy_monitor.snapshot,
+                                instance_id,
+                                session_id=session_id,
+                                limit=200,
+                                event_rows=rows,
+                                owner_user_id=owner_user_id,
+                            )
+                            delta_cursor = strategy_monitor.cursor(campaign_id, last_sequence)
+                            yield _monitor_sse(
+                                "delta",
+                                delta_cursor,
+                                {
+                                    "type": "delta",
+                                    "snapshot": delta,
+                                    "fromSequence": from_sequence,
+                                    "toSequence": last_sequence,
+                                },
+                            )
+                            heartbeat_at = time.monotonic()
+                            continue
+                    if time.monotonic() - heartbeat_at >= 5:
+                        now_ms = time.time_ns() // 1_000_000
+                        cursor = (
+                            strategy_monitor.cursor(campaign_id, last_sequence)
+                            if campaign_id and last_sequence
+                            else None
+                        )
+                        yield _monitor_sse(
+                            "heartbeat",
+                            cursor,
+                            {
+                                "type": "heartbeat",
+                                "journalSequence": journal_sequence,
+                                "projectionSequence": projection_sequence,
+                                "serverTimeMs": now_ms,
+                            },
+                        )
+                        heartbeat_at = time.monotonic()
+            finally:
+                strategy_monitor.subscriber_closed()
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        )
