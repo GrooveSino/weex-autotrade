@@ -94,6 +94,7 @@ def test_projector_aggregates_verified_leg_volume_without_double_counting() -> N
     projector.apply(eth, at_ms=2_002)
 
     snapshot = projector.snapshot()
+    assert snapshot["execution_verified_quote_volume"] == "44.79144"
     assert snapshot["btc_quote_volume"] == "33.0978"
     assert snapshot["eth_quote_volume"] == "11.69364"
 
@@ -168,6 +169,7 @@ def test_projector_snapshot_restores_dedupe_counts_and_absolute_wait_deadline() 
     )
 
     assert restored.snapshot()["btc_quote_volume"] == "33.10"
+    assert restored.snapshot()["execution_verified_quote_volume"] == "33.10"
     wait = restored.active_waits["round-gap"]
     assert wait.started_at_ms == 3_000
     assert wait.deadline_at_ms == 13_000

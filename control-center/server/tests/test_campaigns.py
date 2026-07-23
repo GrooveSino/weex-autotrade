@@ -332,7 +332,7 @@ def test_monitor_uses_authoritative_session_ledger_not_planned_event_amounts() -
     assert all("999999" not in entry.title for entry in snapshot.timeline)
 
 
-def test_monitor_never_promotes_execution_event_totals_while_session_ledger_is_pending() -> None:
+def test_monitor_projects_reconciled_leg_events_while_session_ledger_is_pending() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()
     details = metadata(campaign)
@@ -375,12 +375,15 @@ def test_monitor_never_promotes_execution_event_totals_while_session_ledger_is_p
 
     snapshot = StrategyMonitorService(journal, ledger, "generation-1").snapshot("ins-1")
 
-    assert snapshot.verified_quote_volume == Decimal("0")
+    # The journal must not use planned cycle amounts, but each leg_completed
+    # event has already reconciled actual fills and can drive the live view
+    # while the wider history ledger catches up.
+    assert snapshot.verified_quote_volume == Decimal("41.00")
     assert snapshot.ledger_verified_quote_volume == 0
-    assert snapshot.remaining_quote_volume == Decimal("100")
-    assert snapshot.btc_quote_volume == Decimal("0")
-    assert snapshot.eth_quote_volume == Decimal("0")
-    assert snapshot.volume_source == "pending"
+    assert snapshot.remaining_quote_volume == Decimal("59.00")
+    assert snapshot.btc_quote_volume == Decimal("30.25")
+    assert snapshot.eth_quote_volume == Decimal("10.75")
+    assert snapshot.volume_source == "execution_journal"
     assert snapshot.source_complete is False
     assert snapshot.stale is True
 

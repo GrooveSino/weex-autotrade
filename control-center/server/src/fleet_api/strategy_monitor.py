@@ -77,7 +77,9 @@ class StrategyMonitorService:
         eth_quote = sum((fill.quote_volume for fill in fills if fill.symbol.upper().startswith("ETH")), Decimal(0))
         target_quote = _decimal(session, "target_quote_volume", record.campaign.target_turnover_quote)
         ledger_verified = _decimal(session, "verified_quote_volume")
-        remaining_quote = max(target_quote - ledger_verified, Decimal(0))
+        journal_verified = _decimal(state, "execution_verified_quote_volume")
+        journal_btc = _decimal(state, "btc_quote_volume")
+        journal_eth = _decimal(state, "eth_quote_volume")
         rows = event_rows if event_rows is not None else stored_rows
         timeline = _timeline(record.campaign_id, rows)[-limit:]
         first_sequence = int(rows[0].get("sequence") or 0) if rows else 0
@@ -93,9 +95,19 @@ class StrategyMonitorService:
         )
         volume_source = (
             "ledger"
-            if session and (fills or ledger_verified > 0 or session.get("source_complete"))
+            if session and session.get("source_complete") and not session_stale and not reconciliation_required
+            else "execution_journal"
+            if journal_verified > 0
             else "pending"
         )
+        if volume_source == "execution_journal":
+            verified_quote = journal_verified
+            remaining_quote = max(target_quote - verified_quote, Decimal(0))
+            btc_quote = journal_btc
+            eth_quote = journal_eth
+        else:
+            verified_quote = ledger_verified
+            remaining_quote = max(target_quote - verified_quote, Decimal(0))
 
         return StrategyMonitorSnapshot(
             instance_id=instance_id,
@@ -111,7 +123,7 @@ class StrategyMonitorService:
             current_run=int(state.get("current_run") or record.metadata.get("current_run") or 0),
             current_round=int(state.get("current_round") or 0),
             target_quote_volume=target_quote,
-            verified_quote_volume=ledger_verified,
+            verified_quote_volume=verified_quote,
             ledger_verified_quote_volume=ledger_verified,
             remaining_quote_volume=remaining_quote,
             volume_source=volume_source,

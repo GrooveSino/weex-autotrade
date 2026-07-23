@@ -71,6 +71,7 @@ from .models import (
     StrategyMonitorSnapshot,
     StrategyRunPage,
     StrategyRunSummary,
+    StrategyStage,
     StrategyTargetMode,
     TradingMode,
     UpdateInstanceRequest,
@@ -569,6 +570,9 @@ def create_app(
         last_run = volume_ledger.latest_terminal_session(instance.id, instance.mode.value)
         compatibility_session = active or last_run
         strategy_target = Decimal(instance.strategy.target_volume_quote)
+        progress_source = "ledger"
+        progress_updated_at_ms: int | None = None
+        strategy_progress = instance.strategy_progress
         if instance.strategy.target_mode is StrategyTargetMode.LIFETIME:
             strategy_verified = Decimal(str(instance.volume.lifetime))
             strategy_remaining = max(strategy_target - strategy_verified, Decimal(0))
@@ -577,10 +581,51 @@ def create_app(
             strategy_verified = Decimal(str(active["verified_quote_volume"]))
             strategy_remaining = Decimal(str(active["remaining_quote_volume"]))
             target_reached = False
+            # The worker journal is the same durable, transactionally updated
+            # source used by execution monitoring.  Its leg_completed values
+            # come from reconciled fills; use it immediately when the separate
+            # read-only account-history ledger has not caught up yet.
+            record = campaign_journal.monitor_record(instance.id, str(active["session_id"]))
+            projection = campaign_journal.monitor_projection(record.campaign_id) if record is not None else None
+            if projection is not None:
+                state = projection.state
+                journal_verified = _optional_available_balance(state.get("execution_verified_quote_volume"))
+                if journal_verified is not None and journal_verified > strategy_verified:
+                    strategy_verified = journal_verified
+                    strategy_remaining = max(strategy_target - strategy_verified, Decimal(0))
+                    progress_source = "execution_journal"
+                progress_updated_at_ms = projection.updated_at_ms
+                waits = state.get("active_waits")
+                if isinstance(waits, list):
+                    primary_wait = next(
+                        (
+                            item
+                            for item in waits
+                            if isinstance(item, dict) and item.get("key") in {"hold", "round-gap"}
+                        ),
+                        None,
+                    )
+                    if isinstance(primary_wait, dict):
+                        deadline = primary_wait.get("deadline_at_ms")
+                        try:
+                            deadline_at_ms = int(deadline) if deadline is not None else None
+                        except (TypeError, ValueError):
+                            deadline_at_ms = None
+                        stage = (
+                            StrategyStage.HOLDING
+                            if primary_wait.get("key") == "hold"
+                            else StrategyStage.COOLDOWN
+                        )
+                        strategy_progress = strategy_progress.model_copy(
+                            update={"stage": stage, "next_action_at_ms": deadline_at_ms}
+                        )
+                if progress_source == "ledger" and strategy_verified <= 0:
+                    progress_source = "pending"
         else:
             strategy_verified = Decimal(0)
             strategy_remaining = strategy_target
             target_reached = False
+            progress_source = "pending"
         return instance.model_copy(
             update={
                 "volume": instance.volume.model_copy(
@@ -597,8 +642,11 @@ def create_app(
                         "strategy_verified_quote_volume": strategy_verified,
                         "strategy_remaining_quote_volume": strategy_remaining,
                         "strategy_target_reached": target_reached,
+                        "strategy_progress_source": progress_source,
+                        "strategy_progress_updated_at_ms": progress_updated_at_ms,
                     }
-                )
+                ),
+                "strategy_progress": strategy_progress,
             }
         )
 

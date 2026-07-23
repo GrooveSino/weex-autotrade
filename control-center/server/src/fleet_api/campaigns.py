@@ -1839,6 +1839,12 @@ def _publishes_fleet_snapshot(name: str) -> bool:
         "cycle_started",
         "cycle_completed",
         "cycle_stopped",
+        # These are low-frequency, fill-reconciled state changes.  Publishing
+        # them makes the account table follow the same durable monitor
+        # projection without broadcasting the 125ms maker-wait heartbeats.
+        "leg_completed",
+        "leg_stopped",
+        "leg_uncertain",
         "hold_started",
         "hold_completed",
         "round_gap_started",

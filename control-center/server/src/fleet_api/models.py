@@ -283,6 +283,14 @@ class VolumeSnapshot(CamelModel):
     strategy_verified_quote_volume: Decimal | None = Field(default=None, exclude_if=lambda value: value is None)
     strategy_remaining_quote_volume: Decimal | None = Field(default=None, exclude_if=lambda value: value is None)
     strategy_target_reached: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The account table reads this server-side projection only.  "execution_journal"
+    # means the worker has reconciled concrete fills but the wider SQLite fill
+    # ledger has not yet completed its independent sync/reconciliation pass.
+    strategy_progress_source: Literal["ledger", "execution_journal", "pending"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    strategy_progress_updated_at_ms: int | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ExposureSnapshot(CamelModel):

@@ -119,6 +119,8 @@ export interface AccountInstance {
     strategyVerifiedQuoteVolume?: string
     strategyRemainingQuoteVolume?: string
     strategyTargetReached?: boolean
+    strategyProgressSource?: 'ledger' | 'execution_journal' | 'pending'
+    strategyProgressUpdatedAtMs?: number | null
     session?: {
       sessionId: string
       startedAtMs: number

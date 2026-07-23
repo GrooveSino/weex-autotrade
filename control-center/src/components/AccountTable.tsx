@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { FileTerminal, Play, RefreshCw, ShieldAlert, Square } from 'lucide-react'
 import type { AccountInstance } from '../types'
 import { calculateFundingPreflight, countdown, estimateRounds, targetModeLabel, targetProgress } from '../utils/strategy'
@@ -48,7 +49,14 @@ function relativeTime(timestamp: number | null): string {
 }
 
 export function AccountTable({ accounts, selectedIds, refreshingIds, actioningIds, executionDisabled, boundStrategyExecutionEnabled, onSelect, onSelectAll, onToggleRunning, onOpenLogs, onOpenExecutions, onRefresh, onClosePositions, onEdit, onAssignStrategy }: AccountTableProps) {
+  const [, setClockTick] = useState(0)
   const allSelected = accounts.length > 0 && accounts.every((account) => selectedIds.has(account.id))
+
+  useEffect(() => {
+    if (!accounts.some((account) => account.strategyProgress.nextActionAtMs !== null)) return
+    const timer = window.setInterval(() => setClockTick((value) => value + 1), 100)
+    return () => window.clearInterval(timer)
+  }, [accounts])
 
   return (
     <div className="table-shell">
@@ -75,6 +83,11 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
             const achievedVolume = Number(account.volume.strategyVerifiedQuoteVolume ?? targetProgress(account))
             const remainingVolume = Number(account.volume.strategyRemainingQuoteVolume ?? Math.max(targetVolume - achievedVolume, 0))
             const progress = targetVolume ? Math.min(100, achievedVolume / targetVolume * 100) : 0
+            const progressSource = account.volume.strategyProgressSource ?? (session ? 'ledger' : 'pending')
+            const journalSyncing = progressSource === 'execution_journal'
+            const dataNeedsVerification = Boolean(session?.reconciliationRequired)
+              || progressSource === 'pending'
+              || (progressSource === 'ledger' && Boolean(session?.stale))
             const estimate = estimateRounds(account.strategy, achievedVolume)
             const runtime = account.runtime ?? emptyRuntime
             const funding = account.fundingPreflight ?? calculateFundingPreflight(
@@ -176,9 +189,11 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                 <td>
                   <div className="progress-label"><span>{account.strategy.targetMode === 'incremental' ? session ? '本次新增' : '每次新增' : '累计达到'} ${currency.format(achievedVolume)} / ${currency.format(targetVolume)}</span><span>{progress.toFixed(0)}%</span></div>
                   <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
-                  <span className={`next-action ${session && (session.stale || session.reconciliationRequired) ? 'warning' : ''}`}>
-                    {session && (session.stale || session.reconciliationRequired)
+                  <span className={`next-action ${dataNeedsVerification ? 'warning' : ''}`}>
+                    {dataNeedsVerification
                       ? '数据待核验'
+                      : journalSyncing
+                        ? `已确认 ${currency.format(achievedVolume)} · 成交账本追平中`
                       : session
                         ? `剩余 ${currency.format(remainingVolume)}`
                         : account.strategy.targetMode === 'lifetime'
@@ -188,7 +203,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                             : lastRun?.result === 'stopped'
                               ? `上次停止 ${currency.format(Number(lastRun.verifiedQuoteVolume))} · 再次运行将新增 ${currency.format(targetVolume)}`
                               : '可启动新任务'}
-                    {session && !session.stale && !session.reconciliationRequired ? ` · ${account.strategyProgress.stage === 'holding' ? '待平仓' : account.strategyProgress.stage === 'cooldown' ? '待下轮' : '执行中'} · ${countdown(account.strategyProgress.nextActionAtMs)}` : ''}
+                    {!dataNeedsVerification && account.strategyProgress.nextActionAtMs !== null ? ` · ${account.strategyProgress.stage === 'holding' ? '持仓等待' : account.strategyProgress.stage === 'cooldown' ? '轮次间隔' : '执行中'} · ${countdown(account.strategyProgress.nextActionAtMs)}` : ''}
                   </span>
                   <span className="strategy-scope">{account.strategy.name} · {targetModeLabel(account.strategy.targetMode)} · 每轮 {account.strategy.roundTurnoverQuoteMin}-{account.strategy.roundTurnoverQuoteMax} · 约 {estimate ? `${estimate.minimum}-${estimate.maximum}` : '-'} 轮</span>
                 </td>

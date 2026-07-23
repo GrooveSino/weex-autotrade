@@ -327,7 +327,7 @@ class ExecutionProgressProjector:
         }
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, Any] | None) -> "ExecutionProgressProjector":
+    def from_snapshot(cls, snapshot: Mapping[str, Any] | None) -> ExecutionProgressProjector:
         projector = cls()
         if not isinstance(snapshot, Mapping):
             return projector
@@ -407,7 +407,10 @@ class ExecutionProgressProjector:
             return
         if name in {"cycle_completed", "cycle_stopped"}:
             status = str(event_value(event, "status", ""))
-            if status not in {"completed", "recovered"}:
+            # Modern executions persist one leg_completed event per reconciled
+            # fill batch.  Only use an aggregate cycle total to recover old
+            # journals that genuinely have no leg-level evidence.
+            if status not in {"completed", "recovered"} or self._completed_leg_quotes:
                 return
             child_total = _nonnegative_decimal(event_value(event, "total_quote"))
             if child_total is not None:
@@ -435,6 +438,11 @@ class ExecutionProgressProjector:
         previous = self._completed_leg_quotes.get(key)
         if previous == quote:
             return
+        # A leg_completed event is emitted only after the maker execution
+        # service has reconciled actual fills for that leg.  Keep this
+        # execution-journal total live while the independent fill ledger is
+        # catching up; planned cycle values never enter this path.
+        self.execution_verified_quote_volume += quote - (previous or Decimal(0))
         if symbol.startswith("BTC"):
             self.btc_quote_volume += quote - (previous or Decimal(0))
         elif symbol.startswith("ETH"):

@@ -6,6 +6,8 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from weex_cli.beta_allocation import BetaAllocation
+from weex_cli.beta_campaign import BetaVolumeCampaign
 
 import fleet_api.campaigns as campaigns_module
 import fleet_api.main as main_module
@@ -188,6 +190,43 @@ def strategy_payload(*, name: str = "20k shared", target: str = "20000") -> dict
         "roundIntervalMinSeconds": 600,
         "roundIntervalMaxSeconds": 1800,
     }
+
+
+def monitor_campaign(*, campaign_id: str, created_at_ms: int) -> BetaVolumeCampaign:
+    return BetaVolumeCampaign(
+        schema_version=3,
+        campaign_id=campaign_id,
+        created_at_ms=created_at_ms,
+        expires_at_ms=created_at_ms + 60_000,
+        profile_fingerprint="f" * 64,
+        target_turnover_quote=Decimal("500"),
+        round_turnover_quote_min=Decimal("40"),
+        round_turnover_quote=Decimal("80"),
+        max_position_quote=Decimal("120"),
+        timeout_seconds=60,
+        recovery_attempts=3,
+        max_empty_rounds=3,
+        cooldown_seconds=0,
+        hold_min_seconds=5,
+        hold_max_seconds=5,
+        round_gap_min_seconds=10,
+        round_gap_max_seconds=10,
+        max_runs=1,
+        leverage=2,
+        max_auto_leverage=10,
+        margin_buffer=Decimal("1.2"),
+        margin_mode="cross",
+        allocation=BetaAllocation(
+            beta=Decimal("0.4"),
+            btc_long_weight=Decimal("0.7"),
+            eth_short_weight=Decimal("0.3"),
+            version="test-beta:1",
+            as_of_ms=created_at_ms,
+            confidence=Decimal("1"),
+            confidence_threshold=Decimal("0"),
+            source="fake",
+        ),
+    )
 
 
 def test_strategy_monitor_is_idle_without_a_run_and_never_exposes_credentials() -> None:
@@ -1258,6 +1297,80 @@ def test_campaign_progress_is_projected_to_account_log_updates() -> None:
     assert updates["lines"][0]["level"] == "success"
     assert updates["lines"][0]["message"] == "实盘执行：BTCUSDT open 成交已核验；250 USDT / 2 笔"
     assert "must-not-appear" not in str(updates["lines"])
+
+
+def test_instance_projection_uses_live_fill_reconciliation_before_ledger_catches_up() -> None:
+    app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
+    started_at_ms = int(time.time() * 1000)
+    with TestClient(app) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(name="实时策略", target="500"))
+        assert strategy.status_code == 201
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy.json()["id"]
+        created = api.post("/api/v1/instances", json=payload)
+        assert created.status_code == 201
+        instance_id = created.json()["id"]
+        session_id = "session-main-projection"
+        app.state.trade_volume_ledger.create_session(
+            session_id,
+            instance_id,
+            "live",
+            started_at_ms,
+            Decimal("500"),
+        )
+        campaign = monitor_campaign(campaign_id="wc-main-projection", created_at_ms=started_at_ms)
+        app.state.campaign_journal.create(
+            instance_id,
+            campaign,
+            {"session_id": session_id, "execution_kind": "bound_strategy", "owner_user_id": "gg"},
+        )
+        for event in (
+            {
+                "event": "leg_completed",
+                "timestamp_ms": started_at_ms + 1_000,
+                "round": 1,
+                "sequence": 1,
+                "symbol": "BTCUSDT",
+                "action": "open",
+                "quote_volume": "30.25",
+                "fill_count": 1,
+            },
+            {
+                "event": "leg_completed",
+                "timestamp_ms": started_at_ms + 2_000,
+                "round": 1,
+                "sequence": 2,
+                "symbol": "ETHUSDT",
+                "action": "open",
+                "quote_volume": "10.75",
+                "fill_count": 1,
+            },
+            {
+                "event": "hold_started",
+                "timestamp_ms": started_at_ms + 3_000,
+                "round": 1,
+                "seconds": "30",
+            },
+        ):
+            app.state.campaign_journal.append_and_project(
+                campaign.campaign_id,
+                campaigns_module._sanitize_event(event),
+                owner_user_id="gg",
+                account_id=instance_id,
+                session_id=session_id,
+                executor_generation=app.state.executor_generation,
+                projection_version=3,
+            )
+
+        response = api.get(f"/api/v1/instances/{instance_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["volume"]["strategyProgressSource"] == "execution_journal"
+    assert body["volume"]["strategyVerifiedQuoteVolume"] == "41.00"
+    assert body["volume"]["strategyRemainingQuoteVolume"] == "459.00"
+    assert body["strategyProgress"]["stage"] == "holding"
+    assert body["strategyProgress"]["nextActionAtMs"] == started_at_ms + 33_000
 
 
 def test_execution_history_is_account_scoped_read_only_and_marks_uncertain_cycles() -> None:
