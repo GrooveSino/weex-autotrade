@@ -185,6 +185,30 @@ def test_proxy_never_retries_a_failed_mutation() -> None:
     assert calls == 1
 
 
+def test_proxy_reports_command_acknowledgement_timeout_without_retrying() -> None:
+    calls = 0
+
+    def delayed_executor(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("slow local preflight")
+
+    app = create_proxy_app(
+        Path("/tmp/fleet-executor.sock"), transport=httpx.MockTransport(delayed_executor), auth_required=False
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/strategies",
+            json={"name": "not-retried-after-timeout"},
+            headers={"X-Fleet-Command-Id": "timed-out-once"},
+        )
+
+    assert response.status_code == 504
+    assert response.json()["commandId"] == "timed-out-once"
+    assert "no command was retried" in response.json()["detail"]
+    assert calls == 1
+
+
 def test_proxy_streams_monitor_sse_and_forwards_resume_cursor() -> None:
     calls: list[httpx.Request] = []
 

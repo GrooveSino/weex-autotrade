@@ -38,6 +38,17 @@ _STATUS_ZH = {
     "failed": "失败",
     "executing": "执行中",
 }
+_UNCERTAIN_REASON_ZH = {
+    "worker_safety:available_balance_insufficient": "可用余额不足以覆盖本轮保证金",
+    "worker_safety:account_boundary_not_flat": "发现持仓或挂单，账户边界不满足启动条件",
+    "worker_safety:timing_policy_unavailable": "策略时间参数不可用",
+    "worker_safety:beta_source_unavailable": "Final Beta 数据源不可用",
+    "worker_safety:beta_changed_since_preview": "Final Beta 已变化，需要重新预览",
+    "worker_safety:authorization_expired": "启动确认已过期，需要重新预览",
+    "worker_safety:leverage_verification_failed": "杠杆设置或核验未通过",
+    "worker_safety:post_only_verification_failed": "POST_ONLY 状态核验未通过",
+    "worker_safety:preflight_rejected": "执行前安全核验未通过",
+}
 
 
 @dataclass(frozen=True)
@@ -225,7 +236,9 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
             f"已核验 {value('executed_quote_volume')} USDT / {value('reason')}",
         )
     if name == "campaign_uncertain":
-        return TimelinePresentation("warn", "执行结果不确定", "需要人工核对仓位、挂单和成交明细")
+        reason = str(value("reason") or "")
+        detail = _UNCERTAIN_REASON_ZH.get(reason, "需要人工核对仓位、挂单和成交明细")
+        return TimelinePresentation("warn", "执行结果不确定", detail)
     if name == "safe_stop_started":
         return TimelinePresentation("warn", "安全停止已接管", "正在撤销 BTC/ETH 常规单与条件单")
     if name == "safe_stop_cancel_verified":

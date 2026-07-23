@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import importlib.util
 import json
 import logging
 import threading
@@ -72,6 +73,14 @@ class WeexPublicOrderBookStream:
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
+            return
+        if _socks_proxy_needs_unavailable_dependency(self.proxy_url):
+            LOGGER.info(
+                text(
+                    "WEEX 公共 WebSocket 使用 SOCKS 代理但同步适配器不可用；将安全回退到 REST",
+                    "WEEX public WebSocket SOCKS adapter unavailable; safely falling back to REST",
+                )
+            )
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="weex-public-depth", daemon=True)
@@ -224,7 +233,12 @@ class WeexPublicOrderBookStream:
                     open_timeout=15,
                     close_timeout=5,
                     ping_interval=None,
-                    proxy=self.proxy_url or True,
+                    # A configured account proxy is the only proxy this runtime
+                    # may use.  `True` makes websockets inspect process-global
+                    # proxy environment variables, which is both surprising for
+                    # a "no proxy" account and can pull in an unsupported SOCKS
+                    # adapter at runtime.
+                    proxy=self.proxy_url,
                 ) as websocket:
                     self._mark_connected()
                     websocket.send(self.subscription_message())
@@ -236,10 +250,11 @@ class WeexPublicOrderBookStream:
                         self.handle_message(websocket, message)
             except Exception as exc:  # noqa: BLE001 - reads fall back to REST while reconnecting
                 self._consecutive_errors += 1
-                LOGGER.warning(
-                    text("WEEX 公共 WebSocket 暂不可用：%s", "WEEX public WebSocket unavailable: %s"),
-                    type(exc).__name__,
-                )
+                if _should_log_reconnect_error(self._consecutive_errors):
+                    LOGGER.warning(
+                        text("WEEX 公共 WebSocket 暂不可用：%s", "WEEX public WebSocket unavailable: %s"),
+                        type(exc).__name__,
+                    )
             finally:
                 self._mark_disconnected()
             self._stop.wait(_retry_delay(self._consecutive_errors))
@@ -274,6 +289,14 @@ class WeexPrivateOrderStream:
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
+            return
+        if _socks_proxy_needs_unavailable_dependency(self.proxy_url):
+            LOGGER.info(
+                text(
+                    "WEEX 私有 WebSocket 使用 SOCKS 代理但同步适配器不可用；将安全回退到 REST",
+                    "WEEX private WebSocket SOCKS adapter unavailable; safely falling back to REST",
+                )
+            )
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="weex-private-orders", daemon=True)
@@ -361,7 +384,7 @@ class WeexPrivateOrderStream:
                     open_timeout=15,
                     close_timeout=5,
                     ping_interval=None,
-                    proxy=self.proxy_url or True,
+                    proxy=self.proxy_url,
                     additional_headers=self.headers(),
                 ) as websocket:
                     self._mark_connected()
@@ -374,10 +397,11 @@ class WeexPrivateOrderStream:
                         self.handle_message(websocket, message)
             except Exception as exc:  # noqa: BLE001 - order reads fall back to REST while reconnecting
                 self._consecutive_errors += 1
-                LOGGER.warning(
-                    text("WEEX 私有 WebSocket 暂不可用：%s", "WEEX private WebSocket unavailable: %s"),
-                    type(exc).__name__,
-                )
+                if _should_log_reconnect_error(self._consecutive_errors):
+                    LOGGER.warning(
+                        text("WEEX 私有 WebSocket 暂不可用：%s", "WEEX private WebSocket unavailable: %s"),
+                        type(exc).__name__,
+                    )
             finally:
                 self._mark_disconnected()
             self._stop.wait(_retry_delay(self._consecutive_errors))
@@ -491,6 +515,17 @@ def _retry_delay(consecutive_errors: int) -> float:
     if consecutive_errors <= 0:
         return 0.0
     return min(30.0, float(2 ** min(consecutive_errors - 1, 5)))
+
+
+def _should_log_reconnect_error(consecutive_errors: int) -> bool:
+    """Keep a degraded stream observable without flooding service stderr."""
+    return consecutive_errors in {1, 2, 4, 8, 16, 32}
+
+
+def _socks_proxy_needs_unavailable_dependency(proxy_url: str | None) -> bool:
+    if not proxy_url or not proxy_url.lower().startswith("socks"):
+        return False
+    return importlib.util.find_spec("python_socks") is None
 
 
 def _websocket_connect(url: str, **kwargs: Any) -> Any:

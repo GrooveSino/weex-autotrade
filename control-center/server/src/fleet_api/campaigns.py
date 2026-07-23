@@ -32,6 +32,7 @@ from weex_cli.execution_progress import (
     EXECUTION_PROGRESS_PROJECTION_VERSION,
     ExecutionProgressProjector,
 )
+from weex_cli.errors import SafetyError
 from weex_cli.gateway import WeexGateway
 from weex_cli.live_profile import LiveProfile
 from weex_cli.live_websocket import WeexCampaignWebSocketRuntime
@@ -1356,13 +1357,20 @@ class CampaignWorkerManager:
                 **metrics,
             )
         except Exception as exc:  # noqa: BLE001 - a worker failure is an uncertain live outcome
+            reason = _worker_exception_reason(exc)
             self.journal.update(
                 campaign_id,
                 status=BetaCampaignStatus.UNCERTAIN.value,
                 finished_at_ms=int(time.time() * 1000),
-                reason=f"worker_exception:{type(exc).__name__.lower()}",
+                reason=reason,
             )
-            event = _sanitize_event({"event": "campaign_uncertain", "error": type(exc).__name__})
+            event = _sanitize_event(
+                {
+                    "event": "campaign_uncertain",
+                    "error": type(exc).__name__,
+                    "reason": reason,
+                }
+            )
             event["sequence"] = self._append_monitor_event(record, event)
             self._notify_progress(record.instance_id, event)
         finally:
@@ -1705,6 +1713,36 @@ def _decimal_field(payload: dict[str, Any], key: str) -> Decimal:
     except Exception:  # noqa: BLE001 - malformed result is reported as zero
         return Decimal(0)
     return value if value.is_finite() and value >= 0 else Decimal(0)
+
+
+def _worker_exception_reason(exc: Exception) -> str:
+    """Return an actionable but non-sensitive terminal worker reason.
+
+    Exchange exceptions can embed request URLs, account identifiers, or raw
+    responses.  The journal is visible in the control center, so only a small
+    vocabulary of known safety conditions is persisted.  Unknown exceptions
+    retain their class only and still require the existing manual reconciliation
+    path.
+    """
+    if not isinstance(exc, SafetyError):
+        return f"worker_exception:{type(exc).__name__.lower()}"
+    message = str(exc).lower()
+    known_codes = (
+        ("available usdt", "available_balance_insufficient"),
+        ("positions or orders", "account_boundary_not_flat"),
+        ("flat btc/eth positions", "account_boundary_not_flat"),
+        ("timing policy", "timing_policy_unavailable"),
+        ("beta provider", "beta_source_unavailable"),
+        ("beta moved", "beta_changed_since_preview"),
+        ("authorization expired", "authorization_expired"),
+        ("campaign authorization expired", "authorization_expired"),
+        ("leverage", "leverage_verification_failed"),
+        ("post_only", "post_only_verification_failed"),
+    )
+    for token, code in known_codes:
+        if token in message:
+            return f"worker_safety:{code}"
+    return "worker_safety:preflight_rejected"
 
 
 def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:

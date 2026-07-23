@@ -32,6 +32,18 @@ export const dataSourceLabel = controlPlaneEnabled ? '控制平面 API' : '内�
 
 export type LocalUserSession = { userId: string }
 
+export class ControlPlaneRequestError extends Error {
+  readonly status: number
+  readonly commandId: string | null
+
+  constructor(message: string, status: number, commandId: string | null) {
+    super(message)
+    this.name = 'ControlPlaneRequestError'
+    this.status = status
+    this.commandId = commandId
+  }
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   if (!configuredBaseUrl) throw new Error('control-plane API is not configured')
   const headers = new Headers(init?.headers)
@@ -61,7 +73,11 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
             .filter(Boolean)
             .join('; ')
         : ''
-    throw new Error(message || `control-plane request failed (${response.status})`)
+    throw new ControlPlaneRequestError(
+      message || `control-plane request failed (${response.status})`,
+      response.status,
+      headers.get('X-Fleet-Command-Id'),
+    )
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -130,10 +146,12 @@ export async function executeBoundStrategyExecution(
   executionId: string,
   confirmation: string,
   riskAcknowledged: boolean,
+  commandId?: string,
 ): Promise<BetaCampaign> {
   return apiRequest<BetaCampaign>(`/instances/${account.id}/strategy-executions/${executionId}/execute`, {
     method: 'POST',
     body: JSON.stringify({ confirmation, riskAcknowledged }),
+    headers: commandId ? { 'X-Fleet-Command-Id': commandId } : undefined,
   })
 }
 
@@ -246,9 +264,23 @@ export function subscribeToInstanceEvents(
   if (!configuredBaseUrl) return () => undefined
   let executorGeneration: string | null = null
   let lastSequence = -1
+  let retryTimer: number | undefined
+  let closed = false
   const source = new EventSource(`${configuredBaseUrl}/events`, { withCredentials: true })
-  source.onopen = () => onConnectionChange(true)
-  source.onerror = () => onConnectionChange(false)
+  source.onopen = () => {
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    retryTimer = undefined
+    onConnectionChange(true)
+  }
+  source.onerror = () => {
+    if (closed || retryTimer !== undefined) return
+    // EventSource normally reconnects on its own.  Avoid flashing the whole
+    // console into a disconnected state for a transient transport reset.
+    retryTimer = window.setTimeout(() => {
+      retryTimer = undefined
+      if (!closed && source.readyState !== EventSource.OPEN) onConnectionChange(false)
+    }, 3_000)
+  }
   source.addEventListener('instances', (event) => {
     try {
       const snapshot = JSON.parse((event as MessageEvent<string>).data) as InstanceSnapshotEvent
@@ -270,7 +302,11 @@ export function subscribeToInstanceEvents(
       onConnectionChange(false)
     }
   })
-  return () => source.close()
+  return () => {
+    closed = true
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    source.close()
+  }
 }
 
 const mockLogStreams = new Map<string, LogLine[]>()
@@ -367,6 +403,7 @@ export function subscribeToStrategyMonitor(
   if (!configuredBaseUrl) return () => undefined
   let closed = false
   let retryTimer: number | undefined
+  let reconnectTimer: number | undefined
   let source: EventSource | null = null
   let resumeCursor = cursor
   let lastMessageAt = Date.now()
@@ -387,10 +424,14 @@ export function subscribeToStrategyMonitor(
     if (resumeCursor) query.set('after', resumeCursor)
     if (sessionId) query.set('sessionId', sessionId)
     const suffix = query.size ? `?${query}` : ''
-    source = new EventSource(`${configuredBaseUrl}/instances/${account.id}/strategy-monitor/events${suffix}`)
+    source = new EventSource(`${configuredBaseUrl}/instances/${account.id}/strategy-monitor/events${suffix}`, {
+      withCredentials: true,
+    })
     source.onopen = () => {
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
       retryTimer = undefined
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
+      reconnectTimer = undefined
       lastMessageAt = Date.now()
       onConnectionChange('connected')
     }
@@ -398,8 +439,10 @@ export function subscribeToStrategyMonitor(
       if (retryTimer !== undefined) return
       retryTimer = window.setTimeout(() => {
         retryTimer = undefined
-        if (source?.readyState !== EventSource.OPEN) onConnectionChange('retrying')
-      }, 1_500)
+        if (!closed && source?.readyState !== EventSource.OPEN && Date.now() - lastMessageAt > 15_000) {
+          onConnectionChange('retrying')
+        }
+      }, 3_000)
     }
     source.addEventListener('snapshot', receive)
     source.addEventListener('delta', receive)
@@ -408,16 +451,24 @@ export function subscribeToStrategyMonitor(
   }
   connect()
   const watchdog = window.setInterval(() => {
-    if (Date.now() - lastMessageAt <= 12_000) return
+    // The executor emits a heartbeat every five seconds.  Leave room for a
+    // brief proxy/Caddy hiccup before deliberately recreating the stream.
+    if (Date.now() - lastMessageAt <= 20_000) return
     source?.close()
     source = null
     onConnectionChange('retrying')
     lastMessageAt = Date.now()
-    window.setTimeout(connect, 750)
+    if (reconnectTimer === undefined) {
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined
+        connect()
+      }, 750)
+    }
   }, 1_000)
   return () => {
     closed = true
     if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
     window.clearInterval(watchdog)
     source?.close()
   }

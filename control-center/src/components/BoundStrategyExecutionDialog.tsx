@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Copy, LoaderCircle, Play, ShieldCheck, Square, X } from 'lucide-react'
 import type { AccountInstance, BetaCampaign, BetaCampaignPreview } from '../types'
 import {
+  ControlPlaneRequestError,
   executeBoundStrategyExecution,
   listBoundStrategyExecutions,
   previewBoundStrategyExecution,
@@ -141,6 +142,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
 
   const execute = async () => {
     if (!execution) return
+    const commandId = crypto.randomUUID()
     setBusy(true)
     setError(null)
     try {
@@ -149,12 +151,38 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
         execution.campaignId,
         confirmation,
         riskAcknowledged,
+        commandId,
       )
       update(started)
       onToastRef.current(`${accountRef.current.name} 的已绑定策略已提交执行；不会自动重试任何订单命令`)
       if (started.status === 'executing') onStartedRef.current(started)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '启动失败')
+      // A transport acknowledgement can fail after the executor has accepted
+      // the exact command.  Never submit it again: inspect this immutable
+      // execution with a read-only query and surface the resulting state.
+      setError('正在只读核验启动命令结果…')
+      try {
+        const executions = await listBoundStrategyExecutions(accountRef.current)
+        const resolved = executions.find((item) => item.campaignId === execution.campaignId)
+        if (resolved && resolved.status !== 'planned') {
+          update(resolved)
+          if (resolved.status === 'executing') {
+            onStartedRef.current(resolved)
+            onToastRef.current(`${accountRef.current.name} 的启动命令已确认，策略正在执行`)
+          } else if (resolved.status === 'uncertain') {
+            setError('启动命令已被执行器接收，但执行结果待人工对账；不会自动重发该命令。')
+          }
+          return
+        }
+      } catch {
+        // Keep the original transport error below.  A failed read must not
+        // trigger an order/execute retry either.
+      }
+      if (reason instanceof ControlPlaneRequestError && reason.commandId) {
+        setError(`${reason.message}（命令 ${reason.commandId} 未重发）`)
+      } else {
+        setError(reason instanceof Error ? reason.message : '启动失败')
+      }
     } finally {
       setBusy(false)
     }

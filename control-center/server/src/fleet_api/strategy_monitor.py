@@ -62,7 +62,16 @@ class StrategyMonitorService:
         projection_lag = max(0, latest_sequence - projected_sequence)
 
         selected_session_id = _text_or_none(record.metadata.get("session_id"))
-        session = self.ledger.session_projection(selected_session_id) if selected_session_id else None
+        # Releases before the session ledger migration can leave a campaign
+        # journal behind without its matching volume session.  A monitor read
+        # must remain read-only and explicit about that gap; raising here turns
+        # an otherwise healthy SSE stream into a 500/reconnect loop.
+        missing_session = False
+        try:
+            session = self.ledger.session_projection(selected_session_id) if selected_session_id else None
+        except KeyError:
+            session = None
+            missing_session = True
         started_at_ms = int(session.get("started_at_ms") or 0) if session else 0
         fills = (
             [
@@ -85,7 +94,7 @@ class StrategyMonitorService:
         first_sequence = int(rows[0].get("sequence") or 0) if rows else 0
         cursor = self.cursor(record.campaign_id, projected_sequence) if projected_sequence else None
         session_stale = bool(session.get("stale", True)) if session else True
-        reconciliation_required = bool(session.get("reconciliation_required", False)) if session else False
+        reconciliation_required = bool(session.get("reconciliation_required", False)) if session else missing_session
         freshness = (
             "rebuilding"
             if projection_lag

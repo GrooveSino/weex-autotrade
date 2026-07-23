@@ -15,6 +15,23 @@ from .models import HealthResponse
 
 _HOP_BY_HOP_HEADERS = {"connection", "content-length", "host", "keep-alive", "transfer-encoding"}
 
+# A bound-strategy start performs read-only exchange boundary verification before
+# the executor acknowledges the command.  HTTPX defaults to a five-second read
+# timeout, which is shorter than that legitimate preflight.  Keep the timeout
+# local to the Unix socket and never turn a timeout into a second command.
+_EXECUTOR_CONNECT_TIMEOUT_SECONDS = 5.0
+_EXECUTOR_COMMAND_ACK_TIMEOUT_SECONDS = 60.0
+_EXECUTOR_READ_TIMEOUT_SECONDS = 15.0
+
+
+def _executor_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=_EXECUTOR_CONNECT_TIMEOUT_SECONDS,
+        read=_EXECUTOR_COMMAND_ACK_TIMEOUT_SECONDS,
+        write=_EXECUTOR_READ_TIMEOUT_SECONDS,
+        pool=_EXECUTOR_CONNECT_TIMEOUT_SECONDS,
+    )
+
 
 def _as_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -60,7 +77,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         selected_transport = transport or httpx.AsyncHTTPTransport(uds=str(socket_path))
-        app.state.executor_client = httpx.AsyncClient(transport=selected_transport, base_url="http://fleet-executor")
+        app.state.executor_client = httpx.AsyncClient(
+            transport=selected_transport,
+            base_url="http://fleet-executor",
+            timeout=_executor_timeout(),
+        )
         try:
             yield
         finally:
@@ -178,7 +199,10 @@ def create_app(
                     async for chunk in response.aiter_raw():
                         yield chunk
             except httpx.HTTPError:
-                yield b"event: error\ndata: {\"detail\":\"executor unavailable\"}\n\n"
+                # EventSource reconnects by itself.  This deliberately reports
+                # a stream interruption rather than claiming the executor or a
+                # running strategy has failed.
+                yield b"event: error\ndata: {\"detail\":\"executor stream interrupted; reconnecting\"}\n\n"
 
         return StreamingResponse(
             stream(),
@@ -205,7 +229,7 @@ def create_app(
                     async for chunk in response.aiter_raw():
                         yield chunk
             except httpx.HTTPError:
-                yield b"event: error\ndata: {\"detail\":\"executor unavailable\"}\n\n"
+                yield b"event: error\ndata: {\"detail\":\"executor stream interrupted; reconnecting\"}\n\n"
 
         return StreamingResponse(
             stream(),
@@ -226,8 +250,23 @@ def create_app(
                 content=await request.body(),
                 headers=_forward_headers(request),
             )
-        except httpx.HTTPError:
+        except httpx.ReadTimeout:
+            if request.method in {"POST", "PATCH", "DELETE"}:
+                return JSONResponse(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    content={
+                        "detail": (
+                            "executor command acknowledgement timed out; no command was retried; "
+                            "query command or execution state before taking another action"
+                        ),
+                        "commandId": request.headers.get("X-Fleet-Command-Id", ""),
+                    },
+                )
+            return JSONResponse(status_code=status.HTTP_504_GATEWAY_TIMEOUT, content={"detail": "executor response timed out"})
+        except httpx.ConnectError:
             return JSONResponse(status_code=503, content={"detail": "executor unavailable; no command was retried"})
+        except httpx.HTTPError:
+            return JSONResponse(status_code=502, content={"detail": "executor proxy request failed; no command was retried"})
         return Response(
             content=response.content,
             status_code=response.status_code,

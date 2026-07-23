@@ -14,6 +14,7 @@ from weex_cli.beta_campaign import (
     live_profile_fingerprint,
 )
 from weex_cli.config import Credentials, Settings
+from weex_cli.errors import SafetyError
 from weex_cli.live_profile import LiveProfile
 
 from fleet_api.campaign_log import campaign_event_log
@@ -22,6 +23,7 @@ from fleet_api.campaigns import (
     InMemoryCampaignJournal,
     SQLiteCampaignJournal,
     _AccountLease,
+    _worker_exception_reason,
     _sanitize_event,
 )
 from fleet_api.config import ControlPlaneSettings
@@ -554,6 +556,41 @@ def test_monitor_complete_ledger_wins_over_execution_journal_projection() -> Non
     assert snapshot.verified_quote_volume == Decimal("12.50")
     assert snapshot.remaining_quote_volume == Decimal("87.50")
     assert snapshot.volume_source == "ledger"
+
+
+def test_monitor_missing_legacy_session_stays_available_and_requires_reconciliation() -> None:
+    journal = InMemoryCampaignJournal()
+    campaign = sample_campaign()
+    details = metadata(campaign)
+    details["session_id"] = "missing-session"
+    journal.create("ins-1", campaign, details)
+    journal.add_event(
+        campaign.campaign_id,
+        _sanitize_event(
+            {
+                "event": "cycle_completed",
+                "round": 1,
+                "status": "completed",
+                "quote_volume": "12.50",
+                "total_quote": "12.50",
+            }
+        ),
+    )
+
+    snapshot = StrategyMonitorService(journal, InMemoryTradeVolumeLedger(), "generation-1").snapshot("ins-1")
+
+    assert snapshot.session_id == "missing-session"
+    assert snapshot.reconciliation_required is True
+    assert snapshot.stale is True
+    assert snapshot.volume_source == "execution_journal"
+    assert snapshot.verified_quote_volume == Decimal("12.50")
+
+
+def test_worker_safety_reason_is_whitelisted_without_persisting_exception_message() -> None:
+    assert _worker_exception_reason(SafetyError("available USDT is insufficient for the planned opening budget")) == (
+        "worker_safety:available_balance_insufficient"
+    )
+    assert _worker_exception_reason(SafetyError("proxy password=very-secret")) == "worker_safety:preflight_rejected"
 
 
 def test_monitor_journal_paginates_without_duplicate_sequences() -> None:

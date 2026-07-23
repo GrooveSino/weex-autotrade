@@ -7,6 +7,7 @@ import hmac
 import pytest
 
 from weex_cli.config import Credentials
+from weex_cli import live_websocket
 from weex_cli.live_websocket import (
     MarketStreamUnavailable,
     WeexPrivateOrderStream,
@@ -97,6 +98,18 @@ def test_public_depth_stream_handles_business_ping_and_subscription_failure() ->
     assert socket.sent == ['{"method":"PONG","id":1}']
     with pytest.raises(MarketStreamUnavailable, match="denied"):
         stream.handle_message(socket, '{"result":false,"id":1,"msg":"denied"}')
+
+
+def test_socks_stream_without_adapter_uses_rest_fallback_without_retry_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_websocket.importlib.util, "find_spec", lambda name: None if name == "python_socks" else None)
+    stream = WeexPublicOrderBookStream(SnapshotGateway(), proxy_url="socks5://127.0.0.1:1080")
+
+    stream.start()
+
+    assert stream.connected is False
+    assert stream._thread is None
 
 
 def test_private_stream_signs_headers_and_caches_order_updates() -> None:
