@@ -99,7 +99,14 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
       try {
         const items = await listBoundStrategyExecutions(targetAccount)
         if (!current()) return
-        const latest = items.find((item) => ['planned', 'executing', 'stopping', 'uncertain'].includes(item.status)) ?? null
+        // An uncertain execution remains in the immutable audit history after
+        // its flat-account reconciliation succeeds.  It is no longer an
+        // active blocker at that point; selecting it again traps the user in
+        // the old reconciliation panel instead of preparing the next run.
+        const latest = items.find(
+          (item) => ['planned', 'executing', 'stopping'].includes(item.status)
+            || (item.status === 'uncertain' && item.reconciliationRequired),
+        ) ?? null
         if (latest) {
           setExecution(latest)
           return
@@ -207,8 +214,14 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setBusy(true)
     setError(null)
     try {
-      update(await reconcileBoundStrategyExecution(accountRef.current, execution, confirmation))
-      onToastRef.current('已完成一次人工对账请求')
+      const reconciled = await reconcileBoundStrategyExecution(accountRef.current, execution, confirmation)
+      update(reconciled)
+      if (reconciled.reconciliationRequired) {
+        onToastRef.current('账户核验尚未完成，策略不会重新启动')
+        return
+      }
+      onToastRef.current('账户边界已核验；正在生成新的启动预览')
+      await preview()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '对账失败')
     } finally {
