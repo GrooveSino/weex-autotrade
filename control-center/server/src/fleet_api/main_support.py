@@ -27,6 +27,7 @@ def install_projection_support(ctx: FleetAppContext) -> None:
     def combined_log_updates(instance_id: str, limit: int, after: str | None) -> LogBatch:
         ctx.service.get_instance(instance_id)
         system = ctx.service.log_updates(instance_id, 500, None).lines
+        clear_boundaries = ctx.repository.log_clear_boundaries(instance_id)
         ranked: list[tuple[int, int, LogLine]] = []
         for index, line in enumerate(system):
             try:
@@ -36,12 +37,15 @@ def install_projection_support(ctx: FleetAppContext) -> None:
             ranked.append((at_ms, index, line))
         rank = len(ranked)
         for record in ctx.campaign_journal.list_for_instance(instance_id):
+            cleared_through = clear_boundaries.get(record.campaign_id.lower(), 0)
             for event in ctx.campaign_journal.events_before(record.campaign_id, None, 500):
+                sequence = int(event.get("sequence") or 0)
+                if sequence <= cleared_through:
+                    continue
                 rendered = campaign_event_log(event)
                 if rendered is None:
                     continue
                 level, message = rendered
-                sequence = int(event.get("sequence") or 0)
                 at_ms = int(event.get("at_ms") or 0)
                 # Releases before the single-journal architecture copied this
                 # same rendered row into instance_logs. Prefer the audit row

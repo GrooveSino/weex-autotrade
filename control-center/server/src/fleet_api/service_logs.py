@@ -1,31 +1,28 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from pydantic import SecretStr
-
 from .campaign_log import campaign_event_log
-from .execution import CycleExecutionStatus, ExecutionRecord, PositionCloseExecutionResult
 from .funding import funding_preflight
 from .models import (
-    AccountInstance, CreateInstanceRequest, CycleSnapshot, ExposureSnapshot, FundingPreflightStatus,
-    InstanceAction, InstanceStatus, LogBatch, LogLevel, LogLine, ProxySnapshot, ProxyStatus, ProxyType,
-    RuntimeHealthSnapshot, StrategyProgress, StrategyStage, StrategyTargetMode, UpdateInstanceRequest,
-    VolumeSnapshot, VolumeStrategy, VolumeStrategyInput, WalletSnapshot, default_volume_strategy,
+    AccountInstance,
+    InstanceStatus,
+    LogBatch,
+    LogLevel,
+    LogLine,
+    StrategyProgress,
+    StrategyStage,
+    VolumeStrategy,
+    default_volume_strategy,
 )
 from .ownership import LEGACY_OWNER_USER_ID, current_owner_user_id
-from .proxy import ProxyValidationError, normalize_proxy_url, proxy_host
-from .repository import AccountRepository
-from .service_errors import BetaSourceUnavailable, InstanceNotFound, StrategyNotFound, TelemetryUnavailable, UnsafeOperation, ValidationFailed
-from .service_shared import delay_label as _delay_label, now as _now
+from .service_errors import (
+    UnsafeOperation,
+)
+from .service_shared import now as _now
 from .strategy import estimate_rounds, target_progress_quote
-from .telemetry import AccountTelemetry
-from .vault import CredentialMaterial, CredentialVault
-from .volume_history import TradeVolumeAggregate
 
 
 class ServiceLogsMixin:
@@ -60,9 +57,9 @@ class ServiceLogsMixin:
         level, message = rendered
         self._append_log(instance_id, level, message)
 
-    def clear_logs(self, instance_id: str) -> None:
+    def clear_logs(self, instance_id: str, execution_boundaries: Mapping[str, int] | None = None) -> None:
         instance = self.get_instance(instance_id)
-        self.repository.clear_logs(instance_id)
+        self.repository.clear_logs(instance_id, execution_boundaries)
         if instance.unread_logs:
             self.repository.replace(instance.model_copy(update={"unread_logs": 0}, deep=True))
 

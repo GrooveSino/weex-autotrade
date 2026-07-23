@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from threading import RLock
 
@@ -35,6 +36,13 @@ class SQLiteAccountRepository:
             CREATE TABLE IF NOT EXISTS instance_log_reads (
                 instance_id TEXT PRIMARY KEY,
                 reads INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(instance_id) REFERENCES instances(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS instance_log_execution_clears (
+                instance_id TEXT NOT NULL,
+                campaign_id TEXT NOT NULL,
+                cleared_through_sequence INTEGER NOT NULL,
+                PRIMARY KEY(instance_id, campaign_id),
                 FOREIGN KEY(instance_id) REFERENCES instances(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS strategies (
@@ -185,7 +193,7 @@ class SQLiteAccountRepository:
             ).fetchall()
         return [self._line(row[0]) for row in reversed(rows)]
 
-    def clear_logs(self, instance_id: str) -> None:
+    def clear_logs(self, instance_id: str, execution_boundaries: Mapping[str, int] | None = None) -> None:
         with self._lock, self._connection:
             if self.get(instance_id) is None:
                 raise KeyError(instance_id)
@@ -193,6 +201,29 @@ class SQLiteAccountRepository:
                 "DELETE FROM instance_logs WHERE instance_id = ?",
                 (instance_id,),
             )
+            self._connection.execute(
+                "DELETE FROM instance_log_execution_clears WHERE instance_id = ?",
+                (instance_id,),
+            )
+            self._connection.executemany(
+                "INSERT INTO instance_log_execution_clears"
+                "(instance_id, campaign_id, cleared_through_sequence) VALUES (?, ?, ?)",
+                (
+                    (instance_id, campaign_id.lower(), sequence)
+                    for campaign_id, sequence in (execution_boundaries or {}).items()
+                ),
+            )
+
+    def log_clear_boundaries(self, instance_id: str) -> dict[str, int]:
+        with self._lock:
+            if self.get(instance_id) is None:
+                raise KeyError(instance_id)
+            rows = self._connection.execute(
+                "SELECT campaign_id, cleared_through_sequence "
+                "FROM instance_log_execution_clears WHERE instance_id = ?",
+                (instance_id,),
+            ).fetchall()
+        return {str(campaign_id): int(sequence) for campaign_id, sequence in rows}
 
     def log_read_count(self, instance_id: str) -> int:
         if self.get(instance_id) is None:

@@ -4,49 +4,44 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
-from fastapi import Query, Request, Response, status
-from fastapi.responses import StreamingResponse
-from .instance_projection import project_instance_session
-from .models import AccountInstance, ExecutionCycleView, GlobalStopRequest, GlobalStopResult, InstanceAction, LogBatch, LogLine, UpdateInstanceRequest, VolumeSessionCreateRequest, VolumeSessionResponse
-from .ownership import reset_current_owner_user_id, set_current_owner_user_id
-from .service import InstanceNotFound, UnsafeOperation
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
+
+from .instance_projection import project_instance_session
 from .main_context import FleetAppContext
 from .main_helpers import execution_cycle_view as _execution_cycle_view
+from .models import (
+    AccountInstance,
+    ExecutionCycleView,
+    GlobalStopRequest,
+    GlobalStopResult,
+    InstanceAction,
+    LogBatch,
+    LogLine,
+    UpdateInstanceRequest,
+    VolumeSessionCreateRequest,
+    VolumeSessionResponse,
+)
+from .ownership import reset_current_owner_user_id, set_current_owner_user_id
+from .service import InstanceNotFound, UnsafeOperation
 
 
 def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     selected = ctx.selected
     service = ctx.service
-    repository = ctx.repository
-    vault = ctx.vault
     volume_ledger = ctx.volume_ledger
     execution_journal = ctx.execution_journal
-    execution_coordinator = ctx.execution_coordinator
-    selected_allocation_provider = ctx.selected_allocation_provider
     runtime = ctx.runtime
-    beta_source_runtime = ctx.beta_source_runtime
     campaign_journal = ctx.campaign_journal
     campaign_manager = ctx.campaign_manager
-    app_state_campaign_manager = ctx.campaign_manager
     broker = ctx.broker
     session_volume = ctx.session_volume
     strategy_monitor = ctx.strategy_monitor
-    command_ledger = ctx.command_ledger
-    executor_generation = ctx.executor_generation
-    executor_release_id = ctx.executor_release_id
-    latest_bound_record = ctx.latest_bound_record
-    finalize_bound_strategy_session = ctx.finalize_bound_strategy_session
-    schedule_session_finalization = ctx.schedule_session_finalization
-    notify_campaign_change = ctx.notify_campaign_change
-    establish_bound_strategy_session = ctx.establish_bound_strategy_session
     publish_snapshot = ctx.publish_snapshot
-    refresh_beta_state = ctx.refresh_beta_state
     projected_instances = ctx.projected_instances
     combined_log_updates = ctx.combined_log_updates
     strategy_run_plan = ctx.strategy_run_plan
-    require_command_id = ctx.require_command_id
 
     @app.patch("/api/v1/instances/{instance_id}", response_model=AccountInstance)
     async def update_instance(instance_id: str, payload: UpdateInstanceRequest) -> AccountInstance:
@@ -203,7 +198,13 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
 
     @app.delete("/api/v1/instances/{instance_id}/log-updates", status_code=status.HTTP_204_NO_CONTENT)
     def clear_instance_logs(instance_id: str) -> Response:
-        service.clear_logs(instance_id)
+        service.get_instance(instance_id)
+        execution_boundaries: dict[str, int] = {}
+        for record in campaign_journal.list_for_instance(instance_id):
+            latest = campaign_journal.events_before(record.campaign_id, None, 1)
+            if latest:
+                execution_boundaries[record.campaign_id] = int(latest[-1].get("sequence") or 0)
+        service.clear_logs(instance_id, execution_boundaries)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/api/v1/instances/{instance_id}/executions", response_model=list[ExecutionCycleView])

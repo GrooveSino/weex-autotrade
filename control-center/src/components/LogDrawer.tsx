@@ -32,9 +32,11 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
   const [systemConnection, setSystemConnection] = useState<ConnectionState>('connecting')
   const [clearArmed, setClearArmed] = useState(false)
   const [clearBusy, setClearBusy] = useState(false)
+  const [systemReloadToken, setSystemReloadToken] = useState(0)
   const [loadOlderBusy, setLoadOlderBusy] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const followTailRef = useRef(true)
+  const systemRequestGenerationRef = useRef(0)
   const accountRef = useRef(account)
   const monitorRef = useRef<StrategyMonitorSnapshot | null>(null)
 
@@ -125,6 +127,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
   useEffect(() => {
     const selectedAccount = accountRef.current
     if (!selectedAccount || tab !== 'system') return
+    const generation = ++systemRequestGenerationRef.current
     let active = true
     let cursor: string | null = null
     let timer: number | undefined
@@ -133,7 +136,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
     const poll = async () => {
       try {
         const batch = await fetchInstanceLogs(selectedAccount, cursor)
-        if (!active) return
+        if (!active || generation !== systemRequestGenerationRef.current) return
         const replace = cursor === null || batch.reset
         cursor = batch.cursor
         setSystemLines((current) => {
@@ -144,11 +147,11 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
         setSystemError(null)
         setSystemConnection('connected')
       } catch (reason: unknown) {
-        if (!active) return
+        if (!active || generation !== systemRequestGenerationRef.current) return
         setSystemError(reason instanceof Error ? reason.message : '系统日志加载失败')
         setSystemConnection('retrying')
       } finally {
-        if (active) {
+        if (active && generation === systemRequestGenerationRef.current) {
           setSystemLoading(false)
           timer = window.setTimeout(poll, 1_000)
         }
@@ -159,7 +162,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
       active = false
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [accountId, tab])
+  }, [accountId, systemReloadToken, tab])
 
   useEffect(() => {
     if (!monitor?.activeWaits.length) return
@@ -202,6 +205,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
       setClearArmed(true)
       return
     }
+    systemRequestGenerationRef.current += 1
     setClearBusy(true)
     try {
       await clearInstanceLogs(account)
@@ -212,6 +216,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
       setClearArmed(false)
     } finally {
       setClearBusy(false)
+      setSystemReloadToken((value) => value + 1)
     }
   }
 

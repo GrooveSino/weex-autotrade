@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from threading import RLock
 
 from .models import AccountInstance, LogLine, VolumeStrategy
@@ -11,6 +12,7 @@ class InMemoryAccountRepository:
     def __init__(self) -> None:
         self._instances: dict[str, AccountInstance] = {}
         self._logs: dict[str, list[LogLine]] = {}
+        self._log_clear_boundaries: dict[str, dict[str, int]] = {}
         self._log_reads: dict[str, int] = {}
         self._strategies: dict[str, VolumeStrategy] = {}
         self._lock = RLock()
@@ -41,6 +43,7 @@ class InMemoryAccountRepository:
                 raise DuplicateInstanceError(instance.id)
             self._instances[instance.id] = instance.model_copy(deep=True)
             self._logs[instance.id] = []
+            self._log_clear_boundaries[instance.id] = {}
             self._log_reads[instance.id] = 0
             return instance.model_copy(deep=True)
 
@@ -76,6 +79,7 @@ class InMemoryAccountRepository:
                 return
             self._instances.pop(instance_id, None)
             self._logs.pop(instance_id, None)
+            self._log_clear_boundaries.pop(instance_id, None)
             self._log_reads.pop(instance_id, None)
 
     def append_log(self, instance_id: str, line: LogLine) -> None:
@@ -92,11 +96,18 @@ class InMemoryAccountRepository:
             self._log_reads[instance_id] += 1
             return [line.model_copy(deep=True) for line in self._logs[instance_id][-limit:]]
 
-    def clear_logs(self, instance_id: str) -> None:
+    def clear_logs(self, instance_id: str, execution_boundaries: Mapping[str, int] | None = None) -> None:
         with self._lock:
             if instance_id not in self._instances:
                 raise KeyError(instance_id)
             self._logs[instance_id] = []
+            self._log_clear_boundaries[instance_id] = dict(execution_boundaries or {})
+
+    def log_clear_boundaries(self, instance_id: str) -> dict[str, int]:
+        with self._lock:
+            if instance_id not in self._instances:
+                raise KeyError(instance_id)
+            return dict(self._log_clear_boundaries.get(instance_id, {}))
 
     def log_read_count(self, instance_id: str) -> int:
         with self._lock:

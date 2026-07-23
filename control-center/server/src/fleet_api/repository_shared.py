@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Protocol
 
@@ -31,7 +32,9 @@ class AccountRepository(Protocol):
 
     def read_logs(self, instance_id: str, limit: int) -> list[LogLine]: ...
 
-    def clear_logs(self, instance_id: str) -> None: ...
+    def clear_logs(self, instance_id: str, execution_boundaries: Mapping[str, int] | None = None) -> None: ...
+
+    def log_clear_boundaries(self, instance_id: str) -> dict[str, int]: ...
 
     def log_read_count(self, instance_id: str) -> int: ...
 
