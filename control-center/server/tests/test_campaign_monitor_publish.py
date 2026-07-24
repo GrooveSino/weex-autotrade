@@ -55,7 +55,7 @@ def test_wait_heartbeats_coalesce_before_they_persist_or_notify() -> None:
         manager.close()
 
 
-def test_boundary_write_flushes_prior_heartbeat_before_it_persists() -> None:
+def test_boundary_write_discards_superseded_heartbeat() -> None:
     manager = _Manager()
     record = SimpleNamespace(campaign_id="execution-1", instance_id="account-1", metadata={})
     try:
@@ -63,7 +63,7 @@ def test_boundary_write_flushes_prior_heartbeat_before_it_persists() -> None:
         publish_monitor_event(manager, record, {"name": "leg_completed"})
 
         assert manager.progressed.wait(timeout=1)
-        assert manager.journal.events == ["leg_progress", "leg_completed"]
-        assert [event["name"] for event in manager.progress] == ["leg_progress", "leg_completed"]
+        assert manager.journal.events == ["leg_completed"]
+        assert [event["name"] for event in manager.progress] == ["leg_completed"]
     finally:
         manager.close()

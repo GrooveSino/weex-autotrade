@@ -213,14 +213,25 @@ class RuntimeHealthSnapshot(CamelModel):
 
 
 class ExecutionLifecycleSnapshot(CamelModel):
-    state: Literal["idle", "preparing", "running", "stopping", "recovering", "cleanup_required"] = "idle"
-    primary_action: Literal["start", "stop", "wait", "cleanup"] = "start"
+    state: Literal[
+        "idle",
+        "preparing",
+        "running",
+        "stopping",
+        "recovering",
+        "recovery_cleanup_required",
+        "orders_cleanup_required",
+        "position_blocked",
+    ] = "idle"
+    primary_action: Literal["start", "stop", "safe_stop", "wait", "cancel_orders", "recheck"] = "start"
     execution_id: str | None = None
     session_id: str | None = None
     reason_code: str | None = None
     position_count: int = Field(default=0, ge=0)
     regular_order_count: int = Field(default=0, ge=0)
     trigger_order_count: int = Field(default=0, ge=0)
+    blocking_positions: list[dict[str, str]] = Field(default_factory=list)
+    boundary_checked_at_ms: int | None = Field(default=None, gt=0)
 
 
 class SchedulerMetrics(CamelModel):

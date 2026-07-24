@@ -208,8 +208,8 @@ class CampaignWorkerRuntimeMixin:
             profile, gateway = self._profile_and_gateway(material)
             if live_profile_fingerprint(profile) != record.campaign.profile_fingerprint:
                 raise UnsafeOperation("live profile changed since campaign preview")
-            boundary = inspect_live_account(gateway, Decimal(0))
-            if not _account_boundary_is_flat(boundary):
+            boundary = self._read_public_boundary(gateway)
+            if not bool(boundary["flat"]):
                 raise UnsafeOperation("account changed after preview and is no longer flat")
             return Decimal(str(boundary["available_quote"]))
         finally:
@@ -227,9 +227,9 @@ class CampaignWorkerRuntimeMixin:
             profile, gateway = self._profile_and_gateway(material)
             if record is not None and live_profile_fingerprint(profile) != record.campaign.profile_fingerprint:
                 raise UnsafeOperation("旧任务无法自动收尾：Live 配置已发生变化")
-            boundary = inspect_live_account(gateway, Decimal(0))
-            if not _account_boundary_is_flat(boundary):
-                positions = int(boundary.get("active_position_count") or 0)
+            boundary = self._read_public_boundary(gateway)
+            if not bool(boundary["flat"]):
+                positions = int(boundary.get("position_count") or 0)
                 orders = int(boundary.get("regular_order_count") or 0)
                 triggers = int(boundary.get("trigger_order_count") or 0)
                 raise UnsafeOperation(

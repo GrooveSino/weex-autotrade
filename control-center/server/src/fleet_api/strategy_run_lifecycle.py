@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 from .campaign_contracts import CampaignJournal, CampaignRecord
-from .campaign_events import submission_attempted
-from .campaign_helpers import _cleanup_confirmation
 from .instance_projection import optional_available_balance
-from .models import AccountInstance, BetaCampaignView, ExecutionLifecycleSnapshot, StrategyDirection
+from .models import AccountInstance, ExecutionLifecycleSnapshot, StrategyDirection
 from .strategy_run_commands import StrategyRunCommandMixin
-from .strategy_run_helpers import active_preparation, boundary_counts, lifecycle_now_ms, view_or_none
+from .strategy_run_helpers import active_preparation, boundary_preparation, lifecycle_now_ms, view_or_none
 from .strategy_run_projection import project_strategy_run_lifecycle
+from .strategy_run_recovery import StrategyRunRecoveryMixin
 from .strategy_run_types import LifecyclePreparation
 from .vault import CredentialMaterial, CredentialVault
-from .volume_contracts import FillConflictError, TradeVolumeLedger
+from .volume_contracts import TradeVolumeLedger
 from .volume_sessions import SessionVolumeService
 
 
-class StrategyRunLifecycleService(StrategyRunCommandMixin):
+class StrategyRunLifecycleService(StrategyRunCommandMixin, StrategyRunRecoveryMixin):
     """Own operational state; audit completeness is deliberately independent."""
+
+    _now_ms = staticmethod(lifecycle_now_ms)
+    _view_or_none = staticmethod(view_or_none)
 
     def __init__(
         self,
@@ -64,7 +67,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
                 lifecycle_now_ms() >= record.campaign.expires_at_ms
                 or record.metadata.get("strategy_id") != instance.strategy_id
                 or record.metadata.get("strategy_version") != instance.strategy.version
-                or record.campaign.schema_version < 4
+                or record.campaign.schema_version < 5
                 or record.campaign.direction != direction.value
                 or record.campaign.leverage != 400
                 or record.campaign.margin_mode != "cross"
@@ -94,176 +97,17 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
         ):
             self._finish_launch_aborted(record, session)
         try:
-            boundary = self._manager.inspect_bound_strategy_boundary(material)
+            boundary = await asyncio.to_thread(self._manager.inspect_bound_strategy_boundary, material)
         except Exception as exc:  # a read-only boundary failure is retryable and never creates a run
             return LifecyclePreparation(
                 "unavailable",
                 reason_code=f"boundary_unavailable:{type(exc).__name__.lower()}",
                 message="账户持仓与挂单边界暂时不可用，请重试",
             )
+        self._journal.replace_boundary_projection(instance.id, boundary)
         if not bool(boundary["flat"]):
-            cleanup_record = self._manager.prepare_bound_strategy_cleanup(instance, material, boundary)
-            counts = boundary_counts(boundary)
-            return LifecyclePreparation(
-                "cleanup_required",
-                execution=view_or_none(cleanup_record),
-                cleanup_confirmation=(
-                    _cleanup_confirmation(cleanup_record.campaign_id) if cleanup_record is not None else None
-                ),
-                **counts,
-            )
-        return LifecyclePreparation("idle")
-
-    async def recover_after_worker(self, record: CampaignRecord) -> None:
-        instance = self._control_service.get_instance(record.instance_id)
-        await self._recover(
-            instance,
-            self._vault.get(record.instance_id),
-            record,
-            self._ledger.active_session(record.instance_id, instance.mode.value),
-        )
-
-    async def finalize_record(self, record: CampaignRecord) -> None:
-        """Converge one terminal/recovering Campaign into its volume session."""
-        session_id = record.metadata.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
-            return
-        session = self._ledger.get_session(session_id)
-        if session is None:
-            return
-        if record.status in {"recovering", "uncertain"}:
-            self._sessions.mark_recovering(
-                session_id,
-                reason=str(record.metadata.get("reason") or "campaign_outcome_uncertain"),
-                finished_at_ms=int(record.metadata.get("finished_at_ms") or lifecycle_now_ms()),
-            )
-            await self.recover_after_worker(record)
-            return
-        if record.status not in {"completed", "stopped"}:
-            return
-        if record.status == "stopped" and not submission_attempted(record):
-            self._finish_launch_aborted(record, self._ledger.session_projection(session_id))
-            return
-        finished_at_ms = int(record.metadata.get("finished_at_ms") or lifecycle_now_ms())
-        ending_balance = optional_available_balance(record.metadata.get("ending_available_balance_quote"))
-        self._ledger.update_session(
-            session_id,
-            status=record.status,
-            audit_status="pending",
-            result=record.status,
-            result_reason=record.metadata.get("reason"),
-            finished_at_ms=finished_at_ms,
-            source_complete=False,
-            stale=True,
-            pending_sync=True,
-            ending_available_balance_quote=ending_balance,
-        )
-        try:
-            fills, complete, reason = await self._runtime.authoritative_session_fills(
-                record.instance_id,
-                session.started_at_ms,
-                finished_at_ms,
-            )
-            if not complete:
-                self._ledger.update_session(
-                    session_id,
-                    audit_status="pending",
-                    pending_sync=False,
-                    result_reason=f"session_source_incomplete:{reason}"[:160],
-                )
-                return
-            self._ledger.record_account_fills(record.instance_id, session.mode, fills)
-            projection = self._sessions.reconcile(session_id, fills, reconciled_at_ms=finished_at_ms)
-            aggregate = self._ledger.aggregate(record.instance_id, 0)
-            if bool(projection["reconciliation_required"]):
-                self._ledger.update_session(
-                    session_id,
-                    status=record.status,
-                    audit_status="discrepant",
-                    result=record.status,
-                    finished_at_ms=finished_at_ms,
-                    final_lifetime_quote_volume=aggregate.lifetime,
-                    ending_available_balance_quote=ending_balance,
-                )
-                return
-            self._sessions.finalize(
-                session_id,
-                result=record.status,
-                reason=str(record.metadata.get("reason")) if record.metadata.get("reason") else None,
-                finished_at_ms=finished_at_ms,
-                final_lifetime_quote_volume=aggregate.lifetime,
-                ending_available_balance_quote=ending_balance,
-            )
-        except Exception as exc:  # audit failure cannot reopen or block the operational run
-            self._ledger.update_session(
-                session_id,
-                status=record.status,
-                audit_status="pending",
-                pending_sync=False,
-                result_reason=f"session_audit_failed:{type(exc).__name__.lower()}",
-            )
-
-    async def _recover(
-        self,
-        instance: AccountInstance,
-        material: CredentialMaterial | None,
-        record: CampaignRecord | None,
-        session: dict[str, object] | None,
-    ) -> LifecyclePreparation:
-        if material is None:
-            return LifecyclePreparation("unavailable", reason_code="credentials_unavailable", message="账号凭据不可用")
-        boundary = self._manager.inspect_bound_strategy_boundary(material)
-        if not bool(boundary["flat"]):
-            counts = boundary_counts(boundary)
-            if record is not None:
-                self._journal.update(record.campaign_id, cleanup_required=True, **counts)
-            return LifecyclePreparation(
-                "cleanup_required",
-                execution=view_or_none(record),
-                cleanup_confirmation=_cleanup_confirmation(record.campaign_id) if record is not None else None,
-                **counts,
-            )
-
-        if record is None:
-            if session is not None:
-                self._close_audit_pending_session(session, "recovery_record_missing")
-            return LifecyclePreparation("idle")
-        if not submission_attempted(record):
-            self._finish_launch_aborted(record, session)
-            return LifecyclePreparation("idle")
-
-        if session is None:
-            self._manager.archive_bound_strategy_recovery(record, recovered_at_ms=lifecycle_now_ms())
-            return LifecyclePreparation("idle")
-        now_ms = lifecycle_now_ms()
-        fills, complete, reason = await self._runtime.authoritative_session_fills(
-            instance.id,
-            int(session["started_at_ms"]),
-            now_ms,
-        )
-        if not complete:
-            self._ledger.update_session(
-                str(session["session_id"]),
-                status="recovering",
-                audit_status="pending",
-                result_reason=f"recovery_source_incomplete:{reason}"[:160],
-                pending_sync=False,
-            )
-            return LifecyclePreparation("recovering", execution=view_or_none(record), reason_code=str(reason))
-        try:
-            projection = self._sessions.recover_stopped(
-                str(session["session_id"]),
-                fills,
-                reconciled_at_ms=now_ms,
-                ending_available_balance_quote=Decimal(str(boundary["available_quote"])),
-            )
-        except FillConflictError:
-            self._close_audit_pending_session(session, "fill_conflict", discrepant=True)
-        else:
-            if bool(projection["reconciliation_required"]):
-                self._close_audit_pending_session(session, "fill_discrepancy", discrepant=True)
-        self._manager.archive_bound_strategy_recovery(record, recovered_at_ms=now_ms)
-        return LifecyclePreparation("idle")
+            return boundary_preparation(boundary, instance.id)
+        return LifecyclePreparation("idle", boundary=boundary)
 
     def establish_session(self, record: CampaignRecord, started_at_ms: int) -> None:
         metadata = record.metadata
@@ -332,15 +176,3 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             uncertain_order_state=False,
             pending_sync=False,
         )
-
-    @staticmethod
-    def _now_ms() -> int:
-        return lifecycle_now_ms()
-
-    @staticmethod
-    def _boundary_counts(boundary: dict[str, object]) -> dict[str, int]:
-        return boundary_counts(boundary)
-
-    @staticmethod
-    def _view_or_none(record: CampaignRecord | None) -> BetaCampaignView | None:
-        return view_or_none(record)

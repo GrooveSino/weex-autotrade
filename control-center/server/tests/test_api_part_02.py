@@ -20,7 +20,9 @@ from .test_api_support import (
 )
 
 
-def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bound_strategy_preview_archives_incomplete_recovery_without_blocking_restart(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from weex_cli.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
@@ -91,12 +93,17 @@ def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(tmp_path, monk
             return (), False, "page_budget_exhausted"
 
         app.state.account_runtime.authoritative_session_fills = incomplete_fills
-        blocked = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
+        reopened = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
 
-        assert blocked.status_code == 200
-        assert blocked.json()["disposition"] == "recovering"
-        assert app.state.trade_volume_ledger.active_session(instance["id"], "live") is not None
-        assert app.state.campaign_journal.get(first["campaignId"]).status == "recovering"
+        assert reopened.status_code == 200
+        assert reopened.json()["disposition"] == "ready"
+        assert reopened.json()["preview"]["campaignId"] != first["campaignId"]
+        session = app.state.trade_volume_ledger.get_session(session_id)
+        assert session is not None
+        assert session.status == "stopped"
+        assert session.audit_status == "pending"
+        assert app.state.trade_volume_ledger.active_session(instance["id"], "live") is None
+        assert app.state.campaign_journal.get(first["campaignId"]).status == "stopped"
 
 
 def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailable(

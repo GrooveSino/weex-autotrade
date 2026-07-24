@@ -6,7 +6,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from fleet_api.config import ControlPlaneSettings
-from fleet_api.events import InstanceEventBroker
+from fleet_api.events import InstanceEventBroker, StrategyMonitorEventBroker
 from fleet_api.execution import PairAllocation
 from fleet_api.main import create_app
 from fleet_api.models import (
@@ -68,6 +68,27 @@ def test_event_broker_coalesces_slow_subscribers_to_latest_public_snapshot() -> 
         assert "credentials" not in payload["instances"][0]
         assert broker.subscriber_count == 1
         await broker.unsubscribe(queue)
+        assert broker.subscriber_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_strategy_monitor_broker_wakes_only_matching_subscribers() -> None:
+    async def scenario() -> None:
+        broker = StrategyMonitorEventBroker()
+        first = broker.subscribe("ins-first")
+        second = broker.subscribe("ins-second")
+
+        broker.publish("ins-first")
+        broker.publish("ins-first")
+
+        assert first.qsize() == 1
+        assert second.empty()
+        assert broker.subscriber_count == 2
+        assert await first.get() is None
+
+        broker.unsubscribe(first)
+        broker.unsubscribe(second)
         assert broker.subscriber_count == 0
 
     asyncio.run(scenario())

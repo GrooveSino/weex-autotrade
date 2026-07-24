@@ -37,6 +37,17 @@ def install_application_lifecycle(ctx: FleetAppContext) -> None:
                 await publish_snapshot()
             await asyncio.sleep(0.25 if worked else 1)
 
+    async def connection_collect_loop() -> None:
+        while True:
+            await asyncio.sleep(1)
+            await asyncio.to_thread(ctx.campaign_manager.collect_connections)
+
+    async def recovery_loop() -> None:
+        while True:
+            for record in ctx.strategy_run_lifecycle.due_recovery_records():
+                ctx.schedule_session_finalization(record)
+            await asyncio.sleep(1)
+
     async def refresh_beta_state() -> bool:
         available = await ctx.beta_source_runtime.refresh()
         changed = 0
@@ -72,18 +83,26 @@ def install_application_lifecycle(ctx: FleetAppContext) -> None:
             beta_task = asyncio.create_task(beta_refresh_loop(), name="fleet-beta-refresher")
         poll_task = asyncio.create_task(poll_loop(), name="fleet-account-poller")
         history_task = asyncio.create_task(history_sync_loop(), name="fleet-history-sync")
+        connection_collect_task = asyncio.create_task(connection_collect_loop(), name="fleet-connection-collector")
+        recovery_task = asyncio.create_task(recovery_loop(), name="fleet-recovery-supervisor")
         ctx.trade_history_scheduler.bootstrap()
         try:
             yield
         finally:
             poll_task.cancel()
             history_task.cancel()
+            connection_collect_task.cancel()
+            recovery_task.cancel()
             if beta_task is not None:
                 beta_task.cancel()
             with suppress(asyncio.CancelledError):
                 await poll_task
             with suppress(asyncio.CancelledError):
                 await history_task
+            with suppress(asyncio.CancelledError):
+                await connection_collect_task
+            with suppress(asyncio.CancelledError):
+                await recovery_task
             if beta_task is not None:
                 with suppress(asyncio.CancelledError):
                     await beta_task

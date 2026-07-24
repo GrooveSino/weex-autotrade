@@ -76,8 +76,11 @@ def _reconciliation_confirmation(campaign_id: str) -> str:
     return f"RECONCILE WEEX LIVE BETA-CAMPAIGN {campaign_id.upper()} ACCOUNT_FLAT NO_ORDERS"
 
 
-def _cleanup_confirmation(campaign_id: str) -> str:
-    return f"CLEANUP WEEX LIVE STRATEGY {campaign_id.upper()} CANCEL_AND_MAKER_FLATTEN"
+def _cleanup_confirmation(instance_id: str) -> str:
+    return (
+        f"CLEANUP WEEX LIVE ACCOUNT {instance_id.upper()} "
+        "CANCEL_REGULAR_AND_TRIGGER_ORDERS_ONLY"
+    )
 
 
 def _reconciliation_required(record: CampaignRecord) -> bool:
@@ -207,6 +210,7 @@ def _worker_exception_reason(exc: Exception) -> str:
         ("campaign authorization expired", "authorization_expired"),
         ("leverage", "leverage_verification_failed"),
         ("post_only", "post_only_verification_failed"),
+        ("position quantity observation", "position_quantity_invalid"),
     )
     for token, code in known_codes:
         if token in message:

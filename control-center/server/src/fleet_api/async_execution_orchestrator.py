@@ -263,8 +263,13 @@ class AsyncExecutionOrchestrator:
         self._probe_future.cancel()
         with suppress(Exception):
             self._probe_future.result(timeout=1)
-        future = asyncio.run_coroutine_threadsafe(self._cancel_all(), self._loop)
-        future.result(timeout=10)
+        # Do not cancel actor tasks here.  Cancellation skips the program's
+        # cooperative safe-stop branch while a blocking exchange call can
+        # still be executing in a worker thread.  Every admitted actor owns
+        # its own stop/cleanup sequence, so shutdown waits for that sequence
+        # to reach a terminal state before tearing down its I/O pools.
+        future = asyncio.run_coroutine_threadsafe(self._drain_all(), self._loop)
+        future.result()
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
         self._normal_pool.shutdown(wait=True, cancel_futures=False)
@@ -290,13 +295,19 @@ class AsyncExecutionOrchestrator:
                 self._tasks.pop(actor.execution_id, None)
                 self._actors.pop(actor.execution_id, None)
 
-    async def _cancel_all(self) -> None:
-        with self._lock:
-            tasks = tuple(self._tasks.values())
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    async def _drain_all(self) -> None:
+        while True:
+            with self._lock:
+                tasks = tuple(self._tasks.values())
+                actor_count = len(self._actors)
+            if not tasks and actor_count == 0:
+                return
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                continue
+            # ``start`` may have registered an actor immediately before
+            # shutdown while its launch coroutine is still queued.
+            await asyncio.sleep(0)
 
     async def _measure_event_loop(self) -> None:
         expected = time.monotonic()

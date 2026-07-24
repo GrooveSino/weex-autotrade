@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,7 @@ def register_strategy_monitor_routes(app: FastAPI, ctx: FleetAppContext) -> None
     service = ctx.service
     campaign_journal = ctx.campaign_journal
     strategy_monitor = ctx.strategy_monitor
+    monitor_event_broker = ctx.strategy_monitor_event_broker
     executor_generation = ctx.executor_generation
 
     @app.get("/api/v1/instances/{instance_id}/strategy-monitor/events")
@@ -30,6 +32,7 @@ def register_strategy_monitor_routes(app: FastAPI, ctx: FleetAppContext) -> None
 
         async def stream() -> AsyncIterator[str]:
             strategy_monitor.subscriber_opened()
+            wake_queue = monitor_event_broker.subscribe(instance_id)
             try:
                 heartbeat_at = time.monotonic()
                 initial = await asyncio.to_thread(
@@ -64,7 +67,8 @@ def register_strategy_monitor_routes(app: FastAPI, ctx: FleetAppContext) -> None
                 )
 
                 while not await request.is_disconnected():
-                    await asyncio.sleep(0.25)
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(wake_queue.get(), timeout=5)
                     record = await asyncio.to_thread(campaign_journal.monitor_record, instance_id, session_id)
                     campaign_id = record.campaign_id if record is not None else None
                     if campaign_id != last_campaign_id:
@@ -182,6 +186,7 @@ def register_strategy_monitor_routes(app: FastAPI, ctx: FleetAppContext) -> None
                         )
                         heartbeat_at = time.monotonic()
             finally:
+                monitor_event_broker.unsubscribe(wake_queue)
                 strategy_monitor.subscriber_closed()
 
         return StreamingResponse(

@@ -28,7 +28,7 @@ WAITING_LABELS_ZH = {
     "open_order_clearance": "确认无残留挂单",
 }
 
-EXECUTION_PROGRESS_PROJECTION_VERSION = 4
+EXECUTION_PROGRESS_PROJECTION_VERSION = 5
 
 _ACTION_ZH = {"open": "开仓", "close": "平仓", "buy": "买入", "sell": "卖出"}
 _STATUS_ZH = {
@@ -101,6 +101,8 @@ def status_label(value: Any) -> str:
 
 def execution_phase(event: Mapping[str, Any]) -> str:
     name = event_name(event)
+    if name.startswith("dust_close") or name.startswith("market_close"):
+        return "小额尾仓收敛"
     if name.startswith("safe_stop"):
         return "安全停止"
     if name.startswith("campaign_boundary") or name.startswith("final_acceptance"):
@@ -204,6 +206,34 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
         return TimelinePresentation(
             "success", f"{symbol} {action}成交已核验", f"{value('quote_volume')} USDT / {value('fill_count')} 笔"
         )
+    if name == "dust_close_detected":
+        reasons = {
+            "below_minimum": "低于交易所最小下单量",
+            "minimum_rejected": "交易所明确拒绝最小量或精度",
+            "quote_threshold": "当前任务剩余仓位不超过尾仓阈值",
+        }
+        return TimelinePresentation(
+            "warn",
+            f"{symbol} 检测到当前任务小额尾仓",
+            f"{value('quantity')} / 约 {value('quote')} USDT / {reasons.get(str(value('reason')), value('reason'))}",
+        )
+    if name == "market_close_intent_persisted":
+        return TimelinePresentation("warn", f"{symbol} 市价收尾意图已持久化", "同一任务交易腿最多提交一次")
+    if name == "market_close_accepted":
+        return TimelinePresentation("info", f"{symbol} 小额尾仓市价平仓已受理", "正在只读核验仓位与成交")
+    if name == "market_close_verified":
+        verified = bool(value("verified", False))
+        return TimelinePresentation(
+            "success" if verified else "warn",
+            f"{symbol} 小额尾仓已清零",
+            (
+                f"成交已核验 / {value('quote_volume')} USDT / {value('fill_count')} 笔"
+                if verified
+                else "仓位已清零，成交账本稍后继续只读核验"
+            ),
+        )
+    if name == "market_close_uncertain":
+        return TimelinePresentation("error", f"{symbol} 小额尾仓市价平仓结果待核验", str(value("reason")))
     if name in {"leg_stopped", "leg_uncertain"}:
         title = f"{symbol} {action}{'已安全停止' if name == 'leg_stopped' else '状态不确定'}"
         return TimelinePresentation("error" if name == "leg_stopped" else "warn", title, str(value("reason")))
@@ -234,7 +264,7 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
         return TimelinePresentation(
             "success" if passed else "warn",
             "最终验收通过" if passed else "最终验收未通过",
-            f"空仓={value('flat')} / 无挂单={value('no_orders')} / Maker={value('maker_only')}",
+            f"空仓={value('flat')} / 无挂单={value('no_orders')} / 流动性策略={value('liquidity_policy_satisfied')}",
         )
     if name in {"cycle_completed", "cycle_stopped"}:
         return TimelinePresentation(
@@ -256,11 +286,11 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
     if name == "safe_stop_started":
         return TimelinePresentation("warn", "安全停止已接管", "正在撤销 BTC/ETH 常规单与条件单")
     if name == "safe_stop_cancel_verified":
-        return TimelinePresentation("success", f"{symbol} 撤单已核验", "可以进入 Maker-only 平仓")
+        return TimelinePresentation("success", f"{symbol} 撤单已核验", "优先进入 Maker 平仓")
     if name == "safe_stop_cancel_unverified":
         return TimelinePresentation("error", f"{symbol} 撤单未能核验", "停止自动平仓，需人工核对挂单和仓位")
     if name == "safe_stop_flattening":
-        return TimelinePresentation("warn", f"{symbol} 正在 Maker-only 平仓", f"残仓 {value('quantity')}")
+        return TimelinePresentation("warn", f"{symbol} 正在优先使用 Maker 平仓", f"当前任务仓位 {value('quantity')}")
     if name == "safe_stop_leg_completed":
         return TimelinePresentation("success", f"{symbol} Maker-only 平仓已完成")
     if name == "safe_stop_verified":
@@ -318,8 +348,10 @@ class ExecutionProgressProjector:
         self.execution_verified_quote_volume = Decimal(0)
         self.btc_quote_volume = Decimal(0)
         self.eth_quote_volume = Decimal(0)
+        self.execution_unknown_fill_count = 0
         self._current_run_base_quote = Decimal(0)
         self._completed_leg_quotes: dict[str, Decimal] = {}
+        self._completed_leg_fill_counts: dict[str, int] = {}
 
     def apply(self, event: Mapping[str, Any], *, at_ms: int) -> TimelinePresentation | None:
         self.phase = execution_phase(event)
@@ -346,9 +378,11 @@ class ExecutionProgressProjector:
             "execution_verified_quote_volume": format(self.execution_verified_quote_volume, "f"),
             "btc_quote_volume": format(self.btc_quote_volume, "f"),
             "eth_quote_volume": format(self.eth_quote_volume, "f"),
+            "execution_unknown_fill_count": self.execution_unknown_fill_count,
             "active_waits": [asdict(wait) for wait in self.active_waits.values()],
             "current_run_base_quote": format(self._current_run_base_quote, "f"),
             "completed_leg_quotes": {key: format(value, "f") for key, value in self._completed_leg_quotes.items()},
+            "completed_leg_fill_counts": self._completed_leg_fill_counts,
         }
 
     @classmethod
@@ -365,6 +399,7 @@ class ExecutionProgressProjector:
         projector.execution_verified_quote_volume = _decimal_or_zero(snapshot.get("execution_verified_quote_volume"))
         projector.btc_quote_volume = _decimal_or_zero(snapshot.get("btc_quote_volume"))
         projector.eth_quote_volume = _decimal_or_zero(snapshot.get("eth_quote_volume"))
+        projector.execution_unknown_fill_count = _nonnegative_int(snapshot.get("execution_unknown_fill_count"))
         projector._current_run_base_quote = _decimal_or_zero(snapshot.get("current_run_base_quote"))
         completed = snapshot.get("completed_leg_quotes")
         if isinstance(completed, Mapping):
@@ -372,6 +407,11 @@ class ExecutionProgressProjector:
                 str(key): parsed
                 for key, value in completed.items()
                 if (parsed := _nonnegative_decimal(value)) is not None
+            }
+        fill_counts = snapshot.get("completed_leg_fill_counts")
+        if isinstance(fill_counts, Mapping):
+            projector._completed_leg_fill_counts = {
+                str(key): _nonnegative_int(value) for key, value in fill_counts.items()
             }
         waits = snapshot.get("active_waits")
         if isinstance(waits, list):
@@ -444,18 +484,26 @@ class ExecutionProgressProjector:
                 self.execution_verified_quote_volume = max(self.execution_verified_quote_volume, total)
                 self._current_run_base_quote = self.execution_verified_quote_volume
             return
-        if name != "leg_completed":
+        if name not in {"leg_completed", "market_close_verified"}:
+            return
+        if name == "market_close_verified" and not bool(event_value(event, "verified", False)):
             return
         quote = _nonnegative_decimal(event_value(event, "quote_volume"))
         if quote is None:
             return
         symbol = str(event_value(event, "symbol", "")).upper()
         round_number = event_value(event, "round", "")
-        leg_sequence = event_value(event, "leg_sequence", event_value(event, "sequence", ""))
+        leg_sequence = event_value(
+            event,
+            "leg_sequence",
+            event_value(event, "sequence", "dust" if name == "market_close_verified" else ""),
+        )
         action = str(event_value(event, "action", ""))
         key = f"{self.current_run}:{round_number}:{leg_sequence}:{symbol}:{action}"
         previous = self._completed_leg_quotes.get(key)
-        if previous == quote:
+        fill_count = _nonnegative_int(event_value(event, "fill_count"))
+        previous_fill_count = self._completed_leg_fill_counts.get(key, 0)
+        if previous == quote and previous_fill_count == fill_count:
             return
         # A leg_completed event is emitted only after the maker execution
         # service has reconciled actual fills for that leg.  Keep this
@@ -467,6 +515,12 @@ class ExecutionProgressProjector:
         elif symbol.startswith("ETH"):
             self.eth_quote_volume += quote - (previous or Decimal(0))
         self._completed_leg_quotes[key] = quote
+        # The journal confirms the count but deliberately does not retain
+        # individual fill identities or maker classification.  Until the
+        # independent ledger catches up, make that uncertainty visible rather
+        # than presenting a misleading all-zero breakdown.
+        self.execution_unknown_fill_count += fill_count - previous_fill_count
+        self._completed_leg_fill_counts[key] = fill_count
 
     def _update_waits(self, event: Mapping[str, Any], at_ms: int) -> bool:
         name = event_name(event)
@@ -596,14 +650,23 @@ class ExecutionProgressProjector:
             "leverage_preparing": (f"cycle-stage:{round_number}", "查询余额并配置本轮杠杆"),
             "close_barrier_started": (f"cycle-stage:{round_number}", "读取实际持仓并准备并发平仓"),
             "accounting_waiting": (f"accounting:{symbol or ''}", f"{symbol or ''} · 等待成交明细对账"),
-            "final_acceptance_started": ("final-acceptance", "最终验收空仓、挂单、Maker 成交和交易量"),
+            "final_acceptance_started": ("final-acceptance", "最终验收空仓、挂单、流动性策略和交易量"),
             "safe_stop_started": ("safe-stop", "正在撤销 BTC/ETH 常规单与条件单"),
-            "safe_stop_flattening": (f"safe-stop:{symbol or ''}", f"{symbol or ''} · 正在 Maker-only 平仓"),
+            "safe_stop_flattening": (f"safe-stop:{symbol or ''}", f"{symbol or ''} · 正在优先使用 Maker 平仓"),
+            "dust_close_detected": (f"dust-close:{symbol or ''}", f"{symbol or ''} · 正在市价清除小额尾仓"),
+            "market_close_intent_persisted": (
+                f"dust-close:{symbol or ''}",
+                f"{symbol or ''} · 正在市价清除小额尾仓",
+            ),
+            "market_close_accepted": (
+                f"dust-close:{symbol or ''}",
+                f"{symbol or ''} · 核验市价平仓结果",
+            ),
         }
         if name in stages:
             key, label = stages[name]
             self._set_wait(ActiveWait(key, label, at_ms, symbol=symbol, action=action or None))
-            return True
+            return name not in {"dust_close_detected", "market_close_intent_persisted", "market_close_accepted"}
 
         removals = {
             "campaign_boundary_completed": ("campaign-boundary",),
@@ -621,6 +684,8 @@ class ExecutionProgressProjector:
             "safe_stop_cancel_unverified": ("safe-stop", f"safe-stop:{symbol or ''}"),
             "safe_stop_uncertain": ("safe-stop", f"safe-stop:{symbol or ''}"),
             "safe_stop_verified": ("safe-stop", "safe-stop:BTC", "safe-stop:ETH"),
+            "market_close_verified": (f"dust-close:{symbol or ''}",),
+            "market_close_uncertain": (f"dust-close:{symbol or ''}",),
         }
         if name in {"workflow_finished", "campaign_finished"}:
             self.active_waits.clear()

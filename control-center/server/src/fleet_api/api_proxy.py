@@ -52,6 +52,20 @@ def _response_headers(response: httpx.Response) -> dict[str, str]:
     return {key: value for key, value in response.headers.items() if key.lower() not in _HOP_BY_HOP_HEADERS}
 
 
+def _opaque_executor_error(path: str, status_code: int) -> JSONResponse:
+    if path.endswith("/strategy-run/prepare"):
+        detail = (
+            f"生成策略启动确认失败：执行器内部错误（HTTP {status_code}）。"
+            "本次请求只进行只读预检，不会提交订单；请重试，若仍失败请检查执行器错误日志。"
+        )
+    else:
+        detail = (
+            f"执行器处理请求失败（HTTP {status_code}），但没有返回可读原因。"
+            "系统没有自动重试该请求，请先核对当前状态后再操作。"
+        )
+    return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
 def _executor_socket() -> Path:
     return Path(os.environ.get("FLEET_EXECUTOR_SOCKET", "run/weex-fleet-executor.sock").strip()).expanduser()
 
@@ -254,21 +268,29 @@ def create_app(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     content={
                         "detail": (
-                            "executor command acknowledgement timed out; no command was retried; "
-                            "query command or execution state before taking another action"
+                            "执行器在 60 秒内没有确认该命令。系统没有自动重试，也不会重复提交订单；"
+                            "请先查看当前任务状态，再决定是否重新操作。"
                         ),
                         "commandId": request.headers.get("X-Fleet-Command-Id", ""),
                     },
                 )
             return JSONResponse(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT, content={"detail": "executor response timed out"}
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                content={"detail": "读取执行器数据超时，请稍后重试；本次只读请求不会提交订单。"},
             )
         except httpx.ConnectError:
-            return JSONResponse(status_code=503, content={"detail": "executor unavailable; no command was retried"})
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "执行器当前无法连接。系统没有自动重试命令，也不会重复提交订单。"},
+            )
         except httpx.HTTPError:
             return JSONResponse(
-                status_code=502, content={"detail": "executor proxy request failed; no command was retried"}
+                status_code=502,
+                content={"detail": "API 转发执行器请求失败。系统没有自动重试命令，也不会重复提交订单。"},
             )
+        content_type = response.headers.get("content-type", "").lower()
+        if response.status_code >= 500 and "application/json" not in content_type:
+            return _opaque_executor_error(path, response.status_code)
         return Response(
             content=response.content,
             status_code=response.status_code,

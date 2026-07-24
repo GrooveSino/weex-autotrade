@@ -55,6 +55,7 @@ export interface BetaCampaign {
   selectedTargetQuoteVolume: string | null
   leverage: number | 'auto'
   marginMode: 'isolated' | 'cross'
+  dustClosePolicy: { enabled: boolean; maxQuote: string; stages: string[]; marketCloseOnce: boolean }
   targetQuote: string
   roundTurnoverQuoteMin: string | null
   cycleVolume: string
@@ -118,8 +119,15 @@ export interface BetaCampaignPreviewRequest {
 
 export interface BetaCampaignPreview extends BetaCampaign { warnings: string[]; blockers: string[] }
 
+export interface BlockingPosition {
+  symbol: 'BTC' | 'ETH'
+  side: 'long' | 'short' | 'unknown'
+  quantity: string
+  approximateQuote: string
+}
+
 export interface StrategyRunPrepareResponse {
-  disposition: 'ready' | 'running' | 'stopping' | 'recovering' | 'cleanup_required' | 'unavailable'
+  disposition: 'ready' | 'running' | 'stopping' | 'recovering' | 'recovery_cleanup_required' | 'orders_cleanup_required' | 'position_blocked' | 'unavailable'
   preview: BetaCampaignPreview | null
   current: BetaCampaign | null
   reasonCode: string | null
@@ -128,6 +136,9 @@ export interface StrategyRunPrepareResponse {
   regularOrderCount: number
   triggerOrderCount: number
   cleanupConfirmation: string | null
+  blockingPositions: BlockingPosition[]
+  allowedActions: Array<'cancel_orders' | 'recheck' | 'safe_stop'>
+  boundaryCheckedAtMs: number | null
 }
 
 export interface StrategyRunCapacity {

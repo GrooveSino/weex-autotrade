@@ -117,6 +117,11 @@ def test_timeline_projection_covers_the_supported_execution_event_catalog() -> N
         ({"event": "cycle_read_retry"}, "账户参数读取失败，等待重查"),
         ({"event": "leg_started", "side": "buy"}, "BTC 开仓准备完成"),
         ({"event": "leg_completed"}, "BTC 开仓成交已核验"),
+        ({"event": "dust_close_detected"}, "BTC 检测到当前任务小额尾仓"),
+        ({"event": "market_close_intent_persisted"}, "BTC 市价收尾意图已持久化"),
+        ({"event": "market_close_accepted"}, "BTC 小额尾仓市价平仓已受理"),
+        ({"event": "market_close_verified", "verified": True}, "BTC 小额尾仓已清零"),
+        ({"event": "market_close_uncertain"}, "BTC 小额尾仓市价平仓结果待核验"),
         ({"event": "leg_stopped"}, "BTC 开仓已安全停止"),
         ({"event": "leg_uncertain"}, "BTC 开仓状态不确定"),
         ({"event": "position_observation_unavailable"}, "BTC 开仓仓位读取失败"),
@@ -136,7 +141,7 @@ def test_timeline_projection_covers_the_supported_execution_event_catalog() -> N
         ({"event": "safe_stop_started"}, "安全停止已接管"),
         ({"event": "safe_stop_cancel_verified"}, "BTC 撤单已核验"),
         ({"event": "safe_stop_cancel_unverified"}, "BTC 撤单未能核验"),
-        ({"event": "safe_stop_flattening"}, "BTC 正在 Maker-only 平仓"),
+        ({"event": "safe_stop_flattening"}, "BTC 正在优先使用 Maker 平仓"),
         ({"event": "safe_stop_leg_completed"}, "BTC Maker-only 平仓已完成"),
         ({"event": "safe_stop_verified"}, "安全停止已核验"),
         ({"event": "safe_stop_uncertain"}, "安全停止结果待核验"),
@@ -188,6 +193,52 @@ def test_projector_aggregates_verified_leg_volume_without_double_counting() -> N
     assert snapshot["execution_verified_quote_volume"] == "44.79144"
     assert snapshot["btc_quote_volume"] == "33.0978"
     assert snapshot["eth_quote_volume"] == "11.69364"
+
+
+def test_projector_tracks_dust_close_wait_and_only_counts_verified_fill() -> None:
+    projector = ExecutionProgressProjector()
+    projector.apply(
+        {
+            "event": "dust_close_detected",
+            "round": 2,
+            "symbol": "BTC",
+            "action": "close",
+            "quantity": "0.0001",
+            "quote": "6.5",
+            "reason": "quote_threshold",
+        },
+        at_ms=1_000,
+    )
+    assert projector.active_waits["dust-close:BTC"].label == "BTC · 正在市价清除小额尾仓"
+
+    projector.apply(
+        {
+            "event": "market_close_verified",
+            "round": 2,
+            "symbol": "BTC",
+            "action": "close",
+            "verified": False,
+            "quote_volume": "0",
+            "fill_count": 0,
+        },
+        at_ms=2_000,
+    )
+    assert "dust-close:BTC" not in projector.active_waits
+    assert projector.snapshot()["execution_verified_quote_volume"] == "0"
+
+    projector.apply(
+        {
+            "event": "market_close_verified",
+            "round": 3,
+            "symbol": "BTC",
+            "action": "close",
+            "verified": True,
+            "quote_volume": "6.5",
+            "fill_count": 1,
+        },
+        at_ms=3_000,
+    )
+    assert projector.snapshot()["execution_verified_quote_volume"] == "6.5"
 
 
 def test_projector_carries_child_cycle_totals_across_campaign_runs() -> None:

@@ -130,6 +130,10 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
             return LogLevel.WARN, "实盘执行：工作线程结果待核验，正在后台只读恢复"
         level = LogLevel.SUCCESS if core("status") == "completed" else LogLevel.WARN
         return level, f"实盘执行：流程 {core('status')}；已核验 {value('executed_quote_volume')} USDT"
+    if name == "campaign_recovering":
+        reason = value("reason")
+        message = "仓位数量格式异常，已进入恢复检查" if "typeerror" in reason else "执行阶段异常，已进入恢复检查"
+        return LogLevel.WARN, f"实盘执行：{message}；错误编号 {value('error_id')}"
     presentation = describe_execution_event(event)
     if presentation is None:
         return None

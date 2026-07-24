@@ -44,6 +44,7 @@ class CampaignBoundStrategyMixin:
         baseline_lifetime_quote: Decimal = Decimal(0),
         direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
         owner_user_id: str = LEGACY_OWNER_USER_ID,
+        boundary_snapshot: Mapping[str, object] | None = None,
     ) -> BetaCampaignPreview:
         """Create an executable Live preview solely from a persisted strategy binding."""
         self._require_live_gate()
@@ -80,16 +81,21 @@ class CampaignBoundStrategyMixin:
                 leverage=FIXED_BOUND_STRATEGY_LEVERAGE,
                 margin_mode="cross",
                 direction=direction.value,
+                dust_close_max_quote=self.settings.taker_dust_max_quote,
             )
             opening_notional = min(campaign.round_turnover_quote, campaign.target_turnover_quote) / Decimal(2)
             required = opening_notional / Decimal(FIXED_BOUND_STRATEGY_LEVERAGE) * campaign.margin_buffer
-            readiness = inspect_live_account(
-                gateway,
-                required,
-                opening_notional=opening_notional,
-                leverage=campaign.leverage,
-                max_auto_leverage=campaign.max_auto_leverage,
-                margin_buffer=campaign.margin_buffer,
+            readiness = (
+                _preview_readiness(boundary_snapshot, required, campaign.leverage)
+                if boundary_snapshot is not None
+                else inspect_live_account(
+                    gateway,
+                    required,
+                    opening_notional=opening_notional,
+                    leverage=campaign.leverage,
+                    max_auto_leverage=campaign.max_auto_leverage,
+                    margin_buffer=campaign.margin_buffer,
+                )
             )
             available = _available_quote_from_readiness(readiness)
             blockers: list[str] = []
@@ -234,7 +240,7 @@ class CampaignBoundStrategyMixin:
         return (
             record.metadata.get("strategy_id") != strategy.id
             or record.metadata.get("strategy_version") != strategy.version
-            or record.campaign.schema_version < 4
+            or record.campaign.schema_version < 5
             or record.campaign.leverage != FIXED_BOUND_STRATEGY_LEVERAGE
             or record.campaign.margin_mode != "cross"
             or (direction is not None and record.campaign.direction != direction.value)
@@ -260,3 +266,29 @@ class CampaignBoundStrategyMixin:
                 },
             ),
         )
+
+
+def _preview_readiness(
+    boundary: Mapping[str, object],
+    required_available: Decimal,
+    leverage: int | str,
+) -> dict[str, Any]:
+    try:
+        available = Decimal(str(boundary.get("available_quote") or "0"))
+    except Exception as exc:  # noqa: BLE001 - persisted boundary data must be validated before authorization
+        raise UnsafeOperation("account boundary has an invalid available balance") from exc
+    if not available.is_finite() or available < 0:
+        raise UnsafeOperation("account boundary has an invalid available balance")
+    return {
+        "funds_configured": True,
+        "available_quote": str(available),
+        "available_sufficient": available >= required_available,
+        "active_position_count": int(boundary.get("position_count") or 0),
+        "regular_order_count": int(boundary.get("regular_order_count") or 0),
+        "trigger_order_count": int(boundary.get("trigger_order_count") or 0),
+        "blocking_positions": [
+            dict(row) for row in boundary.get("blocking_positions", []) if isinstance(row, Mapping)
+        ],
+        "planned_leverage": int(leverage),
+        "boundary_checked_at_ms": boundary.get("checked_at_ms"),
+    }

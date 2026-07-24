@@ -26,6 +26,7 @@ interface Props {
   primaryWaitRemaining: number | null
   serverNowMs: number
   volumeState: string
+  volumeDetail: string
   plainText: string
   bodyRef: RefObject<HTMLDivElement | null>
   followTailRef: MutableRefObject<boolean>
@@ -39,7 +40,7 @@ export function LogDrawerView(props: Props) {
   const {
     account, tab, setTab, connection, monitor, monitorLoading, systemLines,
     systemLoading, error, clearArmed, clearBusy, loadOlderBusy, primaryWait,
-    primaryWaitRemaining, serverNowMs, volumeState, plainText, bodyRef,
+    primaryWaitRemaining, serverNowMs, volumeState, volumeDetail, plainText, bodyRef,
     followTailRef, onClose, onDownload, onClear, onLoadOlder,
   } = props
   return <div className="drawer-backdrop" role="presentation" onMouseDown={onClose}>
@@ -70,7 +71,7 @@ export function LogDrawerView(props: Props) {
               <div className="monitor-metric-primary"><span>本次已核验 / 目标</span><strong>{quote(monitor.verifiedQuoteVolume)} / {quote(monitor.targetQuoteVolume)} USDT</strong></div><div className="monitor-metric-primary"><span>剩余目标</span><strong>{quote(monitor.remainingQuoteVolume)} USDT</strong></div>
               <div><span>状态 / 阶段</span><strong>{monitor.status} / {monitor.phase}</strong></div><div><span>运行 / 轮次</span><strong>{monitor.currentRun || '-'} / {monitor.currentRound || '-'}</strong></div>
               <div><span>BTC / ETH 成交量</span><strong>{quote(monitor.btcQuoteVolume)} / {quote(monitor.ethQuoteVolume)} USDT</strong></div><div><span>Maker / Taker / Unknown</span><strong>{monitor.makerFillCount} / {monitor.takerFillCount} / {monitor.unknownFillCount}</strong></div>
-              <div><span>挂单 / 撤单 / requote</span><strong>{monitor.submissions} / {monitor.cancels} / {monitor.requotes}</strong></div><div><span>数据来源</span><strong className={monitor.volumeSource !== 'ledger' || monitor.stale || monitor.reconciliationRequired ? 'monitor-unverified' : 'monitor-verified'}>{volumeState}</strong>{monitor.volumeSource === 'execution_journal' && <small className="monitor-ledger-progress">账本已同步 {quote(monitor.ledgerVerifiedQuoteVolume)} USDT · 最终完成仍待审计</small>}</div>
+              <div><span>挂单 / 撤单 / requote</span><strong>{monitor.submissions} / {monitor.cancels} / {monitor.requotes}</strong></div><div><span>数据来源</span><strong className={monitor.auditStatus !== 'verified' || monitor.ledgerSyncState !== 'complete' ? 'monitor-unverified' : 'monitor-verified'}>{volumeState}</strong>{volumeDetail && <small className="monitor-ledger-progress">{volumeDetail}</small>}</div>
             </section>
             <section className="active-waits" aria-label="当前等待"><header><span>当前活动</span><small>{monitor.activeWaits.length ? `${monitor.activeWaits.length} 项并行等待` : '无活动等待'}</small></header>
               {monitor.activeWaits.map((wait) => { const delta = Math.max(0, serverNowMs - wait.updatedAtMs); const elapsed = wait.startedAtMs != null ? Math.max(0, serverNowMs - wait.startedAtMs) : wait.elapsedMs + delta; const remaining = wait.remainingMs === null ? null : Math.max(0, wait.deadlineAtMs != null ? wait.deadlineAtMs - serverNowMs : wait.remainingMs - delta); const total = remaining === null ? 0 : Math.max(1, elapsed + remaining); return <div className="active-wait-row" key={wait.key}><LoaderCircle className="spin" size={14} /><div><strong>{wait.label}</strong>{wait.detail && <span>{wait.detail}</span>}</div><time>已等待 {(elapsed / 1000).toFixed(1)}s{remaining !== null && <> / 剩余 {(remaining / 1000).toFixed(1)}s</>}</time>{remaining !== null && <span className="wait-progress"><i style={{ width: `${Math.min(100, elapsed / total * 100)}%` }} /></span>}</div> })}

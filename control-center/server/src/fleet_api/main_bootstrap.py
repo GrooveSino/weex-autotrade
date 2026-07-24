@@ -11,10 +11,11 @@ from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignB
 
 from .beta_allocation import HttpBetaAllocationProvider
 from .beta_source import BetaSourceRuntime, InMemoryBetaSourceStore, SQLiteBetaSourceStore
+from .campaign_beta_provider import CachedCampaignBetaProvider
 from .campaigns import CampaignWorkerManager, InMemoryCampaignJournal, SQLiteCampaignJournal
 from .command_ledger import CommandReceiptLedger
 from .config import ControlPlaneSettings
-from .events import InstanceEventBroker
+from .events import InstanceEventBroker, StrategyMonitorEventBroker
 from .execution import (
     InMemoryExecutionJournal,
     MockPairedExecutionAdapterFactory,
@@ -81,6 +82,7 @@ def build_context(settings: ControlPlaneSettings, *, require_command_id: bool) -
     ctx.executor_generation = uuid4().hex
     ctx.executor_release_id = os.environ.get("FLEET_EXECUTOR_RELEASE_ID", "dev").strip() or "dev"
     ctx.broker = InstanceEventBroker(ctx.executor_generation)
+    ctx.strategy_monitor_event_broker = StrategyMonitorEventBroker()
     ctx.execution_journal.recover_incomplete()
     ctx.beta_source_runtime = BetaSourceRuntime(
         ctx.beta_source_store,
@@ -116,6 +118,7 @@ def finish_context(
         ctx.campaign_journal,
         lambda: _live_campaign_provider(ctx),
         on_change=ctx.notify_campaign_change,
+        on_progress=ctx.notify_strategy_monitor_event,
         on_execution_claim=ctx.establish_bound_strategy_session,
         executor_generation=ctx.executor_generation,
     )
@@ -189,10 +192,13 @@ def _live_campaign_provider(ctx: FleetAppContext) -> LiveCampaignBetaAllocationP
     # external embedders while keeping composition in this focused module.
     from . import main as main_api
 
-    return main_api.LiveCampaignBetaAllocationProvider(
-        ctx.beta_source_runtime.settings.url,
-        timeout_seconds=ctx.beta_source_runtime.settings.timeout_seconds,
-        allow_low_confidence=True,
+    return CachedCampaignBetaProvider(
+        ctx.beta_source_runtime,
+        main_api.LiveCampaignBetaAllocationProvider(
+            ctx.beta_source_runtime.settings.url,
+            timeout_seconds=ctx.beta_source_runtime.settings.timeout_seconds,
+            allow_low_confidence=True,
+        ),
     )
 
 
@@ -200,4 +206,4 @@ def _needs_history_sync(ctx: FleetAppContext, instance) -> bool:
     if instance.mode.value != "live":
         return instance.status.value == "running"
     lifecycle = ctx.strategy_run_lifecycle.projection(instance.id, instance.mode.value)
-    return lifecycle.state in {"running", "stopping", "cleanup_required"}
+    return lifecycle.state in {"running", "stopping"}

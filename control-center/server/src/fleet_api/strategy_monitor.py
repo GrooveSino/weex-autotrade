@@ -9,13 +9,20 @@ from typing import Any
 from weex_cli.execution_progress import (
     EXECUTION_PROGRESS_PROJECTION_VERSION,
     ExecutionProgressProjector,
-    event_name,
 )
 
 from .campaigns import CampaignJournal, CampaignRecord, ExecutionMonitorProjection
-from .models import ActiveExecutionWait, ExecutionTimelineEntry, LogLevel, StrategyMonitorSnapshot
+from .models import ActiveExecutionWait, StrategyMonitorSnapshot
 from .ownership import LEGACY_OWNER_USER_ID
-from .strategy_monitor_actor import actor_timeline_entry, latest_actor_lifecycle, merge_actor_waits
+from .strategy_monitor_actor import latest_actor_lifecycle, merge_actor_waits
+from .strategy_monitor_snapshot_helpers import (
+    decimal_value,
+    monitor_boundary_state,
+    nonnegative_int,
+    recovery_phase,
+    text_or_none,
+    timeline_entries,
+)
 from .volume_history import TradeVolumeLedger
 
 
@@ -71,7 +78,7 @@ class StrategyMonitorService:
         projection_version = projection.projection_version if projection is not None else 0
         projection_lag = max(0, latest_sequence - projected_sequence)
 
-        selected_session_id = _text_or_none(record.metadata.get("session_id"))
+        selected_session_id = text_or_none(record.metadata.get("session_id"))
         # Releases before the session ledger migration can leave a campaign
         # journal behind without its matching volume session.  A monitor read
         # must remain read-only and explicit about that gap; raising here turns
@@ -83,29 +90,46 @@ class StrategyMonitorService:
             session = None
             missing_session = True
         started_at_ms = int(session.get("started_at_ms") or 0) if session else 0
+        finished_at_ms = nonnegative_int(session.get("finished_at_ms")) or None if session else None
         fills = (
             [
                 fill
                 for fill in self.ledger.fills_for_account(instance_id, "live", started_at_ms)
-                if fill.authoritative and fill.executed_at_ms >= started_at_ms
+                if fill.authoritative and (finished_at_ms is None or fill.executed_at_ms <= finished_at_ms)
             ]
             if session
             else []
         )
         btc_quote = sum((fill.quote_volume for fill in fills if fill.symbol.upper().startswith("BTC")), Decimal(0))
         eth_quote = sum((fill.quote_volume for fill in fills if fill.symbol.upper().startswith("ETH")), Decimal(0))
-        target_quote = _decimal(session, "target_quote_volume", record.campaign.target_turnover_quote)
-        ledger_verified = _decimal(session, "verified_quote_volume")
-        journal_verified = _decimal(state, "execution_verified_quote_volume")
-        journal_btc = _decimal(state, "btc_quote_volume")
-        journal_eth = _decimal(state, "eth_quote_volume")
+        target_quote = decimal_value(session, "target_quote_volume", record.campaign.target_turnover_quote)
+        ledger_verified = decimal_value(session, "verified_quote_volume")
+        journal_verified = decimal_value(state, "execution_verified_quote_volume")
+        journal_btc = decimal_value(state, "btc_quote_volume")
+        journal_eth = decimal_value(state, "eth_quote_volume")
+        journal_unknown_fills = nonnegative_int(state.get("execution_unknown_fill_count"))
         rows = event_rows if event_rows is not None else stored_rows
-        actor = latest_actor_lifecycle(rows)
-        timeline = _timeline(record.campaign_id, rows)[-limit:]
+        # A delta may contain only a fill or wait event.  Actor lifecycle is
+        # durable execution state, not a timeline-only detail, so resolve it
+        # from the persisted window rather than dropping queue/phase state
+        # whenever the latest delta has no actor_lifecycle event.
+        actor = latest_actor_lifecycle(stored_rows)
+        timeline = timeline_entries(record.campaign_id, rows)[-limit:]
         first_sequence = int(rows[0].get("sequence") or 0) if rows else 0
         cursor = self.cursor(record.campaign_id, projected_sequence) if projected_sequence else None
         session_stale = bool(session.get("stale", True)) if session else True
         reconciliation_required = bool(session.get("reconciliation_required", False)) if session else missing_session
+        pending_sync = bool(session.get("pending_sync", False)) if session else False
+        audit_status = str(session.get("audit_status") or "pending") if session else "pending"
+        ledger_sync_state = (
+            "queued"
+            if pending_sync
+            else "stale"
+            if session_stale
+            else "complete"
+            if session and session.get("source_complete")
+            else "idle"
+        )
         freshness = (
             "rebuilding" if projection_lag else "stale" if session_stale or reconciliation_required else "current"
         )
@@ -121,17 +145,26 @@ class StrategyMonitorService:
             remaining_quote = max(target_quote - verified_quote, Decimal(0))
             btc_quote = journal_btc
             eth_quote = journal_eth
+            maker_fill_count = 0
+            taker_fill_count = 0
+            unknown_fill_count = journal_unknown_fills
         else:
             verified_quote = ledger_verified
             remaining_quote = max(target_quote - verified_quote, Decimal(0))
+            maker_fill_count = sum(1 for fill in fills if fill.maker is True)
+            taker_fill_count = sum(1 for fill in fills if fill.maker is False)
+            unknown_fill_count = sum(1 for fill in fills if fill.maker is None)
         active_waits = [ActiveExecutionWait.model_validate(wait) for wait in state.get("active_waits", [])]
         active_waits = merge_actor_waits(
             active_waits,
             actor,
             updated_at_ms=projection.updated_at_ms if projection is not None else server_time_ms,
         )
+        recovery_state = text_or_none(record.metadata.get("recovery_state"))
         display_phase = (
-            actor.phase
+            recovery_phase(recovery_state, record.metadata.get("reason"))
+            if record.status in {"recovering", "uncertain"}
+            else actor.phase
             if actor is not None
             and actor.execution_state in {"admitted", "preparing", "phase_queued", "stopping", "recovering"}
             else str(state.get("phase") or record.metadata.get("phase") or "启动")
@@ -164,11 +197,17 @@ class StrategyMonitorService:
             source_complete=bool(session.get("source_complete", False)) if session else False,
             stale=session_stale,
             reconciliation_required=reconciliation_required,
+            ledger_sync_state=ledger_sync_state,
+            audit_status=audit_status if audit_status in {"verified", "pending", "discrepant"} else "pending",
+            recovery_state=recovery_state,
+            recovery_attempt=nonnegative_int(record.metadata.get("recovery_attempt")),
+            next_recovery_check_at_ms=nonnegative_int(record.metadata.get("next_recovery_check_at_ms")) or None,
+            boundary_state=monitor_boundary_state(record),
             btc_quote_volume=btc_quote,
             eth_quote_volume=eth_quote,
-            maker_fill_count=sum(1 for fill in fills if fill.maker is True),
-            taker_fill_count=sum(1 for fill in fills if fill.maker is False),
-            unknown_fill_count=sum(1 for fill in fills if fill.maker is None),
+            maker_fill_count=maker_fill_count,
+            taker_fill_count=taker_fill_count,
+            unknown_fill_count=unknown_fill_count,
             submissions=int(state.get("submissions") or 0),
             cancels=int(state.get("cancels") or 0),
             requotes=int(state.get("requotes") or 0),
@@ -271,7 +310,7 @@ class StrategyMonitorService:
             owner_user_id=str(record.metadata.get("owner_user_id") or LEGACY_OWNER_USER_ID),
             account_id=record.instance_id,
             execution_id=record.campaign_id,
-            session_id=_text_or_none(record.metadata.get("session_id")),
+            session_id=text_or_none(record.metadata.get("session_id")),
             executor_generation=self.executor_generation,
             projected_sequence=sequence,
             projection_version=EXECUTION_PROGRESS_PROJECTION_VERSION,
@@ -280,43 +319,3 @@ class StrategyMonitorService:
         )
         self.journal.replace_monitor_projection(rebuilt)
         return self.journal.monitor_projection(record.campaign_id)
-
-
-def _timeline(campaign_id: str, rows: list[dict[str, Any]]) -> list[ExecutionTimelineEntry]:
-    projector = ExecutionProgressProjector()
-    timeline: list[ExecutionTimelineEntry] = []
-    for event in rows:
-        actor_entry = actor_timeline_entry(campaign_id, event)
-        if actor_entry is not None:
-            timeline.append(actor_entry)
-            continue
-        presentation = projector.apply(event, at_ms=int(event.get("at_ms") or 0))
-        if presentation is None:
-            continue
-        sequence = int(event.get("sequence") or 0)
-        timeline.append(
-            ExecutionTimelineEntry(
-                id=f"{campaign_id}:{sequence}",
-                sequence=sequence,
-                at_ms=int(event.get("at_ms") or 0),
-                level=LogLevel(presentation.level),
-                event_name=event_name(event),
-                title=presentation.title,
-                detail=presentation.detail,
-            )
-        )
-    return timeline
-
-
-def _decimal(source: dict[str, object] | None, key: str, default: Decimal = Decimal(0)) -> Decimal:
-    if source is None or source.get(key) is None:
-        return default
-    try:
-        value = Decimal(str(source[key]))
-    except Exception:  # noqa: BLE001 - malformed display data fails closed to zero
-        return default
-    return value if value.is_finite() else default
-
-
-def _text_or_none(value: object) -> str | None:
-    return str(value) if isinstance(value, str) and value else None

@@ -2,34 +2,34 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
-from contextlib import ExitStack
 from decimal import Decimal
 from hashlib import sha256
 from typing import Any
+from uuid import uuid4
 
-from weex_cli.beta_campaign import BetaVolumeCampaignStore, LiveBetaVolumeCampaignService, live_profile_fingerprint
-from weex_cli.beta_volume import BetaVolumePlanStore, LiveBetaVolumeService
-from weex_cli.live_websocket import WeexPrivateOrderStream, WeexPublicOrderBookStream
+from weex_cli.beta_volume import BetaVolumePlanStore
 
 from .async_execution_orchestrator import AsyncExecutionOrchestrator
-from .campaign_actor_models import CampaignPhaseEnvironment
+from .campaign_actor_models import CampaignActorContext, OpenCycle
 from .campaign_actor_phases import CampaignActorPhases
 from .campaign_actor_program import CampaignActorProgram
+from .campaign_actor_resources import CampaignActorResourceMixin
 from .campaign_contracts import CampaignRecord
 from .campaign_events import _sanitize_event, submission_attempted
 from .campaign_helpers import _campaign_result_metrics, _worker_exception_reason
 from .campaign_monitor_publish import publish_monitor_event
+from .campaign_recovery_program import CampaignRecoveryProgram
 from .execution_actor_state import ExecutionActorState
-from .execution_io import BoundedGateway
 from .models import BetaCampaignStatus
 from .vault import CredentialMaterial
 
 
-class CampaignActorRuntimeMixin:
+class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
     """Use one async actor per account while retaining the durable Campaign journal."""
 
     def _create_actor_runtime(self) -> None:
@@ -50,6 +50,7 @@ class CampaignActorRuntimeMixin:
         phase_factory = CampaignActorPhases(
             lambda phase: self._actor_environment(record, material, stop, phase),
             is_stopping=stop.is_set,
+            ownership_sink=lambda opened, state: self._persist_actor_ownership(record, opened, state),
         )
         proxy_key = self._proxy_key(material)
         program = CampaignActorProgram(
@@ -65,88 +66,96 @@ class CampaignActorRuntimeMixin:
         future.add_done_callback(lambda _future: self._release_actor(record.campaign_id, record.instance_id))
         return future
 
-    def _actor_environment(
+    def _start_recovery_actor(
         self,
         record: CampaignRecord,
         material: CredentialMaterial,
         stop: threading.Event,
-        phase: str,
-    ) -> CampaignPhaseEnvironment:
-        profile, raw_gateway = self._profile_and_gateway(material)
-        gateway = BoundedGateway(raw_gateway, self.io_budget, stop)
-        lanes: dict[str, BoundedGateway] = {}
-        leases = ExitStack()
-        try:
-            lanes = {"BTC": gateway.fork(), "ETH": gateway.fork()}
-            provider = self.beta_provider_factory()
-            event_sink = self._actor_event_sink(record)
-            campaign_store = BetaVolumeCampaignStore(self.settings.campaign_data_directory / record.instance_id)
-            child_store = BetaVolumePlanStore(self.settings.campaign_data_directory / record.instance_id / "plans")
-            market_data, order_updates = self._phase_streams(
-                leases,
-                phase=phase,
-                profile=profile,
-                gateway=gateway,
-                instance_id=record.instance_id,
-                proxy_key=self._proxy_key(material),
-            )
-            campaign_service = LiveBetaVolumeCampaignService(
-                gateway,
-                provider,
-                campaign_store,
-                child_store,
-                profile_fingerprint=live_profile_fingerprint(profile),
-                event_sink=event_sink,
-                lane_gateways=lanes,
-                market_data=market_data,
-                order_updates=order_updates,
-                stop_requested=stop.is_set,
-            )
-            volume_service = LiveBetaVolumeService(
-                gateway,
-                provider,
-                child_store,
-                event_sink=event_sink,
-                lane_gateways=lanes,
-                market_data=market_data,
-                order_updates=order_updates,
-                stop_requested=stop.is_set,
-            )
-            return CampaignPhaseEnvironment(
-                campaign_service,
-                volume_service,
-                lambda: _close_actor_environment(leases, gateway, lanes),
-            )
-        except Exception:
-            leases.close()
-            _close_environment(gateway, lanes)
-            raise
+    ) -> Future[None]:
+        opened = self._recovery_open_cycle(record)
+        phases = CampaignActorPhases(
+            lambda phase: self._actor_environment(record, material, stop, phase),
+            is_stopping=lambda: True,
+            ownership_sink=lambda cycle, state: self._persist_actor_ownership(record, cycle, state),
+        )
+        program = CampaignRecoveryProgram(
+            phases,
+            opened,
+            on_result=lambda result: self._actor_completed(record, material, result),
+            on_failure=lambda error: self._actor_failed(record, error),
+        )
+        future = self._actor_runtime.start(record.campaign_id, record.instance_id, program)
+        with self._lock:
+            self._actor_futures[record.campaign_id] = future
+        future.add_done_callback(lambda _future: self._release_actor(record.campaign_id, record.instance_id))
+        return future
 
-    def _phase_streams(
-        self,
-        leases: ExitStack,
-        *,
-        phase: str,
-        profile: Any,
-        gateway: BoundedGateway,
-        instance_id: str,
-        proxy_key: str,
-    ) -> tuple[Any | None, Any | None]:
-        if not self.settings.live_campaign_websockets_enabled or phase not in {"open", "close", "safe_stop"}:
-            return None, None
-        market_data = leases.enter_context(
-            self.market_data_hub.lease(
-                proxy_key,
-                lambda: _open_public_market_stream(gateway.fork(), profile.proxy_url),
+    def _recovery_open_cycle(self, record: CampaignRecord) -> OpenCycle:
+        ownership = record.metadata.get("execution_ownership")
+        if not isinstance(ownership, Mapping) or ownership.get("state") not in {"opened", "uncertain", "closed"}:
+            raise ValueError("execution ownership is unavailable")
+        plan_id = str(ownership.get("plan_id") or "")
+        child_store = BetaVolumePlanStore(self.settings.campaign_data_directory / record.instance_id / "plans")
+        child = child_store.load_record(plan_id).plan
+        legs = ownership.get("legs") if isinstance(ownership.get("legs"), Mapping) else {}
+        summaries = []
+        for symbol in ("BTC", "ETH"):
+            leg = legs.get(symbol) if isinstance(legs, Mapping) else None
+            if not isinstance(leg, Mapping):
+                continue
+            summaries.append(
+                {
+                    "symbol": symbol,
+                    "action": "open",
+                    "position_side": str(leg.get("position_side") or ""),
+                    "executed_quantity": str(leg.get("owned_quantity") or "0"),
+                    "accounting_verified": True,
+                    "quote_volume": "0",
+                }
             )
+        context = CampaignActorContext(
+            child=child,
+            run_number=1,
+            execution_started_at_ms=int(record.metadata.get("started_at_ms") or record.campaign.created_at_ms),
+            round_number=int(ownership.get("round") or 1),
         )
-        order_updates = leases.enter_context(
-            self.private_order_stream_pool.lease(
-                instance_id,
-                lambda: _open_private_order_stream(profile.settings.require_credentials(), profile.proxy_url),
-            )
+        return OpenCycle(
+            context=context,
+            preflight={},
+            btc_plan=child.btc,
+            eth_plan=child.eth,
+            sizing={"opening_notional_quote": "0"},
+            selected_leverage=record.campaign.leverage,
+            leverage_state={},
+            open_summaries=summaries,
+            lane_stops={},
+            started_at_ms=int(ownership.get("updated_at_ms") or _now_ms()),
+            hold_seconds=0,
         )
-        return market_data, order_updates
+
+    def _persist_actor_ownership(self, record: CampaignRecord, opened: Any, state: str) -> None:
+        """Persist the execution-owned quantity before a later phase may fail."""
+        from weex_cli.beta_volume import _owned_position_quantity
+
+        legs: dict[str, dict[str, str]] = {}
+        summaries = opened.context.summaries or opened.open_summaries
+        for symbol, plan in (("BTC", opened.btc_plan), ("ETH", opened.eth_plan)):
+            legs[symbol] = {
+                "position_side": plan.position_side,
+                "planned_quantity": str(plan.quantity),
+                "owned_quantity": str(_owned_position_quantity(summaries, symbol, plan.position_side)),
+                "amount_step": str(plan.amount_step),
+            }
+        payload = {
+            "plan_id": opened.context.child.plan_id,
+            "round": opened.context.round_number,
+            "state": state,
+            "legs": legs,
+            "updated_at_ms": _now_ms(),
+        }
+        self.write_coordinator.critical(
+            lambda: self.journal.update(record.campaign_id, execution_ownership=payload)
+        )
 
     def _actor_event_sink(self, record: CampaignRecord) -> Callable[[Mapping[str, Any]], None]:
         def sink(payload: Mapping[str, Any]) -> None:
@@ -223,17 +232,32 @@ class CampaignActorRuntimeMixin:
         )
 
     def _actor_failed(self, record: CampaignRecord, error: Exception) -> None:
+        error_id = uuid4().hex[:12]
+        logging.getLogger(__name__).error(
+            "campaign actor failed error_id=%s campaign_id=%s",
+            error_id,
+            record.campaign_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         reason = _worker_exception_reason(error)
         latest = self.journal.get(record.campaign_id) or record
         attempted = submission_attempted(latest)
         status = BetaCampaignStatus.RECOVERING.value if attempted else BetaCampaignStatus.STOPPED.value
         stored_reason = reason if attempted else f"launch_aborted:{reason}"
-        self.journal.update(record.campaign_id, status=status, finished_at_ms=_now_ms(), reason=stored_reason)
+        self.journal.update(
+            record.campaign_id,
+            status=status,
+            finished_at_ms=_now_ms(),
+            reason=stored_reason,
+            error_id=error_id,
+            failure_phase="actor",
+        )
         event = _sanitize_event(
             {
                 "event": "campaign_recovering" if attempted else "launch_aborted",
                 "error": type(error).__name__,
                 "reason": stored_reason,
+                "error_id": error_id,
             }
         )
         event["sequence"] = self._append_monitor_event(record, event)
@@ -256,6 +280,11 @@ class CampaignActorRuntimeMixin:
 
     def connection_snapshots(self):  # type: ignore[no-untyped-def]
         return self.market_data_hub.snapshot(), self.private_order_stream_pool.snapshot()
+
+    def collect_connections(self) -> None:
+        """Close released streams once their bounded idle period has elapsed."""
+        self.market_data_hub.collect()
+        self.private_order_stream_pool.collect()
 
     def _read_ending_available(self, material: CredentialMaterial) -> str | None:
         gateway = None
@@ -286,43 +315,6 @@ def _ending_available_quote(result: Mapping[str, Any]) -> str | None:
             return None
         return format(value, "f") if value.is_finite() else None
     return None
-
-
-def _close_environment(gateway: BoundedGateway, lanes: Mapping[str, BoundedGateway]) -> None:
-    for lane in lanes.values():
-        lane.close()
-    gateway.close()
-
-
-def _close_actor_environment(leases: ExitStack, gateway: BoundedGateway, lanes: Mapping[str, BoundedGateway]) -> None:
-    leases.close()
-    _close_environment(gateway, lanes)
-
-
-class _PublicMarketStream:
-    """Own the snapshot gateway for a public stream shared by one proxy key."""
-
-    def __init__(self, snapshot_gateway: BoundedGateway, proxy_url: str | None) -> None:
-        self._snapshot_gateway = snapshot_gateway
-        self._stream = WeexPublicOrderBookStream(snapshot_gateway, proxy_url=proxy_url)
-        self._stream.start()
-
-    def order_book(self, symbol: str, limit: int = 5) -> dict[str, Any]:
-        return self._stream.order_book(symbol, limit)
-
-    def close(self) -> None:
-        self._stream.close()
-        self._snapshot_gateway.close()
-
-
-def _open_public_market_stream(snapshot_gateway: BoundedGateway, proxy_url: str | None) -> _PublicMarketStream:
-    return _PublicMarketStream(snapshot_gateway, proxy_url)
-
-
-def _open_private_order_stream(credentials: Any, proxy_url: str | None) -> WeexPrivateOrderStream:
-    stream = WeexPrivateOrderStream(credentials, proxy_url=proxy_url)
-    stream.start()
-    return stream
 
 
 def _now_ms() -> int:

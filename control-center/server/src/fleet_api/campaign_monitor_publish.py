@@ -17,6 +17,11 @@ _COALESCED_EVENTS = frozenset({"leg_progress", "leg_waiting", "pair_wait_progres
 def publish_monitor_event(manager: Any, record: CampaignRecord, event: dict[str, Any]) -> None:
     """Publish durable monitor data after it commits, coalescing wait heartbeats."""
     if str(event.get("name") or "") not in _COALESCED_EVENTS:
+        # A state boundary supersedes an uncommitted wait heartbeat from this
+        # execution.  Dropping that obsolete write keeps it from resurrecting
+        # an active wait after a completion/cancel event, and it lets critical
+        # order boundaries bypass unrelated accounts' heartbeat backlogs.
+        manager.write_coordinator.discard_low_priority(f"monitor:{record.campaign_id}:heartbeat")
         _publish_committed(manager, record, event, manager._append_monitor_event(record, event))
         return
     key = f"monitor:{record.campaign_id}:heartbeat"

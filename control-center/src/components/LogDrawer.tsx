@@ -7,7 +7,7 @@ import {
 } from '../services/controlCenter'
 import type { AccountInstance, LogLine, StrategyMonitorSnapshot } from '../types'
 import { LogDrawerView } from './LogDrawerView'
-import { formatExecutionDurations, levelLabel, mergeMonitor } from './logDrawerFormat'
+import { formatExecutionDurations, levelLabel, mergeMonitor, quote } from './logDrawerFormat'
 
 interface LogDrawerProps {
   account: AccountInstance | null
@@ -256,11 +256,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
         ? primaryWait.deadlineAtMs - serverNowMs
         : primaryWait.remainingMs - primaryWaitDelta,
     )
-  const volumeState = monitor?.volumeSource === 'ledger'
-    ? '权威成交账本已同步'
-    : monitor?.volumeSource === 'execution_journal'
-      ? '执行器已核验 · 成交账本同步中'
-      : '等待首笔权威成交'
+  const { volumeState, volumeDetail } = monitorVolumePresentation(monitor)
 
   return <LogDrawerView
     account={account}
@@ -279,6 +275,7 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
     primaryWaitRemaining={primaryWaitRemaining}
     serverNowMs={serverNowMs}
     volumeState={volumeState}
+    volumeDetail={volumeDetail}
     plainText={plainText}
     bodyRef={bodyRef}
     followTailRef={followTailRef}
@@ -287,4 +284,36 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
     onClear={() => void clearSystemLogs()}
     onLoadOlder={() => void loadOlder()}
   />
+}
+
+function monitorVolumePresentation(monitor: StrategyMonitorSnapshot | null) {
+  if (!monitor) return { volumeState: '等待执行数据', volumeDetail: '' }
+  if (monitor.ledgerSyncState === 'queued' || monitor.ledgerSyncState === 'syncing') {
+    return {
+      volumeState: monitor.ledgerSyncState === 'syncing' ? '成交账本同步中' : '成交账本已排队同步',
+      volumeDetail: `当前已核验 ${quote(monitor.verifiedQuoteVolume)} USDT`,
+    }
+  }
+  if (monitor.boundaryState === 'owned_exposure') {
+    return { volumeState: '开仓成交已同步，任务尚未完成平仓', volumeDetail: '' }
+  }
+  if (monitor.boundaryState === 'flat' && monitor.auditStatus !== 'verified') {
+    return { volumeState: '账户已空仓，成交审计待完成', volumeDetail: '' }
+  }
+  if (monitor.ledgerSyncState === 'complete' && monitor.auditStatus !== 'verified') {
+    return {
+      volumeState: '成交账本已同步，任务收尾待完成',
+      volumeDetail: `账本已核验 ${quote(monitor.ledgerVerifiedQuoteVolume)} USDT`,
+    }
+  }
+  if (monitor.ledgerSyncState === 'complete' && monitor.auditStatus === 'verified') {
+    return { volumeState: '权威成交账本已同步', volumeDetail: '' }
+  }
+  if (monitor.ledgerSyncState === 'stale') {
+    return { volumeState: '成交账本数据待核验', volumeDetail: `账本已有 ${quote(monitor.ledgerVerifiedQuoteVolume)} USDT` }
+  }
+  if (monitor.volumeSource === 'execution_journal') {
+    return { volumeState: '执行器成交已核验，账本待更新', volumeDetail: `账本已有 ${quote(monitor.ledgerVerifiedQuoteVolume)} USDT` }
+  }
+  return { volumeState: '等待首笔权威成交', volumeDetail: '' }
 }

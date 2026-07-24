@@ -13,8 +13,10 @@ from weex_cli.beta_volume import (
     PairLegPlan,
     _accounting_summary,
     _Lane,
+    _owned_position_quantity,
     _signed_open_quantity,
 )
+from weex_cli.errors import SafetyError
 from weex_cli.models import decimal_text
 
 from .campaign_actor_models import OpenCycle
@@ -31,7 +33,7 @@ def observe_positions(
     *,
     action: str = "cycle_check",
 ) -> dict[str, Decimal | None]:
-    return {
+    observed = {
         symbol: service._observe_position(
             lane.venue,
             round_number=round_number,
@@ -41,6 +43,19 @@ def observe_positions(
         )
         for symbol, lane in lanes.items()
     }
+    positions: dict[str, Decimal | None] = {}
+    for symbol, value in observed.items():
+        if value is None:
+            positions[symbol] = None
+            continue
+        try:
+            quantity = Decimal(str(value))
+        except (ArithmeticError, ValueError) as exc:
+            raise SafetyError("position quantity observation is invalid") from exc
+        if not quantity.is_finite():
+            raise SafetyError("position quantity observation is invalid")
+        positions[symbol] = quantity
+    return positions
 
 
 def targets_reached(
@@ -99,6 +114,11 @@ def close_lanes(
                     offset,
                     plans[symbol],
                     lanes[symbol],
+                    owned_quantity=_owned_position_quantity(
+                        opened.open_summaries,
+                        symbol,
+                        plans[symbol].position_side,
+                    ),
                 )
         if jobs:
             service._emit("pair_waiting", round=opened.context.round_number, action="close", symbols=tuple(jobs))

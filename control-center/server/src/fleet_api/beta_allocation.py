@@ -76,6 +76,10 @@ class HttpBetaAllocationProvider:
         payload, _request_elapsed_seconds = await self._request_payload()
         return parse_market_snapshot(payload)
 
+    def cached_market_snapshot(self) -> BetaMarketSnapshot:
+        """Return the locally refreshed snapshot without performing network I/O."""
+        return self._cached_market_snapshot()
+
     async def refresh(self) -> bool:
         """Refresh the shared snapshot once; centralized consumers never call the upstream."""
         async with self._lock:

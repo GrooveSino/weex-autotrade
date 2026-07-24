@@ -197,6 +197,16 @@ class WeexGateway:
             raise ValidationError("WEEX market metadata has no positive amount precision")
         return step
 
+    def minimum_amount(self, symbol: str) -> Decimal | None:
+        client = self.public_client()
+        client.load_markets()
+        market = client.market(ccxt_swap_symbol(symbol))
+        value = ((market.get("limits") or {}).get("amount") or {}).get("min")
+        if value is None:
+            return None
+        minimum = Decimal(str(value))
+        return minimum if minimum.is_finite() and minimum > 0 else None
+
     def cancel_order(self, symbol: str, order_id: str, *, trigger: bool = False, mode: str = "live") -> Any:
         if mode == "demo":
             if trigger:
@@ -250,6 +260,16 @@ class WeexGateway:
         if position_side:
             payload["positionId"] = _position_id_for_side(self.positions("live", symbol), position_side)
         return self._raw("capi/v3/closePositions", "POST", payload)
+
+    def close_position_id(self, symbol: str, position_id: str) -> Any:
+        normalized = str(position_id).strip()
+        if not normalized.isdigit() or len(normalized) > 20:
+            raise ValidationError("WEEX position ID is invalid")
+        return self._raw(
+            "capi/v3/closePositions",
+            "POST",
+            {"symbol": live_symbol_id(symbol), "positionId": int(normalized)},
+        )
 
     def close_all_positions(self) -> Any:
         return self._raw("capi/v3/closePositions", "POST")

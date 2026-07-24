@@ -125,6 +125,7 @@ class TradeHistorySyncScheduler:
         if instance is None:
             return False
         if not self._may_run(instance, request.reason):
+            self._mark_ineligible(instance)
             return False
         await self._run_request(instance, request)
         return True
@@ -221,6 +222,16 @@ class TradeHistorySyncScheduler:
             values["initial_baseline_state"] = baseline
         self._ledger.save_sync_checkpoint(instance.id, instance.mode.value, **values)
 
+    def _mark_ineligible(self, instance: AccountInstance) -> None:
+        """Clear an active-only request after the account reached a quiet state."""
+        self._ledger.save_sync_checkpoint(
+            instance.id,
+            instance.mode.value,
+            pending=False,
+            sync_reason=None,
+            next_sync_at_ms=None,
+        )
+
     def _after_step(self, instance: AccountInstance, reason: str, result: TradeHistorySyncResult) -> None:
         checkpoint = self._ledger.sync_checkpoint(instance.id, instance.mode.value) or {}
         more_pages = result.next_cursor is not None and result.stop_reason == "page_step"
@@ -244,8 +255,11 @@ class TradeHistorySyncScheduler:
 
 def _priority(reason: str) -> int:
     return {
+        # A terminal session sync is the final authoritative accounting pass.
+        # It must replace any stale active-event request queued immediately
+        # before the worker reached its terminal state.
+        FINAL_SESSION: 35,
         ACTIVE_EVENT: 30,
-        FINAL_SESSION: 25,
         MANUAL_AUDIT: 20,
         ACTIVE_FALLBACK: 10,
         INITIAL_BASELINE: 1,

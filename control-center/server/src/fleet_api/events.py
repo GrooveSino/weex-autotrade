@@ -81,3 +81,30 @@ class InstanceEventBroker:
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+
+class StrategyMonitorEventBroker:
+    """Coalesced in-process wakeups for durable strategy-monitor events."""
+
+    def __init__(self) -> None:
+        self._subscribers: dict[asyncio.Queue[None], str] = {}
+
+    def subscribe(self, instance_id: str) -> asyncio.Queue[None]:
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        self._subscribers[queue] = instance_id
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[None]) -> None:
+        self._subscribers.pop(queue, None)
+
+    def publish(self, instance_id: str) -> None:
+        for queue, subscribed_instance_id in tuple(self._subscribers.items()):
+            if subscribed_instance_id != instance_id:
+                continue
+            if queue.full():
+                continue
+            queue.put_nowait(None)
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)

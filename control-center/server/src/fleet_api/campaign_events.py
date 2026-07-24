@@ -44,6 +44,8 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "eth",
         "queue_phase",
         "queue_constraint",
+        "position_side",
+        "error_id",
     }
     decimal_fields = {
         "remaining_quote",
@@ -60,6 +62,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "filled_quantity",
         "order_quantity",
         "remaining_quantity",
+        "executed_quantity",
         "btc_quantity",
         "eth_quantity",
     }
@@ -79,12 +82,19 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "submissions",
         "cancels",
         "requotes",
+        "maker_count",
+        "taker_count",
+        "unknown_liquidity_count",
         "queue_position",
     }
     boolean_fields = {
         "completed",
         "flat",
         "no_orders",
+        "accounting_verified",
+        "audit_pending",
+        "dust_market_close",
+        "liquidity_policy_satisfied",
         "maker_only",
         "verified",
         "maker",
@@ -184,6 +194,11 @@ def _publishes_fleet_snapshot(name: str) -> bool:
         "phase_pacing_started",
         "phase_pacing_completed",
         "phase_pacing_cancelled",
+        "dust_close_detected",
+        "market_close_intent_persisted",
+        "market_close_accepted",
+        "market_close_verified",
+        "market_close_uncertain",
     }
 
 
@@ -259,6 +274,12 @@ def _view(record: CampaignRecord | None, *, include_events: bool = True) -> Beta
         ),
         leverage=campaign.leverage,
         margin_mode=campaign.margin_mode,
+        dust_close_policy={
+            "enabled": campaign.schema_version >= 5,
+            "maxQuote": str(campaign.dust_close_max_quote),
+            "stages": ["normal_close", "safe_stop"],
+            "marketCloseOnce": True,
+        },
         target_quote=campaign.target_turnover_quote,
         round_turnover_quote_min=campaign.round_turnover_quote_min,
         cycle_volume=campaign.round_turnover_quote,

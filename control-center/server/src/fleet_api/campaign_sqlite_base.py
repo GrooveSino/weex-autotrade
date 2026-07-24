@@ -61,6 +61,11 @@ class SQLiteCampaignJournalBase:
             );
             CREATE INDEX IF NOT EXISTS idx_execution_monitor_owner_account
                 ON execution_monitor_projections(owner_user_id, account_id, updated_at_ms DESC);
+            CREATE TABLE IF NOT EXISTS account_boundary_projections (
+                instance_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
             """
         )
         self._connection.execute(
@@ -240,9 +245,27 @@ class SQLiteCampaignJournalBase:
             )
             return int(cursor.rowcount)
 
+    def boundary_projection(self, instance_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT state_json FROM account_boundary_projections WHERE instance_id = ?",
+                (instance_id,),
+            ).fetchone()
+        return json.loads(str(row[0])) if row is not None else None
+
+    def replace_boundary_projection(self, instance_id: str, projection: dict[str, Any]) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO account_boundary_projections(instance_id, state_json, updated_at_ms) VALUES (?, ?, ?) "
+                "ON CONFLICT(instance_id) DO UPDATE SET state_json = excluded.state_json, "
+                "updated_at_ms = excluded.updated_at_ms",
+                (instance_id, json.dumps(projection, separators=(",", ":")), int(time.time() * 1000)),
+            )
+
     def remove(self, instance_id: str) -> None:
         with self._lock, self._connection:
             self._connection.execute("DELETE FROM beta_campaigns WHERE instance_id = ?", (instance_id,))
+            self._connection.execute("DELETE FROM account_boundary_projections WHERE instance_id = ?", (instance_id,))
 
     def close(self) -> None:
         with self._lock:

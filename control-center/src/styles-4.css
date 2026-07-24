@@ -1,3 +1,12 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+.boundary-blocker > .execution-warning { margin: 12px 12px 0; }
+.boundary-positions { margin: 10px 12px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.boundary-positions > div { min-width: 0; padding: 8px 9px; display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; border: 1px solid #dce4e7; border-radius: 5px; background: #fff; }
+.boundary-positions span { color: #66747e; font-size: 10px; }
+.boundary-positions strong { color: #26343d; font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.boundary-positions small { grid-column: 1 / -1; color: #8a5d2f; font-size: 10px; }
+@media (max-width: 620px) {
+  .boundary-positions { grid-template-columns: 1fr; }
+}

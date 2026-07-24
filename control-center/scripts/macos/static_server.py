@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -62,7 +62,9 @@ class FleetStaticHandler(SimpleHTTPRequestHandler):
         except (OSError, json.JSONDecodeError):
             manifest = {
                 "release_id": "development",
-                "built_at": datetime.now(UTC).isoformat(),
+                # The web LaunchAgent deliberately uses macOS Python 3.9,
+                # which does not provide datetime.UTC.
+                "built_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 "api_compatibility": "v1",
                 "assets": [],
                 "asset_count": 0,

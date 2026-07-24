@@ -23,6 +23,14 @@ class _PrioritySource(Protocol):
     def is_set(self) -> bool: ...
 
 
+class _NormalPriority:
+    def is_set(self) -> bool:
+        return False
+
+
+NORMAL_IO_PRIORITY = _NormalPriority()
+
+
 T = TypeVar("T")
 
 
@@ -93,9 +101,10 @@ class BoundedGateway:
         object.__setattr__(self, "_budget", budget)
         object.__setattr__(self, "_emergency", emergency)
 
-    def fork(self) -> BoundedGateway:
-        gateway = self._budget.call(self._gateway.fork, emergency=self._emergency.is_set())
-        return BoundedGateway(gateway, self._budget, self._emergency)
+    def fork(self, *, priority: _PrioritySource | None = None) -> BoundedGateway:
+        source = priority or self._emergency
+        gateway = self._budget.call(self._gateway.fork, emergency=source.is_set())
+        return BoundedGateway(gateway, self._budget, source)
 
     def close(self) -> None:
         close = getattr(self._gateway, "close", None)

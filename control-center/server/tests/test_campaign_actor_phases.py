@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from weex_cli.beta_volume import PairLegPlan
 
 from fleet_api.campaign_actor_models import CampaignActorContext, CampaignPhaseEnvironment, OpenCycle
@@ -111,6 +112,30 @@ def test_open_barrier_does_not_start_hold_until_both_legs_reach_target(monkeypat
     assert opened.hold_seconds == 0
     assert volume.emitted[-1][0] == "open_barrier_not_ready"
     assert "hold_started" not in [name for name, _ in volume.emitted]
+
+
+def test_actor_position_observation_normalizes_real_float_values() -> None:
+    from fleet_api.campaign_actor_cycles import observe_positions, positions_are_flat, targets_reached
+
+    btc, eth = _plans()
+    service = SimpleNamespace(
+        _observe_position=lambda venue, **_kwargs: venue,
+    )
+    positions = observe_positions(service, {"BTC": SimpleNamespace(venue=1.0), "ETH": SimpleNamespace(venue=-1.0)}, 1)
+
+    assert positions == {"BTC": Decimal("1.0"), "ETH": Decimal("-1.0")}
+    assert targets_reached(positions, btc, eth)
+    assert not positions_are_flat(positions, btc, eth)
+
+
+def test_actor_position_observation_rejects_non_finite_values() -> None:
+    from weex_cli.errors import SafetyError
+
+    from fleet_api.campaign_actor_cycles import observe_positions
+
+    service = SimpleNamespace(_observe_position=lambda venue, **_kwargs: venue)
+    with pytest.raises(SafetyError, match="position quantity observation is invalid"):
+        observe_positions(service, {"BTC": SimpleNamespace(venue=float("nan"))}, 1)
 
 
 def test_close_stage_rebuilds_lanes_from_the_persisted_child_plan(monkeypatch) -> None:

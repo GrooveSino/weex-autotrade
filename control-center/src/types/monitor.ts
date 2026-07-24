@@ -52,6 +52,12 @@ export interface StrategyMonitorSnapshot {
   sourceComplete: boolean
   stale: boolean
   reconciliationRequired: boolean
+  ledgerSyncState: 'idle' | 'queued' | 'syncing' | 'complete' | 'stale'
+  auditStatus: 'verified' | 'pending' | 'discrepant'
+  recoveryState: string | null
+  recoveryAttempt: number
+  nextRecoveryCheckAtMs: number | null
+  boundaryState: 'flat' | 'owned_exposure' | 'external_exposure' | 'unknown'
   btcQuoteVolume: string
   ethQuoteVolume: string
   makerFillCount: number

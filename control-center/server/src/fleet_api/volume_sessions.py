@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from .volume_contracts import TERMINAL_SESSION_STATUSES, NormalizedTradeFill, TradeVolumeLedger
-from .volume_helpers import _fill_signature
+from .volume_helpers import _fill_signature, _in_session_window
 
 
 class SessionVolumeService:
@@ -116,12 +116,13 @@ class SessionVolumeService:
         session = self.ledger.get_session(session_id)
         if session is None:
             raise KeyError(session_id)
-        expected = {fill.identity: fill for fill in authoritative_fills if fill.executed_at_ms >= session.started_at_ms}
+        expected = {fill.identity: fill for fill in authoritative_fills if _in_session_window(fill, session)}
         existing = {
             fill.identity: fill
             for fill in getattr(self.ledger, "fills_for_account", lambda *_: ())(
                 session.account_id, session.mode, session.started_at_ms
             )
+            if _in_session_window(fill, session)
         }
         missing = set(expected) - set(existing)
         extra = set(existing) - set(expected)

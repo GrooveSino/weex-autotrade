@@ -5,7 +5,7 @@ export type InstanceStatus = 'running' | 'paused' | 'stopped' | 'warning' | 'err
 export type TradingMode = 'demo' | 'live'
 export type ProxyType = 'none' | 'http' | 'https' | 'socks5'
 export type ProxyStatus = 'healthy' | 'degraded' | 'unchecked'
-export type ExecutionLifecycleState = 'idle' | 'preparing' | 'running' | 'stopping' | 'recovering' | 'cleanup_required'
+export type ExecutionLifecycleState = 'idle' | 'preparing' | 'running' | 'stopping' | 'recovering' | 'recovery_cleanup_required' | 'orders_cleanup_required' | 'position_blocked'
 
 export interface AccountInstance {
   id: string
@@ -72,13 +72,15 @@ export interface AccountInstance {
   }
   executionLifecycle: {
     state: ExecutionLifecycleState
-    primaryAction: 'start' | 'stop' | 'wait' | 'cleanup'
+    primaryAction: 'start' | 'stop' | 'safe_stop' | 'wait' | 'cancel_orders' | 'recheck'
     executionId: string | null
     sessionId: string | null
     reasonCode: string | null
     positionCount: number
     regularOrderCount: number
     triggerOrderCount: number
+    blockingPositions: Array<{ symbol: string; side: string; quantity: string; approximateQuote: string }>
+    boundaryCheckedAtMs: number | null
   }
   updatedAt: string
   unreadLogs: number

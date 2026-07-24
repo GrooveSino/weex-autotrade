@@ -126,7 +126,7 @@ def _integer_or_none(value: object) -> int | None:
 def _actor_detail(event: dict[str, Any]) -> str:
     state = str(_field(event, "phase") or "")
     if state != "phase_queued":
-        return str(_field(event, "reason") or "")
+        return _reason_text(str(_field(event, "reason") or ""))
     position = _integer_or_none(_field(event, "queue_position"))
     constraint = str(_field(event, "queue_constraint") or "")
     phase = "平仓" if str(_field(event, "queue_phase") or "") == "close" else "开仓"
@@ -136,3 +136,13 @@ def _actor_detail(event: dict[str, Any]) -> str:
     if constraint in {"proxy_active", "proxy_cooldown"}:
         parts.append("同代理速率限制")
     return " · ".join(parts)
+
+
+def _reason_text(reason: str) -> str:
+    if reason in {"phase_exception:typeerror", "worker_exception:typeerror"}:
+        return "仓位数量格式异常，已进入恢复检查"
+    if reason == "worker_safety:position_quantity_invalid":
+        return "仓位数量格式异常，已停止继续执行"
+    if reason == "recovery_safe_stop":
+        return "正在撤单并安全收尾当前任务仓位"
+    return reason

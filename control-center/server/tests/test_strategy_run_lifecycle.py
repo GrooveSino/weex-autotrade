@@ -1,7 +1,6 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 
 import pytest
 from cryptography.fernet import Fernet
@@ -21,7 +20,7 @@ from fleet_api.service import UnsafeOperation
 from fleet_api.vault import CredentialMaterial, EphemeralCredentialVault
 
 from .test_api_support import LivePreviewGateway, LivePreviewProvider, create_payload, strategy_payload
-from .test_campaigns_support import FakeBetaProvider, FakeGateway, live_settings, metadata, sample_campaign
+from .test_campaigns_support import FakeBetaProvider, FakeGateway, live_settings, sample_campaign
 
 
 def _profile(tmp_path) -> LiveProfile:
@@ -51,7 +50,7 @@ def _live_settings(tmp_path) -> ControlPlaneSettings:
     )
 
 
-def test_reopening_planned_preview_rechecks_boundary_and_offers_cleanup(tmp_path, monkeypatch) -> None:
+def test_reopening_planned_preview_is_local_and_reuses_confirmation(tmp_path, monkeypatch) -> None:
     profile = _profile(tmp_path)
     monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
     monkeypatch.setattr(
@@ -67,25 +66,63 @@ def test_reopening_planned_preview_rechecks_boundary_and_offers_cleanup(tmp_path
         instance = api.post("/api/v1/instances", json=payload).json()
         first = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={}).json()
         campaign_id = first["preview"]["campaignId"]
-        app.state.campaign_manager.inspect_bound_strategy_boundary = lambda _material: {
-            "flat": False,
-            "position_count": 1,
-            "regular_order_count": 2,
-            "trigger_order_count": 1,
-            "available_quote": "1000",
-        }
+        app.state.campaign_manager.inspect_bound_strategy_boundary = lambda _material: (_ for _ in ()).throw(
+            AssertionError("reopening an immutable preview must not read WEEX")
+        )
 
         second = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
 
         assert second.status_code == 200
         body = second.json()
-        assert body["disposition"] == "cleanup_required"
-        assert (body["positionCount"], body["regularOrderCount"], body["triggerOrderCount"]) == (1, 2, 1)
-        assert body["cleanupConfirmation"].startswith("CLEANUP WEEX LIVE STRATEGY ")
-        archived = app.state.campaign_journal.get(campaign_id)
-        assert archived is not None
-        assert archived.status == BetaCampaignStatus.STOPPED.value
-        assert archived.metadata["reason"] == "launch_preview_boundary_changed"
+        assert body["disposition"] == "ready"
+        assert body["preview"]["campaignId"] == campaign_id
+        assert app.state.campaign_journal.get(campaign_id).status == BetaCampaignStatus.PLANNED.value
+
+
+def test_initial_prepare_reuses_lifecycle_boundary_for_preview(tmp_path, monkeypatch) -> None:
+    profile = _profile(tmp_path)
+
+    class NoDuplicateBoundaryGateway(LivePreviewGateway):
+        def account_balance_rows(self, _mode: str):  # type: ignore[no-untyped-def]
+            raise AssertionError("preview must reuse the lifecycle boundary snapshot")
+
+        positions = account_balance_rows
+        open_orders = account_balance_rows
+        algo_orders = account_balance_rows
+
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, NoDuplicateBoundaryGateway()),
+    )
+    app = create_app(_live_settings(tmp_path))
+    with TestClient(app) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="500")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        reads = 0
+
+        def boundary(_material):  # type: ignore[no-untyped-def]
+            nonlocal reads
+            reads += 1
+            return {
+                "flat": True,
+                "position_count": 0,
+                "regular_order_count": 0,
+                "trigger_order_count": 0,
+                "available_quote": "1000",
+                "blocking_positions": [],
+                "checked_at_ms": int(time.time() * 1000),
+            }
+
+        app.state.campaign_manager.inspect_bound_strategy_boundary = boundary
+        prepared = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
+
+        assert prepared.status_code == 200
+        assert prepared.json()["disposition"] == "ready"
+        assert reads == 1
 
 
 def test_prepare_reuses_sampled_target_until_direction_or_run_changes(tmp_path, monkeypatch) -> None:
@@ -144,14 +181,6 @@ def test_cleanup_rejects_concurrent_command_for_same_account(tmp_path, monkeypat
         InMemoryCampaignJournal(),
         lambda: FakeBetaProvider(sample_campaign().allocation),  # type: ignore[arg-type]
     )
-    now_ms = int(time.time() * 1000)
-    campaign = replace(
-        sample_campaign(),
-        created_at_ms=now_ms,
-        expires_at_ms=now_ms + 3_600_000,
-    )._with_computed_id()
-    manager.journal.create("ins-1", campaign, metadata(campaign))
-    manager.journal.update(campaign.campaign_id, status=BetaCampaignStatus.RECOVERING.value)
     material = CredentialMaterial(
         api_key=SecretStr("key"),
         api_secret=SecretStr("secret"),
@@ -159,32 +188,128 @@ def test_cleanup_rejects_concurrent_command_for_same_account(tmp_path, monkeypat
         proxy_url=None,
     )
     profile = _profile(tmp_path)
-    manager._profile_and_gateway = lambda _material: (profile, FakeGateway())  # type: ignore[method-assign]
     entered = threading.Event()
     release = threading.Event()
 
-    class BlockingCleanupService:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
+    class BlockingGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancel_calls = 0
 
-        def cleanup(self, _plan):
-            entered.set()
-            assert release.wait(timeout=3)
-            return {"status": "stopped", "reason": "cleanup_completed"}
+        def cancel_all_orders(self, _symbol: str, *, mode: str, trigger: bool) -> None:
+            assert mode == "live"
+            self.cancel_calls += 1
+            if self.cancel_calls == 1:
+                entered.set()
+                assert release.wait(timeout=3)
 
-    monkeypatch.setattr(campaigns_module, "LiveBetaVolumeCampaignService", BlockingCleanupService)
-    confirmation = _cleanup_confirmation(campaign.campaign_id)
+    gateway = BlockingGateway()
+    manager._profile_and_gateway = lambda _material: (profile, gateway)  # type: ignore[method-assign]
+    confirmation = _cleanup_confirmation("ins-1")
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(
             manager.cleanup_bound_strategy,
             "ins-1",
-            campaign.campaign_id,
             confirmation,
             material,
         )
         assert entered.wait(timeout=3)
-        with pytest.raises(UnsafeOperation, match="already running"):
-            manager.cleanup_bound_strategy("ins-1", campaign.campaign_id, confirmation, material)
+        with pytest.raises(UnsafeOperation, match="正在执行"):
+            manager.cleanup_bound_strategy("ins-1", confirmation, material)
         release.set()
         assert first.result(timeout=3)["verified"] is True
+        assert gateway.cancel_calls == 4
     manager.close()
+
+
+def test_startup_cleanup_cancels_orders_but_never_closes_existing_position(tmp_path) -> None:
+    manager = CampaignWorkerManager(
+        live_settings(tmp_path),
+        EphemeralCredentialVault(),
+        InMemoryCampaignJournal(),
+        lambda: FakeBetaProvider(sample_campaign().allocation),  # type: ignore[arg-type]
+    )
+    material = CredentialMaterial(
+        api_key=SecretStr("key"),
+        api_secret=SecretStr("secret"),
+        passphrase=SecretStr("passphrase"),
+        proxy_url=None,
+    )
+    profile = _profile(tmp_path)
+
+    class ExistingPositionGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__(positions=True)
+            self.regular = True
+            self.trigger = True
+            self.cancel_calls: list[tuple[str, bool]] = []
+
+        def positions(self, _mode: str, symbol: str) -> list[dict[str, str]]:
+            if symbol != "BTC":
+                return []
+            return [{"size": "0.001", "side": "long", "notional": "52.00", "id": "private-position-id"}]
+
+        def open_orders(self, _symbol: str, *, mode: str = "live") -> list[dict[str, str]]:
+            assert mode == "live"
+            return [{"id": "regular"}] if self.regular else []
+
+        def algo_orders(self, _symbol: str) -> list[dict[str, str]]:
+            return [{"id": "trigger"}] if self.trigger else []
+
+        def cancel_all_orders(self, symbol: str, *, mode: str, trigger: bool) -> None:
+            assert mode == "live"
+            self.cancel_calls.append((symbol, trigger))
+            if trigger:
+                self.trigger = False
+            else:
+                self.regular = False
+
+        def fork(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def close_position_id(self, _symbol: str, _position_id: str) -> None:
+            raise AssertionError("startup cleanup must never close an existing position")
+
+    gateway = ExistingPositionGateway()
+    manager._profile_and_gateway = lambda _material: (profile, gateway)  # type: ignore[method-assign]
+
+    result = manager.cleanup_bound_strategy(
+        "ins-1",
+        _cleanup_confirmation("ins-1"),
+        material,
+    )
+
+    assert result["verified"] is True
+    assert result["position_count"] == 1
+    assert result["blocking_positions"] == [
+        {"symbol": "BTC", "side": "long", "quantity": "0.001", "approximate_quote": "52"}
+    ]
+    assert gateway.cancel_calls == [("BTC", False), ("BTC", True), ("ETH", False), ("ETH", True)]
+    manager.close()
+
+
+def test_recovery_prepare_returns_retryable_unavailable_when_boundary_read_fails(tmp_path, monkeypatch) -> None:
+    profile = _profile(tmp_path)
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(_live_settings(tmp_path))
+    with TestClient(app) as api:
+        strategy = api.post("/api/v1/strategies", json=strategy_payload(target="500")).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        prepared = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={}).json()
+        app.state.campaign_journal.update(prepared["preview"]["campaignId"], status="recovering")
+        app.state.campaign_manager.inspect_bound_strategy_boundary = lambda _material: (_ for _ in ()).throw(
+            TimeoutError("read timeout")
+        )
+
+        response = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
+
+        assert response.status_code == 200
+        assert response.json()["disposition"] == "unavailable"
+        assert response.json()["reasonCode"] == "boundary_unavailable:timeouterror"

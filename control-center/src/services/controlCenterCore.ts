@@ -21,7 +21,7 @@ export class ControlPlaneRequestError extends Error {
 }
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!configuredBaseUrl) throw new Error('control-plane API is not configured')
+  if (!configuredBaseUrl) throw new Error('控制平面 API 尚未配置')
   const headers = new Headers(init?.headers)
   if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (init?.method && !['GET', 'HEAD'].includes(init.method.toUpperCase()) && !headers.has('X-Fleet-Command-Id')) {
@@ -50,7 +50,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
             .join('; ')
         : ''
     throw new ControlPlaneRequestError(
-      message || `control-plane request failed (${response.status})`,
+      message || `请求失败（HTTP ${response.status}）：服务端没有返回可读的错误原因，请稍后重试并联系管理员检查执行器日志`,
       response.status,
       headers.get('X-Fleet-Command-Id'),
     )

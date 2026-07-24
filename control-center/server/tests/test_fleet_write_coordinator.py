@@ -42,13 +42,29 @@ def test_close_drains_pending_low_priority_writes_and_rejects_new_work() -> None
         raise AssertionError("closed coordinator accepted a critical write")
 
 
-def test_critical_write_flushes_prior_low_priority_work_in_order() -> None:
+def test_critical_write_does_not_flush_unrelated_low_priority_work() -> None:
     coordinator = FleetWriteCoordinator(low_priority_window_ms=500)
     observed: list[str] = []
     try:
         pending = coordinator.low_priority("execution:one", lambda: observed.append("heartbeat"))
         coordinator.critical(lambda: observed.append("boundary"))
+        assert observed == ["boundary"]
+        assert not pending.done()
+    finally:
+        coordinator.close()
+    assert pending.result(timeout=1) is None
+    assert observed == ["boundary", "heartbeat"]
+
+
+def test_discarded_low_priority_write_does_not_consume_the_writer() -> None:
+    coordinator = FleetWriteCoordinator(low_priority_window_ms=500)
+    observed: list[str] = []
+    try:
+        pending = coordinator.low_priority("execution:one", lambda: observed.append("heartbeat"))
+
+        assert coordinator.discard_low_priority("execution:one")
         assert pending.result(timeout=1) is None
-        assert observed == ["heartbeat", "boundary"]
+        assert coordinator.critical(lambda: observed.append("boundary")) is None
+        assert observed == ["boundary"]
     finally:
         coordinator.close()

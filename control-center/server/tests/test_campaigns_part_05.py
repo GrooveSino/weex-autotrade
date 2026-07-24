@@ -5,6 +5,7 @@ from pydantic import SecretStr
 from fleet_api.campaigns import (
     CampaignWorkerManager,
     InMemoryCampaignJournal,
+    _sanitize_event,
 )
 from fleet_api.models import BetaCampaignStatus, VolumeStrategy
 from fleet_api.vault import CredentialMaterial, EphemeralCredentialVault
@@ -64,3 +65,37 @@ def test_stale_planned_bound_strategy_preview_is_invalidated_without_exchange_ac
     assert current.campaign_id != stale.campaign_id
     assert current.strategy_version == 2
     manager.close()
+
+
+def test_dust_close_events_keep_safe_metrics_and_drop_exchange_identifiers() -> None:
+    event = _sanitize_event(
+        {
+            "event": "market_close_verified",
+            "symbol": "BTC",
+            "action": "close",
+            "side": "long",
+            "reason": "quote_threshold",
+            "quantity": Decimal("0.0001"),
+            "quote_volume": Decimal("6.50"),
+            "fill_count": 1,
+            "verified": True,
+            "dust_market_close": True,
+            "position_id": "position-secret",
+            "order_id": "order-secret",
+            "raw_response": {"successOrderId": "order-secret"},
+        }
+    )
+
+    assert event["fields"] == {
+        "symbol": "BTC",
+        "action": "close",
+        "side": "long",
+        "reason": "quote_threshold",
+        "quantity": "0.0001",
+        "quote_volume": "6.50",
+        "fill_count": 1,
+        "verified": True,
+        "dust_market_close": True,
+    }
+    assert "position-secret" not in str(event)
+    assert "order-secret" not in str(event)

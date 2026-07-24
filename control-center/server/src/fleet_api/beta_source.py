@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Protocol
 
 from .beta_allocation import HttpBetaAllocationProvider
+from .execution import AllocationUnavailable
 from .models import BetaMarketSnapshot, BetaSourceSettings, BetaSourceSettingsUpdate
 
 
@@ -113,6 +114,13 @@ class BetaSourceRuntime:
     async def market_snapshot(self) -> BetaMarketSnapshot:
         async with self._lock:
             return await self._provider.market_snapshot()
+
+    def cached_market_snapshot(self) -> BetaMarketSnapshot:
+        """Expose the immutable local snapshot to synchronous preview workers."""
+        cached = getattr(self._provider, "cached_market_snapshot", None)
+        if not callable(cached):
+            raise AllocationUnavailable("beta_not_ready")
+        return cached()
 
     async def refresh(self) -> bool:
         async with self._lock:

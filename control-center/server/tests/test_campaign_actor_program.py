@@ -18,10 +18,20 @@ def _context() -> CampaignActorContext:
 
 
 class _Phases:
-    def __init__(self, *, hold_seconds: float, finish_status: str = "stopped", open_pause: float = 0) -> None:
+    def __init__(
+        self,
+        *,
+        hold_seconds: float,
+        finish_status: str = "stopped",
+        open_pause: float = 0,
+        open_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
         self.hold_seconds = hold_seconds
         self.finish_status = finish_status
         self.open_pause = open_pause
+        self.open_error = open_error
+        self.close_error = close_error
         self.opened = threading.Event()
         self.safe_calls = 0
         self.active_opens = 0
@@ -31,14 +41,13 @@ class _Phases:
     def prepare(self, _campaign: object) -> CampaignActorContext:
         return _context()
 
-    def open(self, _campaign: object, context: CampaignActorContext) -> OpenCycle:
+    def plan_open(self, _campaign: object, context: CampaignActorContext) -> OpenCycle:
         with self._lock:
             self.active_opens += 1
             self.peak_opens = max(self.peak_opens, self.active_opens)
         try:
             if self.open_pause:
                 time.sleep(self.open_pause)
-            self.opened.set()
             return OpenCycle(
                 context,
                 {},
@@ -56,7 +65,14 @@ class _Phases:
             with self._lock:
                 self.active_opens -= 1
 
+    def execute_open(self, _campaign: object, _opened: OpenCycle) -> None:
+        self.opened.set()
+        if self.open_error is not None:
+            raise self.open_error
+
     def close(self, _campaign: object, _opened: OpenCycle) -> CloseCycle:
+        if self.close_error is not None:
+            raise self.close_error
         return CloseCycle(Decimal(0), {"status": "completed", "reason": "done"}, None, None, 0)
 
     def safe_stop(self, _opened: OpenCycle) -> dict[str, str]:
@@ -115,6 +131,111 @@ def test_stop_from_holding_uses_emergency_path_without_waiting_for_normal_slot()
         runtime.close()
 
 
+def test_stop_while_waiting_for_close_slot_keeps_open_cycle_for_safe_stop(monkeypatch) -> None:
+    capacity = ExecutionCapacity(
+        max_active_executions=2,
+        max_normal_phases=1,
+        phase_start_rate_per_second=10_000,
+        per_proxy_gap_seconds=0,
+    )
+    runtime = AsyncExecutionOrchestrator(capacity, normal_workers=1, emergency_workers=1)
+    phases = _Phases(hold_seconds=0)
+    result: list[dict[str, Any]] = []
+    assert capacity.admit("one")
+    original_try_start = capacity.try_start_phase
+    close_waiting = threading.Event()
+
+    def block_close_slot(key: str, *, proxy_key: str):
+        if key == "one:1:close":
+            close_waiting.set()
+            return None
+        return original_try_start(key, proxy_key=proxy_key)
+
+    monkeypatch.setattr(capacity, "try_start_phase", block_close_slot)
+    future = runtime.start("one", "account-one", _program(phases, result))
+    try:
+        assert phases.opened.wait(timeout=2)
+        assert close_waiting.wait(timeout=2)
+        assert runtime.stop("one")
+        future.result(timeout=3)
+        assert phases.safe_calls == 1
+        assert result == [{"status": "stopped", "reason": "finished"}]
+    finally:
+        runtime.close()
+
+
+def test_close_phase_error_after_open_uses_emergency_safe_stop() -> None:
+    capacity = ExecutionCapacity(
+        max_active_executions=1,
+        max_normal_phases=1,
+        phase_start_rate_per_second=10_000,
+        per_proxy_gap_seconds=0,
+    )
+    runtime = AsyncExecutionOrchestrator(capacity, normal_workers=1, emergency_workers=1)
+    phases = _Phases(hold_seconds=0, close_error=RuntimeError("close broke"))
+    result: list[dict[str, Any]] = []
+    failures: list[Exception] = []
+    assert capacity.admit("one")
+    future = runtime.start("one", "account-one", _program(phases, result, failures=failures))
+    try:
+        future.result(timeout=3)
+        assert phases.safe_calls == 1
+        assert result == [{"status": "stopped", "reason": "finished"}]
+        assert not failures
+    finally:
+        runtime.close()
+
+
+def test_open_barrier_error_after_plan_uses_emergency_safe_stop() -> None:
+    capacity = ExecutionCapacity(
+        max_active_executions=1,
+        max_normal_phases=1,
+        phase_start_rate_per_second=10_000,
+        per_proxy_gap_seconds=0,
+    )
+    runtime = AsyncExecutionOrchestrator(capacity, normal_workers=1, emergency_workers=1)
+    phases = _Phases(hold_seconds=0, open_error=TypeError("position comparison failed"))
+    result: list[dict[str, Any]] = []
+    failures: list[Exception] = []
+    assert capacity.admit("one")
+    future = runtime.start("one", "account-one", _program(phases, result, failures=failures))
+    try:
+        future.result(timeout=3)
+        assert phases.safe_calls == 1
+        assert result == [{"status": "stopped", "reason": "finished"}]
+        assert not failures
+    finally:
+        runtime.close()
+
+
+def test_orchestrator_shutdown_waits_for_safe_stop_instead_of_cancelling_actor() -> None:
+    capacity = ExecutionCapacity(
+        max_active_executions=1,
+        max_normal_phases=1,
+        phase_start_rate_per_second=10_000,
+        per_proxy_gap_seconds=0,
+    )
+    states = []
+    runtime = AsyncExecutionOrchestrator(capacity, normal_workers=1, emergency_workers=1, state_sink=states.append)
+    phases = _Phases(hold_seconds=60)
+    result: list[dict[str, Any]] = []
+    assert capacity.admit("one")
+    runtime.start("one", "account-one", _program(phases, result))
+    try:
+        assert phases.opened.wait(timeout=2)
+        deadline = time.monotonic() + 2
+        while not any(state.phase == "holding" for state in states):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        runtime.close()
+
+        assert phases.safe_calls == 1
+        assert result == [{"status": "stopped", "reason": "finished"}]
+    finally:
+        runtime.close()
+
+
 def test_two_hundred_campaign_programs_hold_without_consuming_two_hundred_i_o_workers() -> None:
     capacity = ExecutionCapacity(
         max_active_executions=200,
@@ -139,6 +260,11 @@ def test_two_hundred_campaign_programs_hold_without_consuming_two_hundred_i_o_wo
         assert runtime.active_count() == 200
         assert max(phase.peak_opens for phase in phases) <= 8
         assert all(phase.opened.is_set() for phase in phases)
+        # ``opened`` is set inside the blocking phase before its coroutine
+        # resumes and releases the scheduler reservation.  Wait for that
+        # hand-off instead of asserting a racy instantaneous zero.
+        while capacity.snapshot().active_normal_phases and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert capacity.snapshot().active_normal_phases == 0
     finally:
         for index in range(200):

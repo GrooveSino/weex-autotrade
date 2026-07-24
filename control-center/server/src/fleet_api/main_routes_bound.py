@@ -72,6 +72,9 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 regular_order_count=prepared.regular_order_count,
                 trigger_order_count=prepared.trigger_order_count,
                 cleanup_confirmation=prepared.cleanup_confirmation,
+                blocking_positions=list(prepared.blocking_positions),
+                allowed_actions=list(prepared.allowed_actions),
+                boundary_checked_at_ms=prepared.boundary_checked_at_ms,
             )
         instance = service.get_instance(instance_id)
         plan = strategy_run_plan(instance, direction)
@@ -83,6 +86,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 plan,
                 vault.get(instance_id),
                 session_id=session_id,
+                boundary=dict(prepared.boundary) if prepared.boundary is not None else None,
             )
         except BetaSourceUnavailable as exc:
             return StrategyRunPrepareResponse(
@@ -224,7 +228,11 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         instance = service.get_instance(instance_id)
         try:
             return await asyncio.to_thread(
-                strategy_run_lifecycle.stop_run, instance, execution_id, payload.confirmation
+                strategy_run_lifecycle.stop_run,
+                instance,
+                execution_id,
+                payload.confirmation,
+                vault.get(instance_id),
             )
         finally:
             await publish_snapshot()

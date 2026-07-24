@@ -14,7 +14,13 @@ from .volume_contracts import (
     TradeVolumeAggregate,
     VolumeSession,
 )
-from .volume_helpers import _aggregate, _fill_summary, _normalized_session_status, _session_projection
+from .volume_helpers import (
+    _aggregate,
+    _fill_summary,
+    _in_session_window,
+    _normalized_session_status,
+    _session_projection,
+)
 
 
 class InMemoryTradeVolumeLedger:
@@ -167,7 +173,7 @@ class InMemoryTradeVolumeLedger:
         return [
             fill
             for fill in self._account_fills.get((session.account_id, session.mode), {}).values()
-            if fill.executed_at_ms >= session.started_at_ms
+            if _in_session_window(fill, session)
         ]
 
     def session_projection(self, session_id: str) -> dict[str, object]:

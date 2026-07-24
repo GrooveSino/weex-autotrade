@@ -575,7 +575,7 @@ def test_leverage_is_bound_to_plan_confirmation_and_margin_requirement(allocatio
     assert "LEVERAGE_5X POST_ONLY" in beta_volume_confirmation(plan)
 
 
-def test_v4_reverse_plan_uses_fixed_cross_leverage_and_persisted_sides(
+def test_v5_reverse_plan_uses_fixed_cross_leverage_and_persisted_sides(
     tmp_path,
     allocation: BetaAllocation,
 ) -> None:
@@ -608,7 +608,7 @@ def test_v4_reverse_plan_uses_fixed_cross_leverage_and_persisted_sides(
         sleep=lambda _seconds: None,
     ).execute(plan)
 
-    assert plan.schema_version == 4
+    assert plan.schema_version == 5
     assert (plan.btc.position_side, plan.btc.opening_side, plan.btc.closing_side) == ("short", "sell", "buy")
     assert (plan.eth.position_side, plan.eth.opening_side, plan.eth.closing_side) == ("long", "buy", "sell")
     assert gateway.margin_mode_updates == [("BTC", "cross"), ("ETH", "cross")]
@@ -621,6 +621,37 @@ def test_v4_reverse_plan_uses_fixed_cross_leverage_and_persisted_sides(
         if event["event"] == "leg_started" and event["action"] == "open"
     }
     assert opening_sides == {"BTC": "sell", "ETH": "buy"}
+
+
+def test_legacy_plan_cannot_gain_market_dust_close_during_execution(monkeypatch, tmp_path, allocation) -> None:
+    plan = replace(
+        BetaVolumePlan.create(
+            Gateway(),
+            allocation,
+            target_turnover_quote="200",
+            max_position_quote="1200",
+            timeout_seconds=120,
+            now_ms=1000,
+        ),
+        schema_version=4,
+    )
+    service = LiveBetaVolumeService(Gateway(), None, BetaVolumePlanStore(tmp_path))  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "weex_cli.beta_volume.close_dust_position_once",
+        lambda **_kwargs: pytest.fail("legacy tasks must not call closePositions"),
+    )
+
+    result = service._close_dust_if_eligible(
+        plan,
+        1,
+        plan.btc,
+        None,  # type: ignore[arg-type]
+        Decimal("1"),
+        "below_minimum",
+        1,
+    )
+
+    assert result is None
 
 
 def test_auto_leverage_uses_wallet_round_size_and_safety_buffer() -> None:

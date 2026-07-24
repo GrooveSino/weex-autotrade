@@ -33,6 +33,7 @@ from .campaign_actor_models import (
     EnvironmentFactory,
     OpenCycle,
 )
+from .campaign_actor_planning import new_actor_context, prepare_cycle_leverage
 
 
 class CampaignActorPhases:
@@ -43,9 +44,11 @@ class CampaignActorPhases:
         environment_factory: EnvironmentFactory,
         *,
         is_stopping: Callable[[], bool],
+        ownership_sink: Callable[[OpenCycle, str], None] | None = None,
     ) -> None:
         self._environment_factory = environment_factory
         self._is_stopping = is_stopping
+        self._ownership_sink = ownership_sink or (lambda _opened, _state: None)
 
     def prepare(self, campaign: Campaign) -> CampaignActorContext:
         environment = self._environment_factory("prepare")
@@ -59,11 +62,11 @@ class CampaignActorPhases:
             if any(boundary.get(key) for key in BOUNDARY_COUNTS):
                 raise RuntimeError("campaign requires a flat account boundary")
             service.campaign_store.claim_for_execution(campaign)
-            return self._new_context(service, campaign)
+            return new_actor_context(service, campaign)
         finally:
             environment.close()
 
-    def open(self, campaign: Campaign, context: CampaignActorContext) -> OpenCycle:
+    def plan_open(self, campaign: Campaign, context: CampaignActorContext) -> OpenCycle:
         environment = self._environment_factory("open")
         try:
             service = environment.volume_service
@@ -81,30 +84,9 @@ class CampaignActorPhases:
                 retry_event="cycle_sizing_retry",
                 round=context.round_number,
             )
-            selected, leverage_state = self._prepare_leverage(service, plan, sizing, context.round_number)
+            selected, leverage_state = prepare_cycle_leverage(service, plan, sizing, context.round_number)
             started_at_ms = service.now_ms()
-            results = self._open_pair(
-                service,
-                plan,
-                context.round_number,
-                desired_quote,
-                btc_plan,
-                eth_plan,
-                lanes,
-            )
-            summaries = [results[symbol][0] for symbol in ("BTC", "ETH")]
-            stops = {symbol: row[1] for symbol, row in results.items() if row[1] is not None}
-            hold_seconds = self._verify_open_target(
-                service,
-                lanes,
-                context.round_number,
-                btc_plan,
-                eth_plan,
-                stops,
-                campaign,
-            )
-            hold_started_at_ms = service.now_ms() if hold_seconds > 0 else None
-            return OpenCycle(
+            opened = OpenCycle(
                 context=context,
                 preflight=preflight,
                 btc_plan=btc_plan,
@@ -112,14 +94,53 @@ class CampaignActorPhases:
                 sizing=sizing,
                 selected_leverage=selected,
                 leverage_state=leverage_state,
-                open_summaries=summaries,
-                lane_stops=stops,
+                open_summaries=[],
+                lane_stops={},
                 started_at_ms=started_at_ms,
-                hold_seconds=hold_seconds,
-                hold_started_at_ms=hold_started_at_ms,
+                hold_seconds=0,
             )
+            self._ownership_sink(opened, "planned")
+            return opened
         finally:
             environment.close()
+
+    def execute_open(self, campaign: Campaign, opened: OpenCycle) -> None:
+        environment = self._environment_factory("open")
+        try:
+            service = environment.volume_service
+            plan = opened.context.child
+            lanes = service._create_lanes(plan)
+            service.current_plan_id = plan.plan_id
+            results = self._open_pair(
+                service,
+                plan,
+                opened.context.round_number,
+                Decimal(str(opened.sizing["opening_notional_quote"])),
+                opened.btc_plan,
+                opened.eth_plan,
+                lanes,
+            )
+            opened.open_summaries.extend(results[symbol][0] for symbol in ("BTC", "ETH"))
+            opened.lane_stops.update({symbol: row[1] for symbol, row in results.items() if row[1] is not None})
+            self._ownership_sink(opened, "opened")
+            opened.hold_seconds = self._verify_open_target(
+                service,
+                lanes,
+                opened.context.round_number,
+                opened.btc_plan,
+                opened.eth_plan,
+                opened.lane_stops,
+                campaign,
+            )
+            opened.hold_started_at_ms = service.now_ms() if opened.hold_seconds > 0 else None
+        finally:
+            environment.close()
+
+    def open(self, campaign: Campaign, context: CampaignActorContext) -> OpenCycle:
+        """Compatibility entry point for bounded callers outside the Actor program."""
+        opened = self.plan_open(campaign, context)
+        self.execute_open(campaign, opened)
+        return opened
 
     def close(self, campaign: Campaign, opened: OpenCycle) -> CloseCycle:
         environment = self._environment_factory("close")
@@ -128,8 +149,11 @@ class CampaignActorPhases:
             lanes = service._create_lanes(opened.context.child)
             service.current_plan_id = opened.context.child.plan_id
             if self._is_stopping():
-                return CloseCycle(Decimal(0), safe_stop(service, lanes, opened), "stop_requested", None, 0)
-            return self._close_cycle(service, lanes, campaign, opened)
+                outcome = CloseCycle(Decimal(0), safe_stop(service, lanes, opened), "stop_requested", None, 0)
+            else:
+                outcome = self._close_cycle(service, lanes, campaign, opened)
+            self._ownership_sink(opened, "closed" if outcome.uncertain_reason is None else "uncertain")
+            return outcome
         finally:
             environment.close()
 
@@ -137,7 +161,9 @@ class CampaignActorPhases:
         environment = self._environment_factory("safe_stop")
         try:
             service = environment.volume_service
-            return safe_stop(service, service._create_lanes(opened.context.child), opened)
+            result = safe_stop(service, service._create_lanes(opened.context.child), opened)
+            self._ownership_sink(opened, "closed" if result.get("status") != "uncertain" else "uncertain")
+            return result
         finally:
             environment.close()
 
@@ -163,52 +189,6 @@ class CampaignActorPhases:
             )
         finally:
             environment.close()
-
-    @staticmethod
-    def _new_context(campaign_service: Any, campaign: Campaign) -> CampaignActorContext:
-        remaining = campaign.target_turnover_quote
-        campaign_service._emit(
-            "campaign_child_planning_started",
-            campaign_id=campaign.campaign_id,
-            run=1,
-            remaining_quote=decimal_text(remaining),
-        )
-        child = campaign_service._create_child(campaign, remaining, 1)
-        campaign_service.child_store.create(child)
-        campaign_service.child_store.claim_for_execution(child)
-        campaign_service._emit(
-            "campaign_child_planning_completed",
-            campaign_id=campaign.campaign_id,
-            run=1,
-            child_plan_id=child.plan_id,
-        )
-        campaign_service._emit(
-            "campaign_run_started",
-            campaign_id=campaign.campaign_id,
-            run=1,
-            child_plan_id=child.plan_id,
-            remaining_quote=decimal_text(remaining),
-        )
-        return CampaignActorContext(child=child, run_number=1, execution_started_at_ms=campaign_service.now_ms())
-
-    @staticmethod
-    def _prepare_leverage(
-        service: Any,
-        plan: Any,
-        sizing: Mapping[str, Any],
-        round_number: int,
-    ) -> tuple[int, dict[str, str]]:
-        service._emit(
-            "leverage_preparing",
-            round=round_number,
-            opening_notional_quote=sizing["opening_notional_quote"],
-        )
-        selected, state = service._prepare_cycle_leverage(
-            plan,
-            Decimal(str(sizing["opening_notional_quote"])),
-            round_number,
-        )
-        return selected, state
 
     @staticmethod
     def _open_pair(

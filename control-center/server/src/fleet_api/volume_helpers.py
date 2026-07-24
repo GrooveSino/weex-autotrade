@@ -78,6 +78,13 @@ def _fill_summary(fills: list[NormalizedTradeFill]) -> dict[str, object]:
     }
 
 
+def _in_session_window(fill: NormalizedTradeFill, session: VolumeSession) -> bool:
+    """Keep terminal session accounting isolated from later runs."""
+    return fill.executed_at_ms >= session.started_at_ms and (
+        session.finished_at_ms is None or fill.executed_at_ms <= session.finished_at_ms
+    )
+
+
 def _session_projection(
     session: VolumeSession,
     fills: list[NormalizedTradeFill],

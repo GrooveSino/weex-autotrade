@@ -117,7 +117,9 @@ def _lifecycle_account_state(instance: AccountInstance, lifecycle: Any) -> tuple
         "running": (InstanceStatus.RUNNING, "已绑定策略执行中"),
         "stopping": (InstanceStatus.PAUSED, "安全停止中"),
         "recovering": (InstanceStatus.PAUSED, "后台只读核验中"),
-        "cleanup_required": (InstanceStatus.WARNING, "检测到残留订单或仓位，可执行安全清理"),
+        "recovery_cleanup_required": (InstanceStatus.WARNING, "当前任务仓位待安全收尾"),
+        "orders_cleanup_required": (InstanceStatus.WARNING, "检测到启动前挂单，可先撤单"),
+        "position_blocked": (InstanceStatus.WARNING, "账户已有仓位，关闭后可重新检查"),
     }
     return states.get(lifecycle.state, (InstanceStatus.STOPPED, "可启动已绑定策略"))
 

@@ -34,6 +34,7 @@ from .models_campaign import (  # noqa: F401
     BetaCampaignStatus,
     BetaCampaignStopRequest,
     BetaCampaignView,
+    BlockingPosition,
     BoundStrategyExecutionExecuteRequest,
     BoundStrategyExecutionPreviewRequest,
     BoundStrategyExecutionStopRequest,

@@ -54,10 +54,19 @@ class CampaignActorProgram:
                     )
                     await self._deliver(actor, result, "stopped")
                     return
-                opened = await self._open(actor, context)
-                if opened is None:
+                reservation = await actor.wait_for_normal_phase(
+                    "open",
+                    proxy_key=self._proxy_key,
+                    round_number=context.round_number,
+                )
+                if reservation is None:
                     await self._finish_stopped(actor, context, None)
                     return
+                try:
+                    opened = await actor.run_blocking(self._phases.plan_open, self._campaign, context)
+                    await actor.run_blocking(self._phases.execute_open, self._campaign, opened)
+                finally:
+                    actor.finish_normal_phase(reservation)
                 if opened.hold_seconds > 0:
                     hold_started_at_ms = opened.hold_started_at_ms or opened.started_at_ms
                     deadline = hold_started_at_ms + int(opened.hold_seconds * 1_000)
@@ -65,10 +74,14 @@ class CampaignActorProgram:
                         await self._finish_stopped(actor, context, opened)
                         return
                 outcome = await self._close(actor, opened)
-                opened = None
                 if outcome is None:
-                    await self._finish_stopped(actor, context, None)
+                    # A stop can arrive after both opening legs have been
+                    # verified but before the normal close slot is admitted.
+                    # Keep the cycle context so safe_stop can cancel orders
+                    # and maker-close any real residual exposure.
+                    await self._finish_stopped(actor, context, opened)
                     return
+                opened = None
                 if await self._finish_outcome(actor, context, outcome):
                     return
                 if outcome.round_gap_seconds > 0:
@@ -77,21 +90,21 @@ class CampaignActorProgram:
                         await self._finish_stopped(actor, context, None)
                         return
         except Exception as exc:  # Durable submission classification stays in the manager callback.
+            if context is not None and opened is not None:
+                actor.transition("stopping", reason=f"phase_exception:{type(exc).__name__.lower()}")
+                try:
+                    await self._finish_stopped(
+                        actor,
+                        context,
+                        opened,
+                        fallback_reason=f"phase_exception:{type(exc).__name__.lower()}",
+                    )
+                except Exception as cleanup_error:
+                    exc = cleanup_error
+                else:
+                    return
             await actor.run_blocking(self._on_failure, exc)
             actor.transition("recovering", reason=f"phase_exception:{type(exc).__name__.lower()}")
-
-    async def _open(self, actor: ExecutionActor, context: CampaignActorContext) -> OpenCycle | None:
-        reservation = await actor.wait_for_normal_phase(
-            "open",
-            proxy_key=self._proxy_key,
-            round_number=context.round_number,
-        )
-        if reservation is None:
-            return None
-        try:
-            return await actor.run_blocking(self._phases.open, self._campaign, context)
-        finally:
-            actor.finish_normal_phase(reservation)
 
     async def _close(self, actor: ExecutionActor, opened: OpenCycle) -> CloseCycle | None:
         reservation = await actor.wait_for_normal_phase(
@@ -150,11 +163,13 @@ class CampaignActorProgram:
         actor: ExecutionActor,
         context: CampaignActorContext,
         opened: OpenCycle | None,
+        *,
+        fallback_reason: str = "stop_requested",
     ) -> None:
         if opened is not None:
             safe_result = await actor.run_blocking(self._phases.safe_stop, opened, emergency=True)
             status = str(safe_result.get("status") or "stopped")
-            reason = str(safe_result.get("reason") or "stop_requested")
+            reason = str(safe_result.get("reason") or fallback_reason)
             result = await actor.run_blocking(
                 self._phases.finish,
                 self._campaign,
@@ -169,7 +184,7 @@ class CampaignActorProgram:
                 self._campaign,
                 context,
                 status="stopped",
-                reason="stop_requested",
+                reason=fallback_reason,
             )
         await self._deliver(actor, result, _actor_terminal_phase(result))
 

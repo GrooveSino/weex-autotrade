@@ -23,6 +23,11 @@ from weex_cli.adaptive_executor import (
 from weex_cli.adaptive_maker import AdaptiveMakerPolicy
 from weex_cli.adaptive_volume import REAL_POLICY
 from weex_cli.beta_allocation import BetaAllocation, HttpBetaAllocationProvider
+from weex_cli.dust_position_close import (
+    DustCloseResult,
+    classify_minimum_order_rejection,
+    close_dust_position_once,
+)
 from weex_cli.errors import SafetyError, ValidationError
 from weex_cli.execution_reconciliation import (
     LegFillReconciler,
@@ -42,6 +47,7 @@ MARGIN_BUFFER = Decimal("1.20")
 MAX_AUTO_LEVERAGE = 99
 MAX_FIXED_LEVERAGE = 400
 DEFAULT_STRATEGY_DIRECTION = "btc_long_eth_short"
+DEFAULT_TAKER_DUST_MAX_QUOTE = Decimal("10.00")
 STRATEGY_DIRECTIONS = {DEFAULT_STRATEGY_DIRECTION, "btc_short_eth_long"}
 POST_FLAT_ACCOUNTING_ATTEMPTS = 8
 BETA_READ_RETRY_POLICY = ReadRetryPolicy(attempts=8, initial_delay_seconds=1, max_delay_seconds=8)
@@ -102,6 +108,7 @@ class BetaVolumePlan:
     eth: PairLegPlan
     estimated_turnover_quote: Decimal
     direction: str = DEFAULT_STRATEGY_DIRECTION
+    dust_close_max_quote: Decimal = DEFAULT_TAKER_DUST_MAX_QUOTE
 
     @classmethod
     def create(
@@ -121,6 +128,7 @@ class BetaVolumePlan:
         margin_buffer: str | Decimal = MARGIN_BUFFER,
         margin_mode: str = "isolated",
         direction: str = DEFAULT_STRATEGY_DIRECTION,
+        dust_close_max_quote: str | Decimal = DEFAULT_TAKER_DUST_MAX_QUOTE,
         now_ms: int | None = None,
     ) -> BetaVolumePlan:
         target = decimal_value(target_turnover_quote, name="target_turnover_quote")
@@ -226,8 +234,10 @@ class BetaVolumePlan:
             open_client_prefix=f"{plan_id}-eo",
             close_client_prefix=f"{plan_id}-ec",
         )
+        dust_limit = decimal_value(dust_close_max_quote, name="dust_close_max_quote")
+        assert dust_limit is not None
         return cls(
-            schema_version=4,
+            schema_version=5,
             plan_id=plan_id,
             created_at_ms=created_at_ms,
             target_turnover_quote=target,
@@ -243,6 +253,7 @@ class BetaVolumePlan:
             margin_buffer=normalized_margin_buffer,
             margin_mode=normalized_margin_mode,
             direction=normalized_direction,
+            dust_close_max_quote=dust_limit,
             allocation=allocation,
             btc=btc,
             eth=eth,
@@ -270,6 +281,7 @@ class BetaVolumePlan:
             "margin_buffer": decimal_text(self.margin_buffer),
             "margin_mode": self.margin_mode,
             "direction": self.direction,
+            "dust_close_max_quote": decimal_text(self.dust_close_max_quote),
             "minimum_available_quote": decimal_text(self.required_available_quote),
             "allocation": self.allocation.as_dict(),
             "legs": [self.btc.as_dict(), self.eth.as_dict()],
@@ -312,6 +324,9 @@ class BetaVolumePlan:
             margin_mode=_normalize_margin_mode(payload.get("margin_mode", "isolated")),
             direction=_normalize_direction(
                 payload.get("direction", payload.get("strategy", DEFAULT_STRATEGY_DIRECTION))
+            ),
+            dust_close_max_quote=Decimal(
+                str(payload.get("dust_close_max_quote", DEFAULT_TAKER_DUST_MAX_QUOTE))
             ),
             allocation=allocation,
             btc=_leg_from_dict(legs[0]),
@@ -411,6 +426,21 @@ class BetaVolumePlanStore:
         os.replace(temporary, path)
         return path
 
+    def claim_market_close_intent(self, plan: BetaVolumePlan, key: str, *, created_at_ms: int) -> bool:
+        """Persist the one-shot market-close boundary before calling WEEX."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+        path = self.directory / f"{plan.plan_id}.{digest}.market-close.intent"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(f"{created_at_ms}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
+
     def load(self, plan_id: str) -> tuple[BetaVolumePlan, str]:
         record = self.load_record(plan_id)
         return record.plan, record.state
@@ -426,7 +456,7 @@ class BetaVolumePlanStore:
             raise ValidationError(f"Beta plan not found: {plan_id}") from None
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             raise ValidationError(f"Beta plan is unreadable: {plan_id}") from None
-        if not isinstance(payload, Mapping) or payload.get("schema_version") not in {1, 2, 3, 4}:
+        if not isinstance(payload, Mapping) or payload.get("schema_version") not in {1, 2, 3, 4, 5}:
             raise ValidationError("stored Beta plan schema is invalid")
         plan_row = payload.get("plan")
         if not isinstance(plan_row, Mapping):
@@ -1041,6 +1071,7 @@ class LiveBetaVolumeService:
                         offset,
                         leg_plan,
                         lanes[symbol],
+                        owned_quantity=_owned_position_quantity(open_summaries, symbol, leg_plan.position_side),
                     )
 
                 close_summaries: list[dict[str, Any]] = []
@@ -1363,12 +1394,11 @@ class LiveBetaVolumeService:
         round_number: int,
         pool: ThreadPoolExecutor | None = None,
     ) -> dict[str, Any]:
-        """Cancel all live orders, maker-flatten residuals, then prove the boundary.
+        """Cancel orders, flatten execution-owned positions, then prove the boundary.
 
-        This is deliberately a single convergence path.  It never calls a market
-        close endpoint and it never retries cancellation or submission mutations.
-        The venue's batch cancellation routine sends one regular and one trigger
-        cancellation request, then performs bounded read-only verification.
+        Maker remains the normal close path. A position-ID market close is allowed
+        once only for a proven execution-owned rule dust remainder; no cancellation
+        or market-close mutation is retried after an ambiguous response.
         """
         self._emit("safe_stop_started", round=round_number)
         cancellation_verified = True
@@ -1461,6 +1491,7 @@ class LiveBetaVolumeService:
                     leg_plan,
                     lanes[symbol],
                     respect_stop=False,
+                    owned_quantity=_owned_position_quantity(summaries, symbol, leg_plan.position_side),
                 )
             for symbol in ("BTC", "ETH"):
                 future = jobs.get(symbol)
@@ -1468,7 +1499,8 @@ class LiveBetaVolumeService:
                     continue
                 lane_summaries, flat, stop = future.result()
                 summaries.extend(lane_summaries)
-                if not flat or stop is not None:
+                audit_pending = stop is not None and stop[1] == "dust_close_audit_pending" and flat
+                if not flat or (stop is not None and not audit_pending):
                     reason = stop[1] if stop is not None else "safe_stop_flatten_incomplete"
                     self._emit("safe_stop_uncertain", round=round_number, symbol=symbol, reason=reason)
                     return self._finish(
@@ -1482,7 +1514,12 @@ class LiveBetaVolumeService:
                         preflight,
                         execution_started_ms,
                     )
-                self._emit("safe_stop_leg_completed", round=round_number, symbol=symbol)
+                self._emit(
+                    "safe_stop_leg_completed",
+                    round=round_number,
+                    symbol=symbol,
+                    audit_pending=audit_pending,
+                )
         finally:
             if owns_pool:
                 active_pool.shutdown(wait=True)
@@ -1761,6 +1798,7 @@ class LiveBetaVolumeService:
         lane: _Lane,
         *,
         respect_stop: bool = False,
+        owned_quantity: Decimal | None = None,
     ) -> tuple[list[dict[str, Any]], bool, tuple[str, str] | None]:
         summaries: list[dict[str, Any]] = []
         for attempt in range(1, plan.recovery_attempts + 1):
@@ -1776,6 +1814,20 @@ class LiveBetaVolumeService:
             quantity = abs(Decimal(str(position)))
             if quantity <= leg_plan.amount_step / 2:
                 return summaries, True, None
+            pre_maker_dust = self._close_dust_if_eligible(
+                plan,
+                round_number,
+                leg_plan,
+                lane,
+                owned_quantity,
+                "below_minimum",
+                sequence_offset + 900 + attempt,
+            )
+            if pre_maker_dust is not None:
+                summary, flat, dust_stop = pre_maker_dust
+                if summary is not None:
+                    summaries.append(summary)
+                return summaries, flat, dust_stop
             close_plan = replace(leg_plan, quantity=quantity, allocated_quote=Decimal(0))
             spec = _LegSpec(
                 close_plan,
@@ -1803,9 +1855,63 @@ class LiveBetaVolumeService:
             )
             if position is not None and abs(Decimal(str(position))) <= leg_plan.amount_step / 2:
                 return summaries, True, stop
+            maker_reason = stop[1] if stop is not None else "maker_completed_with_residual"
+            dust = self._close_dust_if_eligible(
+                plan,
+                round_number,
+                leg_plan,
+                lane,
+                owned_quantity,
+                maker_reason,
+                sequence_offset + 950 + attempt,
+            )
+            if dust is not None:
+                dust_summary, flat, dust_stop = dust
+                if dust_summary is not None:
+                    summaries.append(dust_summary)
+                return summaries, flat, dust_stop
             if stop is not None and (_is_uncertain_stop(stop) or _is_hard_terminal(stop[1])):
                 return summaries, False, stop
         return summaries, False, ("stopped", "recovery_attempts_exhausted")
+
+    def _close_dust_if_eligible(
+        self,
+        plan: BetaVolumePlan,
+        round_number: int,
+        leg_plan: PairLegPlan,
+        lane: _Lane,
+        owned_quantity: Decimal | None,
+        maker_reason: str,
+        sequence: int,
+    ) -> tuple[dict[str, Any] | None, bool, tuple[str, str] | None] | None:
+        if plan.schema_version < 5 or owned_quantity is None or owned_quantity <= 0:
+            return None
+        result = close_dust_position_once(
+            gateway=lane.gateway,
+            store=self.store,
+            plan=plan,
+            cycle=round_number,
+            symbol=leg_plan.symbol,
+            position_side=leg_plan.position_side,
+            owned_quantity=owned_quantity,
+            amount_step=leg_plan.amount_step,
+            maker_reason=maker_reason,
+            reconciler=lane.reconciler,
+            now_ms=self.now_ms,
+            sleep=self.sleep,
+            emit=self._emit,
+        )
+        # The lane venue is the phase-local source used by the Maker executor.
+        # A separate gateway read that appears flat cannot override the non-flat
+        # lane observation that led us here unless closePositions was attempted.
+        if not result.attempted and not result.uncertain:
+            return None
+        summary = _dust_close_summary(sequence, leg_plan, result) if result.attempted else None
+        if result.uncertain:
+            return summary, False, ("submission_uncertain", result.reason)
+        if result.flat and result.reason == "audit_pending":
+            return summary, True, ("stopped", "dust_close_audit_pending")
+        return summary, result.flat, None
 
     def _execute_leg(
         self,
@@ -1892,6 +1998,18 @@ class LiveBetaVolumeService:
             )
             return summary, ("observation_uncertain", reason)
         except Exception as exc:  # noqa: BLE001 - a mutation may have landed; never continue to another leg
+            minimum_reason = classify_minimum_order_rejection(exc)
+            if minimum_reason is not None:
+                summary = _leg_exception_summary(sequence, spec, minimum_reason)
+                self._emit(
+                    "leg_stopped",
+                    round=round_number,
+                    sequence=sequence,
+                    symbol=spec.plan.symbol,
+                    action=spec.action,
+                    reason=minimum_reason,
+                )
+                return summary, ("stopped", minimum_reason)
             reason = f"leg_exception:{type(exc).__name__.lower()}"
             summary = _leg_exception_summary(sequence, spec, reason)
             deadline_reached = self.now_ms() - started_at_ms >= plan.timeout_seconds * 1000
@@ -2101,6 +2219,11 @@ class LiveBetaVolumeService:
             symbol=spec.plan.symbol,
             action=spec.action,
             quote_volume=decimal_text(report.quote_volume if report is not None else Decimal(0)),
+            executed_quantity=decimal_text(report.executed_quantity if report is not None else executed_quantity),
+            position_side=spec.plan.position_side,
+            maker_count=report.maker_count if report is not None else 0,
+            taker_count=report.taker_count if report is not None else 0,
+            unknown_liquidity_count=report.unknown_liquidity_count if report is not None else 0,
             fill_count=report.fill_count if report is not None else 0,
             elapsed_ms=result.elapsed_ms,
             submissions=result.submissions,
@@ -2167,7 +2290,7 @@ class LiveBetaVolumeService:
             and flat
             and no_orders
             and accounting["verified"]
-            and accounting["maker_only"]
+            and accounting["liquidity_policy_satisfied"]
         )
         self._emit(
             "final_acceptance_completed",
@@ -2176,6 +2299,7 @@ class LiveBetaVolumeService:
             no_orders=no_orders,
             accounting_verified=accounting["verified"],
             maker_only=accounting["maker_only"],
+            liquidity_policy_satisfied=accounting["liquidity_policy_satisfied"],
         )
         return self._finish(
             plan,
@@ -2433,11 +2557,26 @@ def inspect_live_account(
     regular_orders = 0
     trigger_orders = 0
     position_sizes: dict[str, str | None] = {}
+    blocking_positions: list[dict[str, str]] = []
     for symbol in ("BTC", "ETH"):
         position_rows = gateway.positions("live", symbol)
         sizes = [abs(Decimal(summarize_position_size(row))) for row in position_rows]
         active_positions += sum(1 for size in sizes if size > 0)
         position_sizes[symbol] = decimal_text(sum(sizes, Decimal(0)))
+        for row, size in zip(position_rows, sizes, strict=True):
+            if size <= 0:
+                continue
+            info = row.get("info") if isinstance(row.get("info"), Mapping) else {}
+            side = str(row.get("side") or info.get("positionSide") or info.get("side") or "unknown").lower()
+            notional = _position_notional(row, info, size)
+            blocking_positions.append(
+                {
+                    "symbol": symbol,
+                    "side": side if side in {"long", "short"} else "unknown",
+                    "quantity": decimal_text(size) or "0",
+                    "approximate_quote": decimal_text(notional) or "0",
+                }
+            )
         regular_orders += len(gateway.open_orders(symbol, mode="live"))
         trigger_orders += _row_count(gateway.algo_orders(symbol))
     result: dict[str, Any] = {
@@ -2446,6 +2585,7 @@ def inspect_live_account(
         "available_sufficient": available >= required_available,
         "active_position_count": active_positions,
         "position_sizes": position_sizes,
+        "blocking_positions": blocking_positions,
         "regular_order_count": regular_orders,
         "trigger_order_count": trigger_orders,
     }
@@ -2458,6 +2598,26 @@ def inspect_live_account(
             margin_buffer=margin_buffer,
         )
     return result
+
+
+def _position_notional(row: Mapping[str, Any], info: Mapping[str, Any], quantity: Decimal) -> Decimal:
+    for key in ("notional", "openValue", "positionValue"):
+        raw = row.get(key) if row.get(key) is not None else info.get(key)
+        try:
+            value = abs(Decimal(str(raw)))
+        except Exception:  # noqa: BLE001 - incomplete public position metadata is tolerated
+            continue
+        if value.is_finite() and value > 0:
+            return value
+    for key in ("markPrice", "entryPrice"):
+        raw = row.get(key) if row.get(key) is not None else info.get(key)
+        try:
+            price = abs(Decimal(str(raw)))
+        except Exception:  # noqa: BLE001
+            continue
+        if price.is_finite() and price > 0:
+            return quantity * price
+    return Decimal(0)
 
 
 def observed_recovery_quantity(gateway: WeexGateway, symbol: str, position_side: str) -> Decimal:
@@ -2565,6 +2725,8 @@ def _leg_summary(
         "accounting_verified": not accounting_required or verified,
         "accounting_source": "user_trades" if report is not None else None,
         "maker_only": report.maker_only if report is not None else False,
+        "liquidity_policy_satisfied": not accounting_required or bool(report and report.verified and report.maker_only),
+        "dust_market_close": False,
         "fill_count": report.fill_count if report is not None else 0,
         "quote_volume": decimal_text(report.quote_volume) if report is not None else "0",
         "executed_quantity": decimal_text(report.executed_quantity if report is not None else executed_quantity),
@@ -2590,6 +2752,58 @@ def _leg_summary(
     }
 
 
+def _dust_close_summary(sequence: int, leg_plan: PairLegPlan, result: DustCloseResult) -> dict[str, Any]:
+    report = result.report
+    verified = bool(report and report.verified)
+    return {
+        "sequence": sequence,
+        "symbol": leg_plan.symbol,
+        "action": "close",
+        "side": leg_plan.closing_side,
+        "position_side": leg_plan.position_side,
+        "status": "completed" if verified else "stopped",
+        "reason": "authoritative_dust_fill_verified" if verified else "dust_close_audit_pending",
+        "verification_status": report.status if report is not None else "fills_pending",
+        "accounting_required": True,
+        "accounting_verified": verified,
+        "accounting_source": "user_trades" if report is not None else None,
+        "maker_only": False,
+        "liquidity_policy_satisfied": verified,
+        "dust_market_close": True,
+        "fill_count": report.fill_count if report is not None else 0,
+        "quote_volume": decimal_text(report.quote_volume) if report is not None else "0",
+        "executed_quantity": decimal_text(report.executed_quantity if report is not None else result.quantity),
+        "maker_count": report.maker_count if report is not None else 0,
+        "taker_count": report.taker_count if report is not None else 0,
+        "unknown_liquidity_count": report.unknown_liquidity_count if report is not None else 0,
+        "commission_by_asset": (
+            {asset: decimal_text(value) for asset, value in sorted(report.commission_by_asset.items())}
+            if report is not None
+            else {}
+        ),
+        "realized_pnl": decimal_text(report.realized_pnl) if report is not None else "0",
+        "warnings": list(report.warnings) if report is not None else [],
+        "elapsed_ms": 0,
+        "submissions": 1,
+        "cancels": 0,
+        "executor_observation": None,
+    }
+
+
+def _owned_position_quantity(legs: list[dict[str, Any]], symbol: str, position_side: str) -> Decimal:
+    owned = Decimal(0)
+    for leg in legs:
+        if str(leg.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if str(leg.get("position_side") or "").lower() != position_side.lower():
+            continue
+        if not bool(leg.get("accounting_verified")):
+            continue
+        quantity = Decimal(str(leg.get("executed_quantity") or 0))
+        owned += quantity if leg.get("action") == "open" else -quantity
+    return max(Decimal(0), owned)
+
+
 def _apply_fill_report(
     leg: dict[str, Any],
     report: LegFillReport,
@@ -2613,6 +2827,7 @@ def _apply_fill_report(
             "accounting_verified": verified,
             "accounting_source": "user_trades",
             "maker_only": report.maker_only,
+            "liquidity_policy_satisfied": report.maker_only,
             "fill_count": report.fill_count,
             "quote_volume": decimal_text(report.quote_volume),
             "executed_quantity": decimal_text(report.executed_quantity),
@@ -2642,6 +2857,8 @@ def _leg_exception_summary(sequence: int, spec: _LegSpec, reason: str) -> dict[s
         "accounting_verified": True,
         "accounting_source": None,
         "maker_only": False,
+        "liquidity_policy_satisfied": True,
+        "dust_market_close": False,
         "fill_count": 0,
         "quote_volume": "0",
         "executed_quantity": "0",
@@ -2674,6 +2891,9 @@ def _accounting_summary(legs: list[dict[str, Any]]) -> dict[str, Any]:
     taker_count = sum(int(leg.get("taker_count") or 0) for leg in legs)
     unknown_count = sum(int(leg.get("unknown_liquidity_count") or 0) for leg in legs)
     fill_count = sum(int(leg.get("fill_count") or 0) for leg in legs)
+    liquidity_policy_satisfied = verified and all(
+        bool(leg.get("liquidity_policy_satisfied", leg.get("maker_only"))) for leg in legs
+    )
     return {
         "source": "user_trades",
         "verified": verified,
@@ -2686,6 +2906,7 @@ def _accounting_summary(legs: list[dict[str, Any]]) -> dict[str, Any]:
         and maker_count == fill_count
         and taker_count == 0
         and unknown_count == 0,
+        "liquidity_policy_satisfied": liquidity_policy_satisfied,
         "executed_quote_volume": decimal_text(quote),
         "commission_by_asset": {asset: decimal_text(value) for asset, value in sorted(commission_by_asset.items())},
         "realized_pnl": decimal_text(realized_pnl),
@@ -2716,6 +2937,7 @@ def _result_payload(
         "reason": reason,
         "plan_id": plan.plan_id,
         "maker_only": accounting["maker_only"],
+        "liquidity_policy_satisfied": accounting["liquidity_policy_satisfied"],
         "executed_quote_volume": decimal_text(total_quote),
         "target_turnover_quote": decimal_text(plan.target_turnover_quote),
         "round_turnover_quote": decimal_text(plan.round_turnover_quote),
@@ -2808,6 +3030,9 @@ def _size_cycle(
 
 def _is_hard_terminal(reason: str) -> bool:
     return reason in {
+        "amount_precision_rejected",
+        "dust_close_audit_pending",
+        "minimum_quantity_rejected",
         "post_only_rejected",
         "taker_fill_detected",
         "unknown_liquidity",

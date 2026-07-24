@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from .campaign_events import _view
-from .campaign_helpers import _cleanup_confirmation
 from .models import AccountInstance, BetaCampaignView, TradingMode
 from .service import UnsafeOperation
 from .strategy_run_types import LifecyclePreparation
@@ -17,34 +16,13 @@ class StrategyRunCommandMixin:
 
     def prepare_planned(
         self,
-        instance: AccountInstance,
-        material: CredentialMaterial,
+        _instance: AccountInstance,
+        _material: CredentialMaterial,
         record: Any,
     ) -> LifecyclePreparation:
-        try:
-            boundary = self._manager.inspect_bound_strategy_boundary(material)
-        except Exception as exc:  # read-only and retryable
-            return LifecyclePreparation(
-                "unavailable",
-                reason_code=f"boundary_unavailable:{type(exc).__name__.lower()}",
-                message="账户持仓与挂单边界暂时不可用，请重试",
-            )
-        if bool(boundary["flat"]):
-            return LifecyclePreparation("ready", execution=_view(record, include_events=False))
-        self._journal.update(
-            record.campaign_id,
-            status="stopped",
-            finished_at_ms=self._now_ms(),
-            reason="launch_preview_boundary_changed",
-        )
-        cleanup_record = self._manager.prepare_bound_strategy_cleanup(instance, material, boundary)
-        counts = self._boundary_counts(boundary)
-        return LifecyclePreparation(
-            "cleanup_required",
-            execution=self._view_or_none(cleanup_record),
-            cleanup_confirmation=_cleanup_confirmation(cleanup_record.campaign_id),
-            **counts,
-        )
+        # Reopening an immutable preview is local-only. start_run performs the
+        # authoritative flat/no-orders check again before worker admission.
+        return LifecyclePreparation("ready", execution=_view(record, include_events=False))
 
     def start_run(
         self,
@@ -70,6 +48,7 @@ class StrategyRunCommandMixin:
         material: CredentialMaterial | None,
         *,
         session_id: str,
+        boundary: dict[str, object] | None = None,
     ) -> BetaCampaignView:
         return self._manager.preview_bound_strategy(
             instance.id,
@@ -83,13 +62,20 @@ class StrategyRunCommandMixin:
             baseline_lifetime_quote=plan.baseline_lifetime_quote_volume,
             direction=plan.direction,
             owner_user_id=instance.owner_user_id,
+            boundary_snapshot=boundary,
         )
 
-    def stop_run(self, instance: AccountInstance, execution_id: str, confirmation: str) -> BetaCampaignView:
+    def stop_run(
+        self,
+        instance: AccountInstance,
+        execution_id: str,
+        confirmation: str,
+        material: CredentialMaterial | None = None,
+    ) -> BetaCampaignView:
         preview = self._manager.get(instance.id, execution_id)
         if preview.strategy_id is None:
             raise UnsafeOperation("execution was not created from this account's bound strategy")
-        return self._manager.stop(instance.id, execution_id, confirmation)
+        return self._manager.stop(instance.id, execution_id, confirmation, material)
 
     def cleanup_run(
         self,
@@ -97,12 +83,11 @@ class StrategyRunCommandMixin:
         confirmation: str,
         material: CredentialMaterial | None,
     ) -> dict[str, object]:
-        lifecycle = self.projection(instance.id, instance.mode.value)
-        if lifecycle.state != "cleanup_required" or lifecycle.execution_id is None:
-            raise UnsafeOperation("this account does not currently require strategy cleanup")
+        boundary = self._journal.boundary_projection(instance.id) or {}
+        if not int(boundary.get("regular_order_count") or 0) and not int(boundary.get("trigger_order_count") or 0):
+            raise UnsafeOperation("该账号当前没有需要撤销的启动前挂单")
         return self._manager.cleanup_bound_strategy(
             instance.id,
-            lifecycle.execution_id,
             confirmation,
             material,
         )

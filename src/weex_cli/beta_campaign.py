@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from weex_cli.beta_allocation import BetaAllocation, HttpBetaAllocationProvider
 from weex_cli.beta_volume import (
     DEFAULT_STRATEGY_DIRECTION,
+    DEFAULT_TAKER_DUST_MAX_QUOTE,
     MAX_BETA_DRIFT,
     STRATEGY_DIRECTIONS,
     BetaVolumePlan,
@@ -78,6 +79,7 @@ class BetaVolumeCampaign:
     margin_mode: str
     allocation: BetaAllocation
     direction: str = DEFAULT_STRATEGY_DIRECTION
+    dust_close_max_quote: Decimal = DEFAULT_TAKER_DUST_MAX_QUOTE
 
     @classmethod
     def create(
@@ -101,6 +103,7 @@ class BetaVolumeCampaign:
         leverage: str | int = "auto",
         margin_mode: str = "isolated",
         direction: str = DEFAULT_STRATEGY_DIRECTION,
+        dust_close_max_quote: str | Decimal = DEFAULT_TAKER_DUST_MAX_QUOTE,
         authorization_minutes: int = DEFAULT_AUTHORIZATION_MINUTES,
         now_ms: int | None = None,
     ) -> BetaVolumeCampaign:
@@ -141,11 +144,12 @@ class BetaVolumeCampaign:
             leverage=leverage,
             margin_mode=margin_mode,
             direction=direction,
+            dust_close_max_quote=dust_close_max_quote,
             now_ms=now_ms,
         )
         created_at_ms = preview.created_at_ms
         campaign = cls(
-            schema_version=4,
+            schema_version=5,
             campaign_id="",
             created_at_ms=created_at_ms,
             expires_at_ms=created_at_ms + authorization_minutes * 60_000,
@@ -168,6 +172,7 @@ class BetaVolumeCampaign:
             margin_buffer=preview.margin_buffer,
             margin_mode=preview.margin_mode,
             direction=preview.direction,
+            dust_close_max_quote=preview.dust_close_max_quote,
             allocation=allocation,
         )
         return campaign._with_computed_id()
@@ -204,6 +209,7 @@ class BetaVolumeCampaign:
             "margin_buffer": decimal_text(self.margin_buffer),
             "margin_mode": self.margin_mode,
             "direction": self.direction,
+            "dust_close_max_quote": decimal_text(self.dust_close_max_quote),
             "time_in_force": "POST_ONLY",
             "allocation": self.allocation.as_dict(),
         }
@@ -253,12 +259,15 @@ class BetaVolumeCampaign:
                 margin_buffer=Decimal(str(payload["margin_buffer"])),
                 margin_mode=str(payload["margin_mode"]),
                 direction=str(payload.get("direction", payload.get("strategy", DEFAULT_STRATEGY_DIRECTION))),
+                dust_close_max_quote=Decimal(
+                    str(payload.get("dust_close_max_quote", DEFAULT_TAKER_DUST_MAX_QUOTE))
+                ),
                 allocation=allocation,
             )
         except (DecimalException, KeyError, TypeError, ValueError) as exc:
             raise ValidationError("stored campaign payload is invalid") from exc
         if (
-            campaign.schema_version not in {1, 2, 3, 4}
+            campaign.schema_version not in {1, 2, 3, 4, 5}
             or not 1 <= campaign.max_runs <= MAX_CAMPAIGN_RUNS
             or campaign.expires_at_ms <= campaign.created_at_ms
             or campaign.expires_at_ms - campaign.created_at_ms > 86_400_000
@@ -314,6 +323,8 @@ class BetaVolumeCampaign:
             fields.append(decimal_text(self.round_turnover_quote_min) or "0")
         if self.schema_version >= 4:
             fields.append(self.direction)
+        if self.schema_version >= 5:
+            fields.append(decimal_text(self.dust_close_max_quote) or "0")
         fields.extend(
             (
                 str(self.max_runs),
@@ -409,7 +420,7 @@ class BetaVolumeCampaignStore:
         if not isinstance(payload, Mapping):
             raise ValidationError("stored campaign schema is invalid")
         campaign_row = payload.get("campaign")
-        if payload.get("schema_version") not in {1, 2, 3, 4} or not isinstance(campaign_row, Mapping):
+        if payload.get("schema_version") not in {1, 2, 3, 4, 5} or not isinstance(campaign_row, Mapping):
             raise ValidationError("stored campaign schema is invalid")
         return BetaVolumeCampaignRecord(
             campaign=BetaVolumeCampaign.from_dict(campaign_row),
@@ -670,7 +681,7 @@ class LiveBetaVolumeCampaignService:
         )
 
     def _validate_authorization(self, campaign: BetaVolumeCampaign) -> None:
-        if campaign.schema_version not in {1, 2, 3, 4}:
+        if campaign.schema_version not in {1, 2, 3, 4, 5}:
             raise SafetyError("unsupported campaign schema")
         if campaign.profile_fingerprint != self.profile_fingerprint:
             raise SafetyError("campaign was authorized for a different live profile")
@@ -700,6 +711,7 @@ class LiveBetaVolumeCampaignService:
                 margin_buffer=campaign.margin_buffer,
                 margin_mode=campaign.margin_mode,
                 direction=campaign.direction,
+                dust_close_max_quote=campaign.dust_close_max_quote,
                 now_ms=created_at_ms,
             )
         except ValidationError as exc:
@@ -723,6 +735,7 @@ class LiveBetaVolumeCampaignService:
                 margin_buffer=campaign.margin_buffer,
                 margin_mode=campaign.margin_mode,
                 direction=campaign.direction,
+                dust_close_max_quote=campaign.dust_close_max_quote,
                 now_ms=created_at_ms,
             )
 
@@ -871,6 +884,11 @@ class LiveBetaVolumeCampaignService:
             "maker_only": (
                 not accounting_parse_failed
                 and bool(positive_children)
+                and all(_child_is_pure_maker(row) for row in positive_children)
+            ),
+            "liquidity_policy_satisfied": (
+                not accounting_parse_failed
+                and bool(positive_children)
                 and all(_child_is_authoritative(row) for row in positive_children)
             ),
             "runs_used": len(child_results),
@@ -973,10 +991,14 @@ def _child_is_authoritative(result: Mapping[str, Any]) -> bool:
         return False
     return (
         bool(accounting.get("verified"))
-        and bool(accounting.get("maker_only"))
-        and int(accounting.get("taker_count") or 0) == 0
+        and bool(accounting.get("liquidity_policy_satisfied", accounting.get("maker_only")))
         and int(accounting.get("unknown_liquidity_count") or 0) == 0
     )
+
+
+def _child_is_pure_maker(result: Mapping[str, Any]) -> bool:
+    accounting = result.get("accounting")
+    return bool(isinstance(accounting, Mapping) and accounting.get("verified") and accounting.get("maker_only"))
 
 
 def _authoritative_child_quote(result: Mapping[str, Any]) -> Decimal:
@@ -984,7 +1006,7 @@ def _authoritative_child_quote(result: Mapping[str, Any]) -> Decimal:
     if quote == 0:
         return quote
     if not _child_is_authoritative(result):
-        raise SafetyError("child volume is not verified pure Maker userTrades volume")
+        raise SafetyError("child volume is not verified userTrades volume under the execution liquidity policy")
     return quote
 
 

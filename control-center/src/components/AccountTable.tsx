@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { FileTerminal, Play, RefreshCw, ShieldAlert, Square } from 'lucide-react'
+import { FileTerminal, ListX, Play, RefreshCw, Search, ShieldAlert, Square } from 'lucide-react'
 import type { AccountInstance } from '../types'
 import { calculateFundingPreflight, countdown, estimateRounds, targetModeLabel, targetProgress } from '../utils/strategy'
 import { AccountActionsMenu } from './AccountActionsMenu'
@@ -56,7 +56,7 @@ function historySyncLabel(account: AccountInstance): string {
   if (sync.state === 'initial_baseline_pending') return '基线待核验'
   if (sync.state === 'incremental_queued') return '增量同步排队中'
   if (sync.state === 'syncing') return '正在核验成交历史'
-  if (sync.state === 'stale') return '数据待核验'
+  if (sync.state === 'stale') return '成交历史待核验'
   return `最近成交已落账 · ${relativeTime(sync.lastSuccessAtMs)}`
 }
 
@@ -103,6 +103,9 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
             const progress = targetVolume ? Math.min(100, achievedVolume / targetVolume * 100) : 0
             const progressSource = account.volume.strategyProgressSource ?? (session ? 'ledger' : 'pending')
             const journalSyncing = progressSource === 'execution_journal'
+            const recoveryState = account.executionLifecycle.state
+            const recoveryActive = recoveryState === 'recovering'
+              || recoveryState === 'recovery_cleanup_required'
             const dataNeedsVerification = Boolean(session?.reconciliationRequired)
               || progressSource === 'pending'
               || (progressSource === 'ledger' && Boolean(session?.stale))
@@ -142,8 +145,12 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                 : account.mode === 'live'
                   ? lifecycle.primaryAction === 'stop'
                     ? '安全停止已绑定策略'
-                    : lifecycle.primaryAction === 'cleanup'
-                      ? '安全清理残留后重新准备启动'
+                    : lifecycle.primaryAction === 'safe_stop'
+                      ? '当前任务仓位待安全收尾'
+                    : lifecycle.primaryAction === 'cancel_orders'
+                      ? '撤销启动前普通单和条件单'
+                      : lifecycle.primaryAction === 'recheck'
+                        ? '检查已有仓位是否已关闭'
                       : lifecycle.primaryAction === 'wait'
                         ? lifecycle.state === 'stopping' ? '安全停止中' : '后台只读核验中'
                         : lastRun ? '再次运行已绑定策略' : '启动已绑定策略'
@@ -216,7 +223,11 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                   <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                   <span className={`next-action ${dataNeedsVerification ? 'warning' : ''}`}>
                     {dataNeedsVerification
-                      ? '数据待核验'
+                      ? recoveryState === 'recovery_cleanup_required'
+                        ? `当前任务仓位待安全收尾 · 已核验 ${currency.format(achievedVolume)}`
+                        : recoveryActive
+                          ? `恢复检查中 · 已核验 ${currency.format(achievedVolume)}`
+                          : '成交审计待核验'
                       : journalSyncing
                         ? `已确认 ${currency.format(achievedVolume)} · 成交账本追平中`
                       : session
@@ -241,12 +252,14 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                 <td className="actions-column">
                   <div className="row-actions">
                     <button className="icon-button" type="button" onClick={() => onToggleRunning(account)} disabled={actionDisabled} data-tooltip={actionTooltip} aria-label={actionTooltip}>
-                      {account.mode === 'live' && lifecycle.primaryAction === 'cleanup'
-                        ? <ShieldAlert size={15} />
+                      {account.mode === 'live' && lifecycle.primaryAction === 'cancel_orders'
+                        ? <ListX size={15} />
+                        : account.mode === 'live' && lifecycle.primaryAction === 'recheck'
+                          ? <Search size={15} />
                         : account.mode === 'live'
-                          ? lifecycle.primaryAction === 'stop' ? <Square size={14} /> : <Play size={15} />
+                          ? lifecycle.primaryAction === 'stop' || lifecycle.primaryAction === 'safe_stop' ? <Square size={14} /> : <Play size={15} />
                           : account.status === 'running' ? <Square size={14} /> : <Play size={15} />}
-                      <span className="mobile-action-label">{account.mode === 'live' && lifecycle.primaryAction === 'cleanup' ? '清理' : account.status === 'running' || lifecycle.primaryAction === 'stop' ? '停止' : '启动'}</span>
+                      <span className="mobile-action-label">{account.mode === 'live' && lifecycle.primaryAction === 'cancel_orders' ? '撤单' : account.mode === 'live' && lifecycle.primaryAction === 'recheck' ? '检查' : lifecycle.primaryAction === 'safe_stop' ? '收尾' : account.status === 'running' || lifecycle.primaryAction === 'stop' ? '停止' : '启动'}</span>
                     </button>
                     <button className="icon-button" type="button" onClick={() => onRefresh(account)} data-tooltip="刷新该账号的价格、钱包与仓位" aria-label="刷新该账号的价格、钱包与仓位" disabled={refreshingIds.has(account.id)}>
                       <RefreshCw size={15} className={refreshingIds.has(account.id) ? 'spin' : ''} />

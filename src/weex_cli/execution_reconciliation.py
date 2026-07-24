@@ -32,6 +32,7 @@ class LegFillRequest:
     order_ids: tuple[str, ...]
     started_at_ms: int
     ended_at_ms: int
+    maker_only_required: bool = True
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,7 @@ def _report_for_request(payload: Mapping[str, Any], request: LegFillRequest) -> 
         status = "fill_source_incomplete"
     elif action_mismatch:
         status = "position_action_mismatch"
-    elif taker_count:
+    elif request.maker_only_required and taker_count:
         status = "taker_fill_detected"
     elif unknown_count:
         status = "unknown_liquidity"

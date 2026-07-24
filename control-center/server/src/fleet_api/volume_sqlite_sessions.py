@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from .volume_contracts import FillConflictError, NormalizedTradeFill, VolumeSession
-from .volume_helpers import _fill_summary, _session_projection
+from .volume_helpers import _fill_summary, _in_session_window, _session_projection
 from .volume_sqlite_rows import row_to_fill, row_to_session
 
 
@@ -195,15 +195,17 @@ class SQLiteLedgerSessionsMixin:
         return self.get_session(session_id)  # type: ignore[return-value]
 
     def _session_fills(self, session: VolumeSession) -> list[NormalizedTradeFill]:
+        query = """SELECT identity, executed_at_ms, quote_volume, symbol, order_id, base_quantity, side,
+               position_side, position_action, maker, commission, commission_asset, realized_pnl,
+               source, authoritative, created_at_ms FROM trade_volume_fills
+               WHERE instance_id = ? AND mode = ? AND executed_at_ms >= ?"""
+        parameters: list[object] = [session.account_id, session.mode, session.started_at_ms]
+        if session.finished_at_ms is not None:
+            query += " AND executed_at_ms <= ?"
+            parameters.append(session.finished_at_ms)
         with self._lock:
-            rows = self._connection.execute(
-                """SELECT identity, executed_at_ms, quote_volume, symbol, order_id, base_quantity, side,
-                   position_side, position_action, maker, commission, commission_asset, realized_pnl,
-                   source, authoritative, created_at_ms FROM trade_volume_fills
-                   WHERE instance_id = ? AND mode = ? AND executed_at_ms >= ?""",
-                (session.account_id, session.mode, session.started_at_ms),
-            ).fetchall()
-        return [row_to_fill(row) for row in rows]
+            rows = self._connection.execute(query, parameters).fetchall()
+        return [fill for row in rows if _in_session_window(fill := row_to_fill(row), session)]
 
     def session_projection(self, session_id: str) -> dict[str, object]:
         session = self.get_session(session_id)

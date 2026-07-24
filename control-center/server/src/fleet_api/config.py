@@ -60,6 +60,7 @@ class ControlPlaneSettings:
     live_campaign_websockets_enabled: bool = False
     execution_phase_gap_seconds: float = 5
     execution_phase_jitter_seconds: float = 15
+    taker_dust_max_quote: Decimal = Decimal("10.00")
     campaign_data_directory: Path = Path("server/data/beta-campaigns")
     executor_socket: Path = Path("run/weex-fleet-executor.sock")
     # Local-console identity is intentionally separate from exchange
@@ -96,6 +97,8 @@ class ControlPlaneSettings:
             raise ValueError("Fleet execution I/O capacities must be at least 1")
         if self.execution_phase_gap_seconds < 0 or self.execution_phase_jitter_seconds < 0:
             raise ValueError("execution phase pacing intervals cannot be negative")
+        if not self.taker_dust_max_quote.is_finite() or self.taker_dust_max_quote <= 0:
+            raise ValueError("FLEET_TAKER_DUST_MAX_QUOTE must be finite and positive")
         if self.mock_tick_interval_seconds < 0.25:
             raise ValueError("FLEET_MOCK_TICK_SECONDS must be at least 0.25")
         if self.weex_poll_interval_seconds < 5:
@@ -184,6 +187,7 @@ class ControlPlaneSettings:
             ),
             execution_phase_gap_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_GAP_SECONDS", "5")),
             execution_phase_jitter_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_JITTER_SECONDS", "15")),
+            taker_dust_max_quote=Decimal(os.environ.get("FLEET_TAKER_DUST_MAX_QUOTE", "10.00")),
             campaign_data_directory=Path(
                 os.environ.get("FLEET_CAMPAIGN_DATA_DIR", "server/data/beta-campaigns")
             ).expanduser(),

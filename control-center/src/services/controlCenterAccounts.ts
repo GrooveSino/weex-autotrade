@@ -47,6 +47,7 @@ export function accountFromDraft(draft: AccountDraft, strategy: VolumeStrategy):
     executionLifecycle: {
       state: 'idle', primaryAction: 'start', executionId: null, sessionId: null,
       reasonCode: null, positionCount: 0, regularOrderCount: 0, triggerOrderCount: 0,
+      blockingPositions: [], boundaryCheckedAtMs: null,
     },
     strategyProgress: {
       generatedVolumeQuote: '0',

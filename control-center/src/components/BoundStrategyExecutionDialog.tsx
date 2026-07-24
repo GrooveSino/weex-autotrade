@@ -13,6 +13,7 @@ import {
 } from '../services/controlCenter'
 import { BoundStrategyPreparation, type PreparationStage } from './BoundStrategyPreparation'
 import { BoundStrategyOverview } from './BoundStrategyOverview'
+import { BoundStrategyBoundary } from './BoundStrategyBoundary'
 
 interface BoundStrategyExecutionDialogProps {
   account: AccountInstance
@@ -140,15 +141,15 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
   }
 
   const cleanup = async () => {
-    if (preparation?.disposition !== 'cleanup_required') return
+    if (preparation?.disposition !== 'orders_cleanup_required') return
     setBusy(true)
     setError(null)
     try {
       const next = await cleanupBoundStrategyRun(accountRef.current, confirmation, direction)
       applyPreparation(next)
-      onToastRef.current(`${accountRef.current.name} 的残留订单与仓位已完成一次安全清理和边界核验`)
+      onToastRef.current(`${accountRef.current.name} 的普通挂单与条件单已撤销并核验`)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '安全清理结果无法确认；命令不会自动重试')
+      setError(reason instanceof Error ? reason.message : '撤单结果无法确认；命令不会自动重试')
     } finally {
       setBusy(false)
     }
@@ -228,11 +229,12 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
 
   const plan = execution as (BetaCampaignPreview | null)
   const canExecute = execution?.status === 'planned' && riskAcknowledged && confirmation === execution.confirmation && enabled
-  const canStop = execution?.status === 'executing' && confirmation === execution.stopConfirmation
-  const canCleanup = preparation?.disposition === 'cleanup_required'
-    && Boolean(preparation.cleanupConfirmation)
-    && confirmation === preparation.cleanupConfirmation
-
+  const canStop = Boolean(
+    execution
+    && ['executing', 'recovering', 'uncertain'].includes(execution.status)
+    && confirmation === execution.stopConfirmation
+    && (execution.status === 'executing' || preparation?.disposition === 'recovery_cleanup_required'),
+  )
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="dialog beta-campaign-dialog bound-strategy-execution-dialog" role="dialog" aria-modal="true" aria-labelledby="bound-execution-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -256,25 +258,17 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
           {!enabled && <div className="execution-warning"><AlertTriangle size={16} /><p>执行器不可用或实盘门禁未启用。不会把普通策略启动当作实盘交易。</p></div>}
           {error && <div className="execution-warning"><AlertTriangle size={16} /><p>{error}</p></div>}
 
-          {preparationStage ? <BoundStrategyPreparation stage={preparationStage} /> : preparation?.disposition === 'cleanup_required' ? (
-            <section className="bound-start-confirmation">
-              <div className="execution-warning">
-                <AlertTriangle size={16} />
-                <p>检测到真实残留：{preparation.positionCount} 个持仓、{preparation.regularOrderCount} 个普通挂单、{preparation.triggerOrderCount} 个条件单。完成一次安全清理后，此窗口会直接生成新的启动确认。</p>
-              </div>
-              <div className="bound-phrase-panel">
-                <div className="bound-phrase-heading">
-                  <div><span>安全清理确认短语</span><small>先撤单并核验，再以 Maker-only 平掉实际残留仓位</small></div>
-                  <button className="icon-button compact" type="button" onClick={() => copy(preparation.cleanupConfirmation ?? '', onToast)} data-tooltip="复制清理短语" aria-label="复制清理短语"><Copy size={13} /></button>
-                </div>
-                <code className="confirmation-phrase">{preparation.cleanupConfirmation}</code>
-                <input className="confirm-input" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="粘贴完整清理短语" autoComplete="off" />
-              </div>
-              <footer className="dialog-actions">
-                <button className="button secondary" type="button" onClick={onClose}>关闭</button>
-                <button className="button danger" type="button" disabled={busy || !canCleanup} onClick={() => void cleanup()}>{busy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}确认安全清理</button>
-              </footer>
-            </section>
+          {preparationStage ? <BoundStrategyPreparation stage={preparationStage} /> : preparation && ['orders_cleanup_required', 'position_blocked'].includes(preparation.disposition) ? (
+            <BoundStrategyBoundary
+              preparation={preparation}
+              confirmation={confirmation}
+              busy={busy}
+              onConfirmationChange={setConfirmation}
+              onCancelOrders={() => void cleanup()}
+              onRecheck={() => void preview()}
+              onClose={onClose}
+              onCopy={(value) => copy(value, onToast)}
+            />
           ) : !execution ? (
             <div className="bound-strategy-empty-actions">
               <p>{error ? '启动确认未能生成。重新读取只会执行只读预检，不会提交订单。' : '当前没有可用的启动确认。重新读取时不会提交订单。'}</p>
@@ -306,7 +300,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
                 </div>
                 <label className="bound-risk-check">
                   <input type="checkbox" checked={riskAcknowledged} onChange={(event) => setRiskAcknowledged(event.target.checked)} />
-                  <span>我理解这会在实盘提交 {direction === 'btc_long_eth_short' ? 'BTC 多、ETH 空' : 'BTC 空、ETH 多'}的 POST_ONLY 订单。<small>固定 400x 全仓；网络不确定时不会自动补单或重试。</small></span>
+                  <span>我理解这会在实盘提交 {direction === 'btc_long_eth_short' ? 'BTC 多、ETH 空' : 'BTC 空、ETH 多'}的 POST_ONLY 订单。<small>固定 400x 全仓；正常订单保持 Maker。仅当前任务产生且不超过 {execution.dustClosePolicy.maxQuote} USDT 的小额尾仓，可能按仓位 ID 市价收尾一次。</small></span>
                 </label>
                 <div className="bound-phrase-panel">
                   <div className="bound-phrase-heading">
@@ -322,12 +316,18 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
                 <code className="confirmation-phrase">{execution.stopConfirmation}</code>
                 <input className="confirm-input" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="粘贴完整停止短语" autoComplete="off" />
               </>}
-              {(execution.status === 'recovering' || execution.status === 'uncertain') && <div className="execution-warning"><AlertTriangle size={16} /><p>后台正在只读核验订单、仓位和成交。核验为空仓且无挂单后会自动恢复为可启动；若发现真实残留，此窗口会切换为安全清理。</p></div>}
+              {(execution.status === 'recovering' || execution.status === 'uncertain') && <div className="execution-warning"><AlertTriangle size={16} /><p>{preparation?.disposition === 'recovery_cleanup_required' ? '已确认当前仓位属于本次任务。粘贴原停止确认短语后，可撤单并执行 Maker 优先的安全收尾。' : '系统正在按退避计划只读核验订单、仓位和成交；确认空仓后会自动结束旧任务。'}</p></div>}
+              {preparation?.disposition === 'recovery_cleanup_required' && <>
+                <label className="confirm-label">安全收尾确认<button className="icon-button compact" type="button" onClick={() => copy(execution.stopConfirmation, onToast)} data-tooltip="复制停止短语" aria-label="复制停止短语"><Copy size={13} /></button></label>
+                <code className="confirmation-phrase">{execution.stopConfirmation}</code>
+                <input className="confirm-input" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="粘贴完整停止短语" autoComplete="off" />
+              </>}
               {(plan?.warnings?.length ?? 0) > 0 && <p className="reason-code">{plan?.warnings.join(' · ')}</p>}
               <footer className="dialog-actions">
                 <button className="button secondary" type="button" onClick={onClose}>关闭</button>
                 {execution.status === 'planned' && <button className="button primary" type="button" disabled={busy || !canExecute} onClick={() => void execute()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}确认并启动</button>}
                 {execution.status === 'executing' && <button className="button danger" type="button" disabled={busy || !canStop} onClick={() => void stop()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Square size={14} />}安全停止</button>}
+                {preparation?.disposition === 'recovery_cleanup_required' && <button className="button danger" type="button" disabled={busy || !canStop} onClick={() => void stop()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Square size={14} />}安全收尾</button>}
                 {(execution.status === 'recovering' || execution.status === 'uncertain') && <button className="button secondary" type="button" disabled={busy || !enabled} onClick={() => void preview()}>{busy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}刷新核验状态</button>}
               </footer>
             </>

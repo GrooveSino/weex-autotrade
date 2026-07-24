@@ -44,9 +44,11 @@ export async function cleanupBoundStrategyRun(
   confirmation: string,
   direction: StrategyDirection = 'btc_long_eth_short',
 ): Promise<StrategyRunPrepareResponse> {
+  const commandId = crypto.randomUUID()
   return apiRequest<StrategyRunPrepareResponse>(`/instances/${account.id}/strategy-run/cleanup`, {
     method: 'POST',
-    body: JSON.stringify({ confirmation, direction }),
+    body: JSON.stringify({ confirmation, direction, commandId }),
+    headers: { 'X-Fleet-Command-Id': commandId },
   })
 }
 

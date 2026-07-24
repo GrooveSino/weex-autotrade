@@ -251,12 +251,46 @@ def test_monitor_projects_reconciled_leg_events_while_session_ledger_is_pending(
     assert snapshot.remaining_quote_volume == Decimal("59.00")
     assert snapshot.btc_quote_volume == Decimal("30.25")
     assert snapshot.eth_quote_volume == Decimal("10.75")
+    assert snapshot.maker_fill_count == 0
+    assert snapshot.taker_fill_count == 0
+    assert snapshot.unknown_fill_count == 2
     assert snapshot.volume_source == "execution_journal"
     assert snapshot.source_complete is False
     assert snapshot.stale is True
     assert progress is not None
     assert progress.verified_quote_volume == Decimal("41.00")
     assert progress.volume_source == "execution_journal"
+
+
+def test_monitor_keeps_actor_phase_when_a_delta_has_no_actor_lifecycle_event() -> None:
+    journal = InMemoryCampaignJournal()
+    campaign = sample_campaign()
+    journal.create("ins-1", campaign, metadata(campaign))
+    journal.add_event(
+        campaign.campaign_id,
+        {
+            "event": "actor_lifecycle",
+            "phase": "phase_queued",
+            "queue_phase": "open",
+            "queue_position": 3,
+            "estimated_start_at_ms": 12_000,
+            "at_ms": 1_000,
+        },
+    )
+    journal.add_event(
+        campaign.campaign_id,
+        {"event": "leg_preparing", "symbol": "BTCUSDT", "action": "open", "at_ms": 1_500},
+    )
+
+    snapshot = StrategyMonitorService(journal, InMemoryTradeVolumeLedger(), "generation-1").snapshot(
+        "ins-1",
+        event_rows=journal.events_after(campaign.campaign_id, 1, 1),
+    )
+
+    assert snapshot.execution_state == "phase_queued"
+    assert snapshot.phase_queue_position == 3
+    assert any(wait.key == "actor-phase-queue" for wait in snapshot.active_waits)
+    assert all(entry.event_name != "actor_lifecycle" for entry in snapshot.timeline)
 
 
 def test_sqlite_event_and_projection_commit_atomically(tmp_path) -> None:

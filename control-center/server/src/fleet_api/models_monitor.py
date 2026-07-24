@@ -48,7 +48,7 @@ class ExecutionTimelineEntry(CamelModel):
 
 
 class StrategyMonitorSnapshot(CamelModel):
-    schema_version: int = 4
+    schema_version: int = 5
     instance_id: str
     session_id: str | None = None
     execution_id: str | None = None
@@ -69,6 +69,12 @@ class StrategyMonitorSnapshot(CamelModel):
     source_complete: bool = False
     stale: bool = True
     reconciliation_required: bool = False
+    ledger_sync_state: Literal["idle", "queued", "syncing", "complete", "stale"] = "idle"
+    audit_status: Literal["verified", "pending", "discrepant"] = "pending"
+    recovery_state: str | None = None
+    recovery_attempt: int = Field(default=0, ge=0)
+    next_recovery_check_at_ms: int | None = Field(default=None, gt=0)
+    boundary_state: Literal["flat", "owned_exposure", "external_exposure", "unknown"] = "unknown"
     btc_quote_volume: Decimal = Decimal(0)
     eth_quote_volume: Decimal = Decimal(0)
     maker_fill_count: int = 0

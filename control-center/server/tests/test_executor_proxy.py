@@ -181,7 +181,7 @@ def test_proxy_never_retries_a_failed_mutation() -> None:
             headers={"X-Fleet-Command-Id": "failed-once"},
         )
     assert response.status_code == 503
-    assert response.json()["detail"] == "executor unavailable; no command was retried"
+    assert response.json()["detail"] == "执行器当前无法连接。系统没有自动重试命令，也不会重复提交订单。"
     assert calls == 1
 
 
@@ -205,8 +205,28 @@ def test_proxy_reports_command_acknowledgement_timeout_without_retrying() -> Non
 
     assert response.status_code == 504
     assert response.json()["commandId"] == "timed-out-once"
-    assert "no command was retried" in response.json()["detail"]
+    assert "没有自动重试" in response.json()["detail"]
     assert calls == 1
+
+
+def test_proxy_localizes_an_opaque_prepare_500_with_stage_and_safety_context() -> None:
+    def executor(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Server Error")
+
+    app = create_proxy_app(
+        Path("/tmp/fleet-executor.sock"), transport=httpx.MockTransport(executor), auth_required=False
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/instances/ins-1/strategy-run/prepare",
+            json={"direction": "btc_long_eth_short"},
+            headers={"X-Fleet-Command-Id": "prepare-500"},
+        )
+
+    assert response.status_code == 500
+    assert "生成策略启动确认失败" in response.json()["detail"]
+    assert "HTTP 500" in response.json()["detail"]
+    assert "不会提交订单" in response.json()["detail"]
 
 
 def test_proxy_streams_monitor_sse_and_forwards_resume_cursor() -> None:

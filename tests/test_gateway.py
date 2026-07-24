@@ -132,6 +132,17 @@ def test_live_account_and_order_management(gateway) -> None:
     assert close_calls[1][-1] == {}
 
 
+def test_close_position_id_uses_the_official_numeric_position_boundary(gateway) -> None:
+    target, fake = gateway
+
+    target.close_position_id("BTC", "689987235755328154")
+
+    close_call = [call for call in fake.calls if call[:2] == ("request", "capi/v3/closePositions")][-1]
+    assert close_call[-1] == {"symbol": "BTCUSDT", "positionId": 689987235755328154}
+    with pytest.raises(ValidationError, match="position ID"):
+        target.close_position_id("BTC", "position-7")
+
+
 def test_weex_code_200_mutation_envelope_is_treated_as_success() -> None:
     class SuccessEnvelopeExchange(FakeExchange):
         def set_margin_mode(self, mode, symbol):

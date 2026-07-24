@@ -17,6 +17,7 @@ class InMemoryCampaignJournal:
     def __init__(self) -> None:
         self._records: dict[str, CampaignRecord] = {}
         self._monitor_projections: dict[str, ExecutionMonitorProjection] = {}
+        self._boundary_projections: dict[str, dict[str, Any]] = {}
         self._monitor_transaction_failures = 0
         self._lock = RLock()
 
@@ -216,6 +217,15 @@ class InMemoryCampaignJournal:
                 "last_event_at_ms": latest,
             }
 
+    def boundary_projection(self, instance_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            projection = self._boundary_projections.get(instance_id)
+            return dict(projection) if projection is not None else None
+
+    def replace_boundary_projection(self, instance_id: str, projection: dict[str, Any]) -> None:
+        with self._lock:
+            self._boundary_projections[instance_id] = json.loads(json.dumps(projection, separators=(",", ":")))
+
     def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool:
         with self._lock:
             current = self._records[campaign_id.lower()]
@@ -247,6 +257,7 @@ class InMemoryCampaignJournal:
             ]:
                 self._records.pop(campaign_id, None)
                 self._monitor_projections.pop(campaign_id, None)
+            self._boundary_projections.pop(instance_id, None)
 
     def close(self) -> None:
         return None

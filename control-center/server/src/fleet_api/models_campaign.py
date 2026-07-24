@@ -82,6 +82,7 @@ class BoundStrategyExecutionStopRequest(CamelModel):
 class StrategyRunCleanupRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=240)
     direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
+    command_id: str = Field(min_length=1, max_length=128)
 
 
 class BetaCampaignExecuteRequest(CamelModel):
@@ -124,6 +125,7 @@ class BetaCampaignView(CamelModel):
     selected_target_quote_volume: Decimal | None = None
     leverage: str | int
     margin_mode: str
+    dust_close_policy: dict[str, object] = Field(default_factory=dict)
     target_quote: Decimal
     round_turnover_quote_min: Decimal | None = None
     cycle_volume: Decimal
@@ -181,8 +183,24 @@ class BetaCampaignPreview(BetaCampaignView):
     blockers: list[str] = Field(default_factory=list)
 
 
+class BlockingPosition(CamelModel):
+    symbol: Literal["BTC", "ETH"]
+    side: Literal["long", "short", "unknown"]
+    quantity: Decimal = Field(ge=0)
+    approximate_quote: Decimal = Field(ge=0)
+
+
 class StrategyRunPrepareResponse(CamelModel):
-    disposition: Literal["ready", "running", "stopping", "recovering", "cleanup_required", "unavailable"]
+    disposition: Literal[
+        "ready",
+        "running",
+        "stopping",
+        "recovering",
+        "recovery_cleanup_required",
+        "orders_cleanup_required",
+        "position_blocked",
+        "unavailable",
+    ]
     preview: BetaCampaignPreview | None = None
     current: BetaCampaignView | None = None
     reason_code: str | None = None
@@ -191,3 +209,6 @@ class StrategyRunPrepareResponse(CamelModel):
     regular_order_count: int = Field(default=0, ge=0)
     trigger_order_count: int = Field(default=0, ge=0)
     cleanup_confirmation: str | None = None
+    blocking_positions: list[BlockingPosition] = Field(default_factory=list)
+    allowed_actions: list[Literal["cancel_orders", "recheck", "safe_stop"]] = Field(default_factory=list)
+    boundary_checked_at_ms: int | None = Field(default=None, gt=0)

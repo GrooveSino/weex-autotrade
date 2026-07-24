@@ -125,6 +125,25 @@ def test_active_event_requests_are_debounced_per_account() -> None:
     asyncio.run(scenario())
 
 
+def test_active_request_becoming_idle_clears_its_pending_sync_projection() -> None:
+    async def scenario() -> None:
+        instance = account("settled", status=InstanceStatus.RUNNING)
+        service = FakeService({instance.id: instance})
+        ledger = InMemoryTradeVolumeLedger()
+        subject = scheduler(service, FakeRuntime(), ledger)
+
+        subject.request(instance.id, ACTIVE_EVENT)
+        service.instances[instance.id] = instance.model_copy(update={"status": InstanceStatus.STOPPED})
+
+        assert await subject.run_due() is False
+        checkpoint = ledger.sync_checkpoint(instance.id, "live") or {}
+        assert checkpoint["pending"] is False
+        assert checkpoint["next_sync_at_ms"] is None
+        assert checkpoint["sync_reason"] is None
+
+    asyncio.run(scenario())
+
+
 def test_history_requests_share_one_global_and_proxy_serialization_lane() -> None:
     async def scenario() -> None:
         first = account("one")
@@ -170,6 +189,22 @@ def test_final_session_sync_runs_once_after_instance_becomes_idle() -> None:
         subject.request(instance.id, FINAL_SESSION)
         assert await subject.run_due() is True
         assert await subject.run_due() is False
+        assert runtime.calls == [instance.id]
+
+    asyncio.run(scenario())
+
+
+def test_final_session_sync_replaces_a_stale_active_event_for_an_idle_account() -> None:
+    async def scenario() -> None:
+        instance = account("final-over-active")
+        service = FakeService({instance.id: instance})
+        runtime = FakeRuntime()
+        subject = scheduler(service, runtime, InMemoryTradeVolumeLedger())
+
+        subject.request(instance.id, ACTIVE_EVENT)
+        subject.request(instance.id, FINAL_SESSION)
+
+        assert await subject.run_due() is True
         assert runtime.calls == [instance.id]
 
     asyncio.run(scenario())
