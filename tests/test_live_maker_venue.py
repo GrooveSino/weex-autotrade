@@ -208,13 +208,15 @@ def test_submission_boundary_is_emitted_only_immediately_before_exchange_mutatio
 
     venue.submit_post_only("buy", 1, 49, "btc-open")
     boundary = [event for event in events if event.get("event") == "order_submission_attempted"]
-    assert boundary == [{
-        "event": "order_submission_attempted",
-        "symbol": "BTC",
-        "side": "buy",
-        "position_side": "long",
-        "reduce_only": False,
-    }]
+    assert boundary == [
+        {
+            "event": "order_submission_attempted",
+            "symbol": "BTC",
+            "side": "buy",
+            "position_side": "long",
+            "reduce_only": False,
+        }
+    ]
     assert len(gateway.intents) == 1
 
 

@@ -1,44 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from .models import BetaCampaignEvent, BetaCampaignExecuteRequest, BetaCampaignPreview, BetaCampaignPreviewRequest, BetaCampaignStopRequest, BetaCampaignView, TradingMode
-from .service import UnsafeOperation
 
 from fastapi import FastAPI
+
 from .main_context import FleetAppContext
+from .models import (
+    BetaCampaignEvent,
+    BetaCampaignExecuteRequest,
+    BetaCampaignPreview,
+    BetaCampaignPreviewRequest,
+    BetaCampaignStopRequest,
+    BetaCampaignView,
+    TradingMode,
+)
+from .service import UnsafeOperation
 
 
 def register_campaign_routes(app: FastAPI, ctx: FleetAppContext) -> None:
-    selected = ctx.selected
     service = ctx.service
-    repository = ctx.repository
     vault = ctx.vault
-    volume_ledger = ctx.volume_ledger
-    execution_journal = ctx.execution_journal
-    execution_coordinator = ctx.execution_coordinator
-    selected_allocation_provider = ctx.selected_allocation_provider
-    runtime = ctx.runtime
-    beta_source_runtime = ctx.beta_source_runtime
-    campaign_journal = ctx.campaign_journal
     campaign_manager = ctx.campaign_manager
-    app_state_campaign_manager = ctx.campaign_manager
-    broker = ctx.broker
-    session_volume = ctx.session_volume
-    strategy_monitor = ctx.strategy_monitor
-    command_ledger = ctx.command_ledger
-    executor_generation = ctx.executor_generation
-    executor_release_id = ctx.executor_release_id
-    latest_bound_record = ctx.latest_bound_record
-    finalize_bound_strategy_session = ctx.finalize_bound_strategy_session
-    schedule_session_finalization = ctx.schedule_session_finalization
-    notify_campaign_change = ctx.notify_campaign_change
-    establish_bound_strategy_session = ctx.establish_bound_strategy_session
-    publish_snapshot = ctx.publish_snapshot
-    refresh_beta_state = ctx.refresh_beta_state
-    projected_instances = ctx.projected_instances
-    combined_log_updates = ctx.combined_log_updates
-    strategy_run_plan = ctx.strategy_run_plan
-    require_command_id = ctx.require_command_id
 
     @app.post(
         "/api/v1/instances/{instance_id}/beta-campaigns/preview",

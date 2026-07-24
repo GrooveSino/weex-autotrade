@@ -34,6 +34,7 @@ def payload(name: str, api_key: str, proxy_url: str) -> dict[str, object]:
         "proxy": {"type": "https", "url": proxy_url},
     }
 
+
 class RecordingAdapter:
     def __init__(self, factory: "RecordingFactory", instance_id: str) -> None:
         self.factory = factory
@@ -62,6 +63,7 @@ class RecordingAdapter:
     async def aclose(self) -> None:
         return None
 
+
 class RecordingFactory:
     def __init__(self) -> None:
         self.active = 0
@@ -70,6 +72,7 @@ class RecordingFactory:
 
     def create(self, instance_id: str) -> RecordingAdapter:
         return RecordingAdapter(self, instance_id)
+
 
 class FixedExposureAdapter:
     def __init__(self, exposure: ExposureSnapshot) -> None:
@@ -91,6 +94,7 @@ class FixedExposureAdapter:
     async def aclose(self) -> None:
         return None
 
+
 class FixedExposureFactory:
     def __init__(self, exposure: ExposureSnapshot) -> None:
         self.exposure = exposure
@@ -99,12 +103,14 @@ class FixedExposureFactory:
         del instance_id
         return FixedExposureAdapter(self.exposure)
 
+
 class FailingAdapter(RecordingAdapter):
     async def collect(self, context: AccountTelemetryContext) -> AccountTelemetry:
         assert context.credentials is not None
         api_key = context.credentials.api_key.get_secret_value()
         proxy_url = context.credentials.proxy_url.get_secret_value()
         raise RuntimeError(f"must-not-leak:{api_key}:{proxy_url}")
+
 
 class MixedFactory(RecordingFactory):
     def __init__(self, failing_id: str) -> None:
@@ -116,9 +122,11 @@ class MixedFactory(RecordingFactory):
             return FailingAdapter(self, instance_id)
         return super().create(instance_id)
 
+
 class AllFailingFactory(RecordingFactory):
     def create(self, instance_id: str) -> RecordingAdapter:
         return FailingAdapter(self, instance_id)
+
 
 class StaticAllocationProvider:
     def __init__(self) -> None:
@@ -132,12 +140,14 @@ class StaticAllocationProvider:
     async def aclose(self) -> None:
         return None
 
+
 class RecoveringAllocationProvider(StaticAllocationProvider):
     async def get(self, context: AccountTelemetryContext) -> PairAllocation:
         if self.calls == 0:
             self.calls += 1
             raise AllocationUnavailable("beta_timeout")
         return await super().get(context)
+
 
 class CancelTrackingAdapter(MockPairedExecutionAdapter):
     def __init__(self, outcome: CancelOrdersOutcome) -> None:
@@ -148,6 +158,7 @@ class CancelTrackingAdapter(MockPairedExecutionAdapter):
         del context
         self.cancel_calls += 1
         return self.outcome
+
 
 class CancelTrackingFactory:
     def __init__(self, outcomes: dict[str, CancelOrdersOutcome]) -> None:
@@ -160,6 +171,7 @@ class CancelTrackingFactory:
             adapter = CancelTrackingAdapter(self.outcomes[instance_id])
             self.adapters[instance_id] = adapter
         return adapter
+
 
 def seed_open_pair(
     service: FleetControlService,

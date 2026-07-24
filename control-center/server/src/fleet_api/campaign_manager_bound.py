@@ -6,7 +6,12 @@ from decimal import Decimal
 from typing import Any
 
 from weex_cli.beta_allocation import BetaUnavailable
-from weex_cli.beta_campaign import BetaVolumeCampaign, BetaVolumeCampaignStore, inspect_live_account, live_profile_fingerprint
+from weex_cli.beta_campaign import (
+    BetaVolumeCampaign,
+    BetaVolumeCampaignStore,
+    inspect_live_account,
+    live_profile_fingerprint,
+)
 
 from .campaign_contracts import CampaignRecord
 from .campaign_events import _sanitize_event, _view
@@ -22,6 +27,7 @@ from .service import BetaSourceUnavailable, UnsafeOperation
 from .vault import CredentialMaterial
 
 FIXED_BOUND_STRATEGY_LEVERAGE = 400
+
 
 class CampaignBoundStrategyMixin:
     def preview_bound_strategy(
@@ -195,9 +201,7 @@ class CampaignBoundStrategyMixin:
                     BetaCampaignStatus.RECOVERING.value,
                     BetaCampaignStatus.UNCERTAIN.value,
                 }:
-                    raise UnsafeOperation(
-                        "cannot change a bound strategy while its Live execution recovery is active"
-                    )
+                    raise UnsafeOperation("cannot change a bound strategy while its Live execution recovery is active")
 
     def _invalidate_planned_bound_strategy_previews_locked(
         self, instance_ids: Iterable[str], *, reason: str

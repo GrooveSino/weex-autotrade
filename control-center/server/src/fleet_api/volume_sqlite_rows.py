@@ -35,17 +35,13 @@ def row_to_session(row: sqlite3.Row) -> VolumeSession:
         strategy_version=None if row["strategy_version"] is None else int(row["strategy_version"]),
         direction=str(row["direction"] or "btc_long_eth_short"),
         target_mode=str(row["target_mode"] or "incremental"),
-        strategy_target_quote_volume=Decimal(
-            str(row["strategy_target_quote_volume"] or row["target_quote_volume"])
-        ),
+        strategy_target_quote_volume=Decimal(str(row["strategy_target_quote_volume"] or row["target_quote_volume"])),
         baseline_lifetime_quote_volume=Decimal(str(row["baseline_lifetime_quote_volume"] or "0")),
         finished_at_ms=None if row["finished_at_ms"] is None else int(row["finished_at_ms"]),
         result=row["result"],
         result_reason=row["result_reason"],
         final_lifetime_quote_volume=(
-            None
-            if row["final_lifetime_quote_volume"] is None
-            else Decimal(str(row["final_lifetime_quote_volume"]))
+            None if row["final_lifetime_quote_volume"] is None else Decimal(str(row["final_lifetime_quote_volume"]))
         ),
         starting_available_balance_quote=(
             None

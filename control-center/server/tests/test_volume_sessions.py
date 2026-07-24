@@ -46,6 +46,7 @@ def test_session_counts_open_and_close_once_and_ignores_planned_amounts() -> Non
     ledger.record_account_fills("a1", "live", (fill("open", "7", "open"),))
     assert service.progress("s1")["verified_quote_volume"] == "15"
 
+
 def test_incomplete_source_cannot_complete_target() -> None:
     ledger = InMemoryTradeVolumeLedger()
     service = SessionVolumeService(ledger)
@@ -60,6 +61,7 @@ def test_incomplete_source_cannot_complete_target() -> None:
     assert projection["audit_status"] == "pending"
     assert projection["retry_allowed"] is False
 
+
 def test_reconcile_marks_missing_fill_as_required() -> None:
     ledger = InMemoryTradeVolumeLedger()
     service = SessionVolumeService(ledger)
@@ -68,6 +70,7 @@ def test_reconcile_marks_missing_fill_as_required() -> None:
     projection = service.reconcile("s3", (fill("remote", "10", "open"),), reconciled_at_ms=2_000)
     assert projection["reconciliation_required"] is True
     assert projection["stale"] is True
+
 
 def test_recover_stopped_preserves_authoritative_volume_and_unblocks_next_run() -> None:
     ledger = InMemoryTradeVolumeLedger()
@@ -99,6 +102,7 @@ def test_recover_stopped_preserves_authoritative_volume_and_unblocks_next_run() 
     assert projection["uncertain_order_state"] is False
     assert projection["result_reason"] == "automatic_startup_recovery"
     assert ledger.active_session("recover-account", "live") is None
+
 
 def test_sqlite_session_and_checkpoint_survive_restart(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
@@ -171,6 +175,7 @@ def test_sqlite_session_and_checkpoint_survive_restart(tmp_path: Path) -> None:
     restored.close()
     repository.close()
 
+
 def test_sync_timeout_marks_previous_session_projection_stale() -> None:
     class TimeoutSource:
         async def fetch_page(self, context, *, cursor, limit):
@@ -211,6 +216,7 @@ def test_sync_timeout_marks_previous_session_projection_stale() -> None:
 
     asyncio.run(scenario())
 
+
 def test_completed_incremental_run_allows_a_fresh_full_target() -> None:
     ledger = InMemoryTradeVolumeLedger()
     service = SessionVolumeService(ledger)
@@ -250,6 +256,7 @@ def test_completed_incremental_run_allows_a_fresh_full_target() -> None:
     assert second["target_quote_volume"] == "10"
     assert second["verified_quote_volume"] == "0"
 
+
 def test_stopped_incremental_run_is_archived_and_next_run_does_not_reuse_remaining() -> None:
     ledger = InMemoryTradeVolumeLedger()
     service = SessionVolumeService(ledger)
@@ -281,6 +288,7 @@ def test_stopped_incremental_run_is_archived_and_next_run_does_not_reuse_remaini
     )
     assert next_run["remaining_quote_volume"] == "10"
 
+
 def test_lifetime_run_plan_uses_authoritative_residual_and_blocks_reached_target() -> None:
     instance = AccountInstance(
         id="lifetime",
@@ -294,14 +302,14 @@ def test_lifetime_run_plan_uses_authoritative_residual_and_blocks_reached_target
     )
     instance = instance.model_copy(
         update={
-                "strategy": instance.strategy.model_copy(
-                    update={
-                        "target_mode": StrategyTargetMode.LIFETIME,
-                        "target_volume_quote": Decimal("200"),
-                        "target_volume_quote_min": Decimal("200"),
-                        "target_volume_quote_max": Decimal("200"),
-                    }
-                ),
+            "strategy": instance.strategy.model_copy(
+                update={
+                    "target_mode": StrategyTargetMode.LIFETIME,
+                    "target_volume_quote": Decimal("200"),
+                    "target_volume_quote_min": Decimal("200"),
+                    "target_volume_quote_max": Decimal("200"),
+                }
+            ),
             "volume": instance.volume.model_copy(update={"lifetime": 150.0, "complete": True}),
         },
         deep=True,

@@ -56,11 +56,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
         if material is None:
             return LifecyclePreparation("unavailable", reason_code="credentials_unavailable", message="账号凭据不可用")
         active = self._journal.active_for_instance(instance.id)
-        record = (
-            self._journal.get(active.campaign_id)
-            if active is not None
-            else self.latest_bound_record(instance.id)
-        )
+        record = self._journal.get(active.campaign_id) if active is not None else self.latest_bound_record(instance.id)
         if self._manager.has_active_worker(instance.id):
             return active_preparation(record)
         if record is not None and record.status == "planned":
@@ -86,13 +82,15 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
         if record is not None and record.status in {"executing", "stopping"}:
             return active_preparation(record)
         session = self._ledger.active_session(instance.id, instance.mode.value)
-        needs_recovery = (
-            record is not None and record.status in {"recovering", "uncertain"}
-        ) or (session is not None and str(session.get("status")) == "recovering")
+        needs_recovery = (record is not None and record.status in {"recovering", "uncertain"}) or (
+            session is not None and str(session.get("status")) == "recovering"
+        )
         if needs_recovery:
             return await self._recover(instance, material, record, session)
-        if record is not None and record.status == "stopped" and str(record.metadata.get("reason") or "").startswith(
-            "launch_aborted:"
+        if (
+            record is not None
+            and record.status == "stopped"
+            and str(record.metadata.get("reason") or "").startswith("launch_aborted:")
         ):
             self._finish_launch_aborted(record, session)
         try:
@@ -289,7 +287,9 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             target_mode=str(metadata.get("target_mode") or "incremental"),
             strategy_target_quote_volume=Decimal(str(metadata.get("strategy_target_quote") or target)),
             baseline_lifetime_quote_volume=Decimal(str(metadata.get("baseline_lifetime_quote") or "0")),
-            starting_available_balance_quote=optional_available_balance(metadata.get("starting_available_balance_quote")),
+            starting_available_balance_quote=optional_available_balance(
+                metadata.get("starting_available_balance_quote")
+            ),
         )
 
     def projection(self, instance_id: str, mode: str) -> ExecutionLifecycleSnapshot:

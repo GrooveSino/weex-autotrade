@@ -45,9 +45,7 @@ def test_clear_hides_existing_campaign_events_but_keeps_new_events_visible() -> 
     assert any("剩余目标 500" in line["message"] for line in before["lines"])
     assert cleared.status_code == 204
     assert after["lines"] == []
-    assert [line["message"] for line in with_new_event["lines"]] == [
-        "实盘执行：运行 1 开始；剩余目标 250 USDT"
-    ]
+    assert [line["message"] for line in with_new_event["lines"]] == ["实盘执行：运行 1 开始；剩余目标 250 USDT"]
 
 
 def test_campaign_log_clear_boundary_survives_sqlite_restart(tmp_path) -> None:

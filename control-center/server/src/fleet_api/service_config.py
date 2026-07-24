@@ -1,31 +1,29 @@
 from __future__ import annotations
 
-import time
-from collections.abc import Mapping
-from datetime import UTC, datetime
-from decimal import Decimal
-from uuid import uuid4
-
 from pydantic import SecretStr
 
-from .campaign_log import campaign_event_log
-from .execution import CycleExecutionStatus, ExecutionRecord, PositionCloseExecutionResult
-from .funding import funding_preflight
 from .models import (
-    AccountInstance, CreateInstanceRequest, CycleSnapshot, ExposureSnapshot, FundingPreflightStatus,
-    InstanceAction, InstanceStatus, LogBatch, LogLevel, LogLine, ProxySnapshot, ProxyStatus, ProxyType,
-    RuntimeHealthSnapshot, StrategyProgress, StrategyStage, StrategyTargetMode, UpdateInstanceRequest,
-    VolumeSnapshot, VolumeStrategy, VolumeStrategyInput, WalletSnapshot, default_volume_strategy,
+    AccountInstance,
+    ExposureSnapshot,
+    InstanceStatus,
+    LogLevel,
+    ProxySnapshot,
+    ProxyStatus,
+    ProxyType,
+    RuntimeHealthSnapshot,
+    StrategyProgress,
+    StrategyStage,
+    UpdateInstanceRequest,
+    VolumeSnapshot,
+    WalletSnapshot,
 )
-from .ownership import LEGACY_OWNER_USER_ID, current_owner_user_id
 from .proxy import ProxyValidationError, normalize_proxy_url, proxy_host
-from .repository import AccountRepository
-from .service_errors import BetaSourceUnavailable, InstanceNotFound, StrategyNotFound, TelemetryUnavailable, UnsafeOperation, ValidationFailed
-from .service_shared import delay_label as _delay_label, now as _now
+from .service_errors import (
+    UnsafeOperation,
+    ValidationFailed,
+)
 from .strategy import estimate_rounds, target_progress_quote
-from .telemetry import AccountTelemetry
-from .vault import CredentialMaterial, CredentialVault
-from .volume_history import TradeVolumeAggregate
+from .vault import CredentialMaterial
 
 
 class ServiceConfigMixin:
@@ -82,9 +80,9 @@ class ServiceConfigMixin:
                 api_key=credentials.api_key if credentials else current_material.api_key,
                 api_secret=credentials.api_secret if credentials else current_material.api_secret,
                 passphrase=credentials.passphrase if credentials else current_material.passphrase,
-                proxy_url=(
-                    SecretStr(normalized_proxy) if normalized_proxy is not None else None
-                ) if proxy is not None else current_material.proxy_url,
+                proxy_url=(SecretStr(normalized_proxy) if normalized_proxy is not None else None)
+                if proxy is not None
+                else current_material.proxy_url,
             )
 
         name = request.name.strip() if request.name is not None else instance.name

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider
+from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider  # noqa: F401
 
-from .beta_allocation import HttpBetaAllocationProvider
+from .beta_allocation import HttpBetaAllocationProvider  # noqa: F401
 from .config import ControlPlaneSettings
+from .execution import PairAllocationProvider
 from .main_bootstrap import build_context, finish_context
 from .main_campaign_lifecycle import install_campaign_lifecycle
 from .main_http import install_http_support
@@ -20,7 +21,6 @@ from .main_routes_instances import register_instance_routes
 from .main_routes_monitor import register_strategy_monitor_routes
 from .main_support import install_projection_support
 from .telemetry import AccountTelemetryAdapterFactory
-from .execution import PairAllocationProvider
 
 
 def create_app(

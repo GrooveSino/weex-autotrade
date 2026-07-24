@@ -93,7 +93,9 @@ def build_context(settings: ControlPlaneSettings, *, require_command_id: bool) -
         ),
         provider_factory=_beta_provider,
     )
-    ctx.campaign_journal = SQLiteCampaignJournal(settings.sqlite_path) if settings.storage == "sqlite" else InMemoryCampaignJournal()
+    ctx.campaign_journal = (
+        SQLiteCampaignJournal(settings.sqlite_path) if settings.storage == "sqlite" else InMemoryCampaignJournal()
+    )
     ctx.event_loop: asyncio.AbstractEventLoop | None = None
     ctx.session_finalizations: set[str] = set()
     ctx.session_finalization_tasks: set[asyncio.Task[None]] = set()

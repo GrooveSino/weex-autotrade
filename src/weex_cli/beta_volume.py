@@ -1003,9 +1003,7 @@ class LiveBetaVolumeService:
                         round_number=round_number,
                         pool=pool,
                     )
-                if self.phase_waiter is not None and not self._close_phase_boundary_ready(
-                    plan, lanes, round_number
-                ):
+                if self.phase_waiter is not None and not self._close_phase_boundary_ready(plan, lanes, round_number):
                     return self._safe_stop(
                         plan,
                         lanes,
@@ -2279,9 +2277,7 @@ def _normalize_leverage(value: object) -> str | int:
         try:
             parsed = int(text)
         except ValueError:
-            raise ValidationError(
-                f"leverage must be 'auto' or an integer between 1 and {MAX_FIXED_LEVERAGE}"
-            ) from None
+            raise ValidationError(f"leverage must be 'auto' or an integer between 1 and {MAX_FIXED_LEVERAGE}") from None
     elif isinstance(value, int) and not isinstance(value, bool):
         parsed = value
     else:

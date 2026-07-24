@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import time
-import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from threading import RLock
 
-from .volume_contracts import *  # noqa: F403
-from .volume_helpers import _aggregate, _fill_signature, _fill_summary, _normalized_session_status, _session_projection
+from .volume_contracts import (
+    ACTIVE_SESSION_STATUSES,
+    TERMINAL_SESSION_STATUSES,
+    FillConflictError,
+    NormalizedTradeFill,
+    TradeVolumeAggregate,
+    VolumeSession,
+)
+from .volume_helpers import _aggregate, _fill_summary, _normalized_session_status, _session_projection
 
 
 class InMemoryTradeVolumeLedger:
@@ -221,9 +227,7 @@ class InMemoryTradeVolumeLedger:
                 fills = self._session_fills(session)
                 verified = sum((fill.quote_volume for fill in fills if fill.authoritative), Decimal(0))
                 session_window_complete = source_complete and (
-                    session.source_complete
-                    or coverage_start_ms is None
-                    or coverage_start_ms <= session.started_at_ms
+                    session.source_complete or coverage_start_ms is None or coverage_start_ms <= session.started_at_ms
                 )
                 updated = replace(
                     session,

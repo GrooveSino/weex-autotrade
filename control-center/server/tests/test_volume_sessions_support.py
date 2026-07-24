@@ -1,4 +1,3 @@
-
 from decimal import Decimal
 
 from fleet_api.volume_history import (

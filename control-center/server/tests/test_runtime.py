@@ -85,6 +85,7 @@ def test_stopped_instance_can_close_current_positions_and_reconcile_the_open_cyc
 
     asyncio.run(scenario())
 
+
 def test_close_positions_flattens_a_single_remaining_mock_leg_without_fabricating_a_fill() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -131,6 +132,7 @@ def test_close_positions_flattens_a_single_remaining_mock_leg_without_fabricatin
         await runtime.close()
 
     asyncio.run(scenario())
+
 
 def test_close_positions_preserves_exposure_when_order_cancellation_is_unverified() -> None:
     async def scenario() -> None:
@@ -179,6 +181,7 @@ def test_close_positions_preserves_exposure_when_order_cancellation_is_unverifie
 
     asyncio.run(scenario())
 
+
 def test_runtime_polls_accounts_concurrently_with_account_scoped_credentials_and_proxies() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -222,6 +225,7 @@ def test_runtime_polls_accounts_concurrently_with_account_scoped_credentials_and
         await runtime.close()
 
     asyncio.run(scenario())
+
 
 def test_stopped_runtime_failure_is_isolated_and_error_detail_is_redacted() -> None:
     async def scenario() -> None:
@@ -270,6 +274,7 @@ def test_stopped_runtime_failure_is_isolated_and_error_detail_is_redacted() -> N
         await runtime.close()
 
     asyncio.run(scenario())
+
 
 def test_legacy_unprotected_telemetry_error_migrates_to_stopped_on_the_next_poll() -> None:
     repository = InMemoryAccountRepository()

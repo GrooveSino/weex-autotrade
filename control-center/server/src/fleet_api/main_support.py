@@ -50,11 +50,7 @@ def install_projection_support(ctx: FleetAppContext) -> None:
                 # Releases before the single-journal architecture copied this
                 # same rendered row into instance_logs. Prefer the audit row
                 # when the legacy copy is adjacent in time.
-                ranked = [
-                    item
-                    for item in ranked
-                    if not (item[2].message == message and abs(item[0] - at_ms) <= 2_000)
-                ]
+                ranked = [item for item in ranked if not (item[2].message == message and abs(item[0] - at_ms) <= 2_000)]
                 ranked.append(
                     (
                         at_ms,

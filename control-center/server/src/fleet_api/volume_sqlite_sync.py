@@ -17,9 +17,7 @@ class SQLiteLedgerSyncMixin:
             ).fetchone()
             previous = dict(existing) if existing is not None else {}
             scan_state = (
-                values["scan_state"]
-                if "scan_state" in values
-                else _decode_state(previous.get("scan_state_json"))
+                values["scan_state"] if "scan_state" in values else _decode_state(previous.get("scan_state_json"))
             )
             self._connection.execute(
                 """INSERT INTO volume_sync_checkpoints(
@@ -109,9 +107,7 @@ class SQLiteLedgerSyncMixin:
             fills = self.fills_for_account(account_id, mode, session.started_at_ms)
             verified = sum((fill.quote_volume for fill in fills if fill.authoritative), Decimal(0))
             session_window_complete = source_complete and (
-                session.source_complete
-                or coverage_start_ms is None
-                or coverage_start_ms <= session.started_at_ms
+                session.source_complete or coverage_start_ms is None or coverage_start_ms <= session.started_at_ms
             )
             self.update_session(
                 session.session_id,
@@ -171,9 +167,7 @@ class SQLiteLedgerSyncMixin:
                 if row is None:
                     return [], None
                 boundary = (int(row[0]), str(row[1]))
-            query = (
-                "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ?"
-            )
+            query = "SELECT session_id FROM volume_sessions WHERE account_id = ? AND mode = ?"
             parameters: list[object] = [account_id, mode]
             if boundary is not None:
                 query += " AND (started_at_ms < ? OR (started_at_ms = ? AND session_id < ?))"

@@ -80,6 +80,7 @@ def test_unverified_pause_cancellation_enters_protected_error_until_stop_recheck
 
     asyncio.run(scenario())
 
+
 def test_global_stop_reports_each_verified_and_unverified_account() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -134,6 +135,7 @@ def test_global_stop_reports_each_verified_and_unverified_account() -> None:
 
     asyncio.run(scenario())
 
+
 def test_manual_full_pair_close_is_reconciled_without_submitting_another_close() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -184,6 +186,7 @@ def test_manual_full_pair_close_is_reconciled_without_submitting_another_close()
 
     asyncio.run(scenario())
 
+
 def test_manual_single_leg_close_pauses_and_never_auto_repairs_the_pair() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -230,6 +233,7 @@ def test_manual_single_leg_close_pauses_and_never_auto_repairs_the_pair() -> Non
         await runtime.close()
 
     asyncio.run(scenario())
+
 
 def test_unavailable_allocation_pauses_cancels_and_recovers_before_next_cycle() -> None:
     async def scenario() -> None:

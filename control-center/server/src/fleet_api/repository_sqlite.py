@@ -219,8 +219,7 @@ class SQLiteAccountRepository:
             if self.get(instance_id) is None:
                 raise KeyError(instance_id)
             rows = self._connection.execute(
-                "SELECT campaign_id, cleared_through_sequence "
-                "FROM instance_log_execution_clears WHERE instance_id = ?",
+                "SELECT campaign_id, cleared_through_sequence FROM instance_log_execution_clears WHERE instance_id = ?",
                 (instance_id,),
             ).fetchall()
         return {str(campaign_id): int(sequence) for campaign_id, sequence in rows}

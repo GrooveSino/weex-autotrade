@@ -34,10 +34,13 @@ class TradeHistorySynchronizer:
     ) -> TradeHistorySyncResult:
         seen_cursors: set[str] = set()
         inserted = 0
-        checkpoint = self._ledger.sync_checkpoint(
-            instance_id,
-            getattr(context.instance.mode, "value", str(context.instance.mode)).lower(),
-        ) or {}
+        checkpoint = (
+            self._ledger.sync_checkpoint(
+                instance_id,
+                getattr(context.instance.mode, "value", str(context.instance.mode)).lower(),
+            )
+            or {}
+        )
         high_watermark_ms = _checkpoint_watermark(checkpoint)
         account_mode = getattr(context.instance.mode, "value", str(context.instance.mode)).lower()
         for page_number in range(1, self._max_pages + 1):
@@ -136,9 +139,7 @@ class TradeHistorySynchronizer:
         cursor_loop = page.next_cursor is not None and page.next_cursor == cursor
         complete = page.next_cursor is None and page.complete
         source_complete = (
-            page.window_complete
-            if page.next_cursor is None and page.window_complete is not None
-            else complete
+            page.window_complete if page.next_cursor is None and page.window_complete is not None else complete
         )
         stop_reason = _step_stop_reason(cursor_loop, complete, page.next_cursor)
         next_cursor = cursor if cursor_loop else page.next_cursor
@@ -182,26 +183,60 @@ class TradeHistorySynchronizer:
         self, instance_id: str, mode: str, cursor: str, high_watermark_ms: int | None, coverage_start_ms: int | None
     ) -> None:
         self._save_checkpoint(
-            instance_id, mode, cursor=cursor, high_watermark_ms=high_watermark_ms,
-            pending=True, source_complete=False, coverage_complete=False, stale=True, source=None,
+            instance_id,
+            mode,
+            cursor=cursor,
+            high_watermark_ms=high_watermark_ms,
+            pending=True,
+            source_complete=False,
+            coverage_complete=False,
+            stale=True,
+            source=None,
         )
         self._refresh_sessions(instance_id, mode, coverage_start_ms, high_watermark_ms, False, True)
 
-    def _save_checkpoint(self, instance_id: str, mode: str, *, cursor: str | None, high_watermark_ms: int | None,
-                         pending: bool, source_complete: bool, coverage_complete: bool, stale: bool,
-                         source: TradeHistorySource | None) -> None:
+    def _save_checkpoint(
+        self,
+        instance_id: str,
+        mode: str,
+        *,
+        cursor: str | None,
+        high_watermark_ms: int | None,
+        pending: bool,
+        source_complete: bool,
+        coverage_complete: bool,
+        stale: bool,
+        source: TradeHistorySource | None,
+    ) -> None:
         scan_state = _source_state(source)
         self._ledger.save_sync_checkpoint(
-            instance_id, mode, cursor=cursor, high_watermark_ms=high_watermark_ms, pending=pending,
-            source_complete=source_complete, coverage_complete=coverage_complete, stale=stale,
+            instance_id,
+            mode,
+            cursor=cursor,
+            high_watermark_ms=high_watermark_ms,
+            pending=pending,
+            source_complete=source_complete,
+            coverage_complete=coverage_complete,
+            stale=stale,
             **({"scan_state": scan_state} if scan_state is not None else {}),
         )
 
-    def _refresh_sessions(self, instance_id: str, mode: str, coverage_start_ms: int | None,
-                          high_watermark_ms: int | None, source_complete: bool, stale: bool) -> None:
+    def _refresh_sessions(
+        self,
+        instance_id: str,
+        mode: str,
+        coverage_start_ms: int | None,
+        high_watermark_ms: int | None,
+        source_complete: bool,
+        stale: bool,
+    ) -> None:
         self._ledger.refresh_sessions(
-            instance_id, mode, now_ms=int(datetime.now(UTC).timestamp() * 1000),
-            source_complete=source_complete, stale=stale, coverage_start_ms=coverage_start_ms,
+            instance_id,
+            mode,
+            now_ms=int(datetime.now(UTC).timestamp() * 1000),
+            source_complete=source_complete,
+            stale=stale,
+            coverage_start_ms=coverage_start_ms,
             high_watermark_ms=high_watermark_ms,
         )
 

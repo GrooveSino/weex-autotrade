@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -62,7 +62,7 @@ class FleetStaticHandler(SimpleHTTPRequestHandler):
         except (OSError, json.JSONDecodeError):
             manifest = {
                 "release_id": "development",
-                "built_at": datetime.now(timezone.utc).isoformat(),
+                "built_at": datetime.now(UTC).isoformat(),
                 "api_compatibility": "v1",
                 "assets": [],
                 "asset_count": 0,

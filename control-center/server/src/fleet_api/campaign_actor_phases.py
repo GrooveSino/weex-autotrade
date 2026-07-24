@@ -128,9 +128,7 @@ class CampaignActorPhases:
             lanes = service._create_lanes(opened.context.child)
             service.current_plan_id = opened.context.child.plan_id
             if self._is_stopping():
-                return CloseCycle(
-                    Decimal(0), safe_stop(service, lanes, opened), "stop_requested", None, 0
-                )
+                return CloseCycle(Decimal(0), safe_stop(service, lanes, opened), "stop_requested", None, 0)
             return self._close_cycle(service, lanes, campaign, opened)
         finally:
             environment.close()

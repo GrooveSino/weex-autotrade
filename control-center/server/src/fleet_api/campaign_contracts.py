@@ -4,7 +4,6 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -14,13 +13,13 @@ from weex_cli.beta_campaign import BetaVolumeCampaign
 from .models import BetaCampaignStatus
 from .service import UnsafeOperation
 
-
 ACTIVE_STATUSES = {
     BetaCampaignStatus.PLANNED.value,
     BetaCampaignStatus.EXECUTING.value,
     BetaCampaignStatus.STOPPING.value,
     BetaCampaignStatus.RECOVERING.value,
 }
+
 
 class CampaignJournal(Protocol):
     def create(self, instance_id: str, campaign: BetaVolumeCampaign, metadata: dict[str, Any]) -> None: ...

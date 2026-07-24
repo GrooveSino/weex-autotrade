@@ -88,6 +88,7 @@ def test_scheduled_mock_poll_executes_one_persisted_pair_cycle() -> None:
 
     asyncio.run(scenario())
 
+
 def test_strategy_waits_for_hold_and_round_interval_before_advancing() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -162,6 +163,7 @@ def test_strategy_waits_for_hold_and_round_interval_before_advancing() -> None:
 
     asyncio.run(scenario())
 
+
 def test_scheduler_uses_each_accounts_independent_mock_cycle_quote() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -211,6 +213,7 @@ def test_scheduler_uses_each_accounts_independent_mock_cycle_quote() -> None:
         await runtime.close()
 
     asyncio.run(scenario())
+
 
 def test_runtime_stops_exactly_at_incremental_target_and_allows_a_fresh_run() -> None:
     async def scenario() -> None:
@@ -268,6 +271,7 @@ def test_runtime_stops_exactly_at_incremental_target_and_allows_a_fresh_run() ->
 
     asyncio.run(scenario())
 
+
 def test_mock_adapter_never_returns_fake_telemetry_for_live_account() -> None:
     live_payload = payload("live", "api-key-LIVE", "user:proxy@proxy.example.com:9302")
     live_payload["mode"] = "live"
@@ -286,6 +290,7 @@ def test_mock_adapter_never_returns_fake_telemetry_for_live_account() -> None:
     assert snapshot["runtime"]["lastErrorType"] == "MockLiveTelemetryUnavailable"
     assert snapshot["wallet"]["equity"] == 0
     assert snapshot["volume"]["complete"] is False
+
 
 def test_seeded_mock_volume_is_migrated_to_ledger_without_manual_execution() -> None:
     app = create_app(ControlPlaneSettings(mock_tick_interval_seconds=60))

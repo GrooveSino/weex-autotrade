@@ -1,31 +1,34 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import SecretStr
 
-from .campaign_log import campaign_event_log
-from .execution import CycleExecutionStatus, ExecutionRecord, PositionCloseExecutionResult
-from .funding import funding_preflight
 from .models import (
-    AccountInstance, CreateInstanceRequest, CycleSnapshot, ExposureSnapshot, FundingPreflightStatus,
-    InstanceAction, InstanceStatus, LogBatch, LogLevel, LogLine, ProxySnapshot, ProxyStatus, ProxyType,
-    RuntimeHealthSnapshot, StrategyProgress, StrategyStage, StrategyTargetMode, UpdateInstanceRequest,
-    VolumeSnapshot, VolumeStrategy, VolumeStrategyInput, WalletSnapshot, default_volume_strategy,
+    AccountInstance,
+    CreateInstanceRequest,
+    CycleSnapshot,
+    FundingPreflightStatus,
+    InstanceAction,
+    InstanceStatus,
+    LogLevel,
+    ProxySnapshot,
+    ProxyType,
+    StrategyProgress,
+    StrategyStage,
+    StrategyTargetMode,
+    WalletSnapshot,
 )
 from .ownership import LEGACY_OWNER_USER_ID, current_owner_user_id
 from .proxy import ProxyValidationError, normalize_proxy_url, proxy_host
-from .repository import AccountRepository
-from .service_errors import BetaSourceUnavailable, InstanceNotFound, StrategyNotFound, TelemetryUnavailable, UnsafeOperation, ValidationFailed
-from .service_shared import delay_label as _delay_label, now as _now
-from .strategy import estimate_rounds, target_progress_quote
-from .telemetry import AccountTelemetry
-from .vault import CredentialMaterial, CredentialVault
-from .volume_history import TradeVolumeAggregate
+from .service_errors import (
+    UnsafeOperation,
+    ValidationFailed,
+)
+from .strategy import estimate_rounds
+from .vault import CredentialMaterial
 
 
 class ServiceInstancesMixin:

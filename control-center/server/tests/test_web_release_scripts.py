@@ -78,7 +78,7 @@ def test_service_release_and_launch_agent_scripts_use_stable_paths_without_crede
     assert "service-current" in deploy
     assert "service-previous" in deploy
     assert 'contains_credentials": False' in deploy
-    assert "git -C \"${repo_root}\" archive HEAD src control-center/server/src" in deploy
+    assert 'git -C "${repo_root}" archive HEAD src control-center/server/src' in deploy
     assert "src control-center/server/src" in deploy
     assert 'PYTHONPATH="${stage_dir}/src:${stage_dir}/control-center/server/src"' in deploy
     assert "repo_root}/.env" not in deploy

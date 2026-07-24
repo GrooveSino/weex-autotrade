@@ -46,6 +46,7 @@ def test_monitor_replays_complete_legacy_journal_without_event_cap() -> None:
     assert snapshot.projection_version == 4
     assert snapshot.stream_state == "ready"
 
+
 def test_sqlite_monitor_sequences_remain_monotonic_across_connections(tmp_path) -> None:
     path = tmp_path / "fleet.db"
     first = SQLiteCampaignJournal(path)
@@ -76,6 +77,7 @@ def test_sqlite_monitor_sequences_remain_monotonic_across_connections(tmp_path) 
     assert projection.projected_sequence == latest
     first.close()
     second.close()
+
 
 def test_sqlite_projection_restores_wait_deadline_after_reopen(tmp_path) -> None:
     path = tmp_path / "fleet.db"
@@ -133,6 +135,7 @@ def test_monitor_projects_actor_phase_queue_without_raw_event_names() -> None:
     assert snapshot.timeline[-1].title == "正常阶段排队"
     assert snapshot.timeline[-1].detail.startswith("等待正常开仓槽位")
 
+
 def test_monitor_complete_ledger_wins_over_execution_journal_projection() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()
@@ -176,6 +179,7 @@ def test_monitor_complete_ledger_wins_over_execution_journal_projection() -> Non
     assert snapshot.remaining_quote_volume == Decimal("87.50")
     assert snapshot.volume_source == "ledger"
 
+
 def test_monitor_missing_legacy_session_stays_available_and_requires_reconciliation() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()
@@ -203,11 +207,13 @@ def test_monitor_missing_legacy_session_stays_available_and_requires_reconciliat
     assert snapshot.volume_source == "execution_journal"
     assert snapshot.verified_quote_volume == Decimal("12.50")
 
+
 def test_worker_safety_reason_is_whitelisted_without_persisting_exception_message() -> None:
     assert _worker_exception_reason(SafetyError("available USDT is insufficient for the planned opening budget")) == (
         "worker_safety:available_balance_insufficient"
     )
     assert _worker_exception_reason(SafetyError("proxy password=very-secret")) == "worker_safety:preflight_rejected"
+
 
 def test_monitor_journal_paginates_without_duplicate_sequences() -> None:
     journal = InMemoryCampaignJournal()
@@ -225,6 +231,7 @@ def test_monitor_journal_paginates_without_duplicate_sequences() -> None:
     assert [row["sequence"] for row in newest] == [4, 5, 6]
     assert [row["sequence"] for row in older] == [1, 2, 3]
     assert journal.events_after(campaign.campaign_id, 3, 10) == newest
+
 
 def test_preview_uses_fake_gateway_and_rejects_non_flat_account(monkeypatch, tmp_path) -> None:
     allocation = sample_campaign().allocation

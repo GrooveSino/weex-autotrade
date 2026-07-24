@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from fastapi import HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from .executor_process_metrics import process_snapshot
+
 from .execution import AllocationUnavailable
+from .executor_process_metrics import process_snapshot
+from .main_context import FleetAppContext
 from .models import (
     BetaMarketSnapshot,
     BetaSourceSettings,
@@ -15,41 +17,20 @@ from .models import (
 )
 from .service import FleetError, TelemetryUnavailable
 
-from fastapi import FastAPI
-from .main_context import FleetAppContext
-
 
 def register_health_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     selected = ctx.selected
-    service = ctx.service
-    repository = ctx.repository
-    vault = ctx.vault
     volume_ledger = ctx.volume_ledger
-    execution_journal = ctx.execution_journal
-    execution_coordinator = ctx.execution_coordinator
-    selected_allocation_provider = ctx.selected_allocation_provider
     runtime = ctx.runtime
     beta_source_runtime = ctx.beta_source_runtime
     campaign_journal = ctx.campaign_journal
     campaign_manager = ctx.campaign_manager
-    app_state_campaign_manager = ctx.campaign_manager
-    broker = ctx.broker
-    session_volume = ctx.session_volume
     strategy_monitor = ctx.strategy_monitor
     command_ledger = ctx.command_ledger
     executor_generation = ctx.executor_generation
     executor_release_id = ctx.executor_release_id
-    latest_bound_record = ctx.latest_bound_record
-    finalize_bound_strategy_session = ctx.finalize_bound_strategy_session
-    schedule_session_finalization = ctx.schedule_session_finalization
-    notify_campaign_change = ctx.notify_campaign_change
-    establish_bound_strategy_session = ctx.establish_bound_strategy_session
     publish_snapshot = ctx.publish_snapshot
     refresh_beta_state = ctx.refresh_beta_state
-    projected_instances = ctx.projected_instances
-    combined_log_updates = ctx.combined_log_updates
-    strategy_run_plan = ctx.strategy_run_plan
-    require_command_id = ctx.require_command_id
 
     def capacity_details():  # type: ignore[no-untyped-def]
         capacity = campaign_manager.capacity_snapshot()
@@ -107,9 +88,7 @@ def register_health_routes(app: FastAPI, ctx: FleetAppContext) -> None:
             monitor_sse_reset_count=stream_metrics["reset_count"],
             monitor_transaction_failure_count=int(journal_metrics.get("transaction_failures") or 0),
             monitor_last_event_at_ms=(
-                None
-                if journal_metrics.get("last_event_at_ms") is None
-                else int(journal_metrics["last_event_at_ms"])
+                None if journal_metrics.get("last_event_at_ms") is None else int(journal_metrics["last_event_at_ms"])
             ),
             active_execution_capacity=capacity.active_executions,
             max_execution_capacity=capacity.max_active_executions,

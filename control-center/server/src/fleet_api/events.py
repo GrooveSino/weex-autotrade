@@ -60,9 +60,11 @@ class InstanceEventBroker:
         async with self._lock:
             subscribers = tuple(self._subscribers.items())
         for queue, owner_user_id in subscribers:
-            owned = instances if owner_user_id is None else [
-                instance for instance in instances if instance.owner_user_id == owner_user_id
-            ]
+            owned = (
+                instances
+                if owner_user_id is None
+                else [instance for instance in instances if instance.owner_user_id == owner_user_id]
+            )
             owned_ids = {instance.id for instance in owned}
             owned_campaigns = campaigns
             if campaigns is not None and owner_user_id is not None:

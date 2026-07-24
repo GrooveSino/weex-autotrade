@@ -55,8 +55,6 @@ class AccountRepository(Protocol):
     def close(self) -> None: ...
 
 
-
-
 def upgrade_instance_payload(payload: object) -> object:
     if not isinstance(payload, dict):
         return payload

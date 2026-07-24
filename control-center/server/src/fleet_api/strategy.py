@@ -3,9 +3,10 @@ from __future__ import annotations
 import math
 import random
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from .models import AccountInstance, StrategyDirection, StrategyTargetMode, VolumeStrategy
 
@@ -48,9 +49,7 @@ def resolve_strategy_run_plan(
             raise StrategyRunBlocked("complete lifetime trade history synchronization before starting")
         if lifetime >= instance.strategy.target_volume_quote_max:
             raise StrategyTargetReached("the lifetime strategy target range is already verified complete")
-        next_cent = (
-            (lifetime * Decimal(100)).to_integral_value(rounding=ROUND_FLOOR) + Decimal(1)
-        ) / Decimal(100)
+        next_cent = ((lifetime * Decimal(100)).to_integral_value(rounding=ROUND_FLOOR) + Decimal(1)) / Decimal(100)
         strategy_target = _sample_target_quote(
             max(instance.strategy.target_volume_quote_min, next_cent),
             instance.strategy.target_volume_quote_max,

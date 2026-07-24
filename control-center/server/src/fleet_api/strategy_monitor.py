@@ -107,11 +107,7 @@ class StrategyMonitorService:
         session_stale = bool(session.get("stale", True)) if session else True
         reconciliation_required = bool(session.get("reconciliation_required", False)) if session else missing_session
         freshness = (
-            "rebuilding"
-            if projection_lag
-            else "stale"
-            if session_stale or reconciliation_required
-            else "current"
+            "rebuilding" if projection_lag else "stale" if session_stale or reconciliation_required else "current"
         )
         volume_source = (
             "ledger"
@@ -136,7 +132,8 @@ class StrategyMonitorService:
         )
         display_phase = (
             actor.phase
-            if actor is not None and actor.execution_state in {"admitted", "preparing", "phase_queued", "stopping", "recovering"}
+            if actor is not None
+            and actor.execution_state in {"admitted", "preparing", "phase_queued", "stopping", "recovering"}
             else str(state.get("phase") or record.metadata.get("phase") or "启动")
         )
 
@@ -148,7 +145,9 @@ class StrategyMonitorService:
             status=(
                 record.status
                 if record.status in {"planned", "executing", "stopping"}
-                else str(session.get("status") or record.status) if session else record.status
+                else str(session.get("status") or record.status)
+                if session
+                else record.status
             ),
             phase=display_phase,
             execution_state=None if actor is None else actor.execution_state,

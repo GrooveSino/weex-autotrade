@@ -43,6 +43,8 @@ from .ownership import LEGACY_OWNER_USER_ID
 from .private_order_stream_pool import PrivateOrderStreamPool
 from .service import BetaSourceUnavailable, UnsafeOperation
 from .vault import CredentialMaterial, CredentialVault
+
+
 class CampaignWorkerManager(
     CampaignBoundStrategyMixin,
     CampaignCleanupMixin,
@@ -84,12 +86,8 @@ class CampaignWorkerManager(
         self.write_coordinator = FleetWriteCoordinator()
         self.market_data_hub = MarketDataHub()
         self.private_order_stream_pool = PrivateOrderStreamPool()
-        # The legacy worker remains only as a compatibility fallback.  Actor
-        # mode owns logical concurrency through ``ExecutionCapacity`` instead.
         legacy_workers = 1 if settings.async_actor_runtime_enabled else settings.live_campaign_worker_count
-        self._executor = ThreadPoolExecutor(
-            max_workers=legacy_workers, thread_name_prefix="weex-campaign"
-        )
+        self._executor = ThreadPoolExecutor(max_workers=legacy_workers, thread_name_prefix="weex-campaign")
         self._stops: dict[str, threading.Event] = {}
         self._futures: dict[str, Future[None]] = {}
         self._leases: dict[str, _AccountLease] = {}
@@ -320,6 +318,7 @@ class CampaignWorkerManager(
             active_futures = {campaign_id for campaign_id, future in self._futures.items() if not future.done()}
             active_actors = {campaign_id for campaign_id, future in self._actor_futures.items() if not future.done()}
             return len(self._starting | active_futures | active_actors)
+
     def capacity_snapshot(self) -> ExecutionCapacitySnapshot:
         return self.phase_pacer.snapshot()
 

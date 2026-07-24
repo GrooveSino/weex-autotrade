@@ -7,8 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import replace
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from threading import Event, Lock, Thread
 from typing import TypeVar

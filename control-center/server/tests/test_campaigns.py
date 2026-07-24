@@ -32,6 +32,7 @@ def test_in_memory_journal_enforces_one_active_campaign_and_recovers() -> None:
     assert recovered.status == BetaCampaignStatus.RECOVERING.value
     assert recovered.metadata["reason"] == "control_plane_restart"
 
+
 def test_sqlite_journal_round_trips_campaign_and_events(tmp_path) -> None:
     journal = SQLiteCampaignJournal(tmp_path / "fleet.db")
     campaign = sample_campaign()
@@ -42,6 +43,7 @@ def test_sqlite_journal_round_trips_campaign_and_events(tmp_path) -> None:
     assert record.campaign == campaign
     assert record.events[0]["name"] == "campaign_started"
     journal.close()
+
 
 def test_sqlite_execution_claim_is_atomic_across_journal_connections(tmp_path) -> None:
     path = tmp_path / "fleet.db"
@@ -59,6 +61,7 @@ def test_sqlite_execution_claim_is_atomic_across_journal_connections(tmp_path) -
     first.close()
     second.close()
 
+
 def test_account_lease_blocks_duplicate_api_key_across_instances(tmp_path) -> None:
     first = _AccountLease(tmp_path, "same-api-key", "ins-1", "wc-first")
     second = _AccountLease(tmp_path, "same-api-key", "ins-2", "wc-second")
@@ -75,6 +78,7 @@ def test_account_lease_blocks_duplicate_api_key_across_instances(tmp_path) -> No
     finally:
         first.release()
 
+
 def test_journal_assigns_monotonic_event_sequences() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()
@@ -84,6 +88,7 @@ def test_journal_assigns_monotonic_event_sequences() -> None:
     record = journal.get(campaign.campaign_id)
     assert record is not None
     assert [event["sequence"] for event in record.events] == [1, 2]
+
 
 def test_monitor_event_sanitizer_keeps_progress_fields_without_identifiers_or_secrets() -> None:
     event = _sanitize_event(
@@ -123,6 +128,7 @@ def test_monitor_event_sanitizer_keeps_progress_fields_without_identifiers_or_se
     assert "client-order-secret" not in serialized
     assert "api-secret" not in serialized
     assert "proxy-password" not in serialized
+
 
 def test_monitor_uses_authoritative_session_ledger_not_planned_event_amounts() -> None:
     journal = InMemoryCampaignJournal()
@@ -191,6 +197,7 @@ def test_monitor_uses_authoritative_session_ledger_not_planned_event_amounts() -
     assert progress.verified_quote_volume == Decimal("12.50")
     assert progress.volume_source == "ledger"
 
+
 def test_monitor_projects_reconciled_leg_events_while_session_ledger_is_pending() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()
@@ -250,6 +257,7 @@ def test_monitor_projects_reconciled_leg_events_while_session_ledger_is_pending(
     assert progress is not None
     assert progress.verified_quote_volume == Decimal("41.00")
     assert progress.volume_source == "execution_journal"
+
 
 def test_sqlite_event_and_projection_commit_atomically(tmp_path) -> None:
     journal = SQLiteCampaignJournal(tmp_path / "fleet.db")

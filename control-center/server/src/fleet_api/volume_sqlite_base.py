@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import replace
-from decimal import Decimal
 from pathlib import Path
 from threading import RLock
 
 from .volume_contracts import *  # noqa: F403
-from .volume_helpers import _aggregate, _fill_signature, _fill_summary, _normalized_session_status, _session_projection
 
 
 class SQLiteLedgerBase:
@@ -166,9 +163,7 @@ class SQLiteLedgerBase:
             if name not in session_columns:
                 self._connection.execute(f"ALTER TABLE volume_sessions ADD COLUMN {name} {definition}")
         self._connection.execute("UPDATE volume_sessions SET status = 'active' WHERE status = 'running'")
-        self._connection.execute(
-            "UPDATE volume_sessions SET status = 'verification_pending' WHERE status = 'stale'"
-        )
+        self._connection.execute("UPDATE volume_sessions SET status = 'verification_pending' WHERE status = 'stale'")
         self._connection.execute(
             "UPDATE volume_sessions SET status = 'stopped', result = COALESCE(result, 'stopped'), "
             "audit_status = 'pending' WHERE status = 'verification_pending'"

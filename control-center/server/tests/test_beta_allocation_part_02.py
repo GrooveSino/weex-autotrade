@@ -39,6 +39,7 @@ def test_expired_success_is_never_used_after_upstream_failure() -> None:
 
     asyncio.run(scenario())
 
+
 def test_cache_never_outlives_upstream_max_age() -> None:
     async def scenario() -> None:
         calls = 0
@@ -66,6 +67,7 @@ def test_cache_never_outlives_upstream_max_age() -> None:
 
     asyncio.run(scenario())
 
+
 def test_beta_ratio_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLEET_BETA_RATIO_URL", "http://127.0.0.1:5888/api/v1/hedge-ratio")
     monkeypatch.setenv("FLEET_BETA_RATIO_TIMEOUT_SECONDS", "2.5")
@@ -78,6 +80,7 @@ def test_beta_ratio_settings_load_from_environment(monkeypatch: pytest.MonkeyPat
     assert settings.beta_ratio_timeout_seconds == 2.5
     assert settings.beta_refresh_interval_seconds == 10
     assert settings.beta_background_refresh_enabled is True
+
 
 def test_provider_retries_after_unavailable_cache_expires() -> None:
     async def scenario() -> None:

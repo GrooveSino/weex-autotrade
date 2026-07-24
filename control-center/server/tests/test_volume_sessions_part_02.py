@@ -72,6 +72,7 @@ def test_session_window_can_complete_while_lifetime_history_remains_incomplete()
 
     asyncio.run(scenario())
 
+
 def test_sqlite_strategy_run_history_uses_stable_cursor_pagination(tmp_path: Path) -> None:
     path = tmp_path / "history.db"
     repository = SQLiteAccountRepository(path)
@@ -116,6 +117,7 @@ def test_sqlite_strategy_run_history_uses_stable_cursor_pagination(tmp_path: Pat
     assert final_cursor is None
     ledger.close()
     repository.close()
+
 
 @pytest.mark.parametrize("ledger_kind", ["memory", "sqlite"])
 def test_terminal_session_keeps_terminal_state_and_marks_audit_discrepant_on_fill_conflict(

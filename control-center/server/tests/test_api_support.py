@@ -40,6 +40,7 @@ class LivePreviewGateway:
     def close(self) -> None:
         return None
 
+
 class LivePreviewProvider:
     def __init__(self, *_args, **_kwargs) -> None:
         pass
@@ -58,6 +59,7 @@ class LivePreviewProvider:
             source="fake",
         )
 
+
 class UnavailableLivePreviewProvider:
     def __init__(self, *_args, **_kwargs) -> None:
         pass
@@ -66,6 +68,7 @@ class UnavailableLivePreviewProvider:
         from weex_cli.beta_allocation import BetaUnavailable
 
         raise BetaUnavailable("beta_request_failed:httperror")
+
 
 class HeldWorkerExecutor:
     """Accepts work without running it, so API lifecycle tests cannot place orders."""
@@ -80,12 +83,15 @@ class HeldWorkerExecutor:
     def shutdown(self, **_kwargs) -> None:
         return None
 
+
 class ExpectedWriteFailure(RuntimeError):
     pass
+
 
 class FailingCredentialVault(EphemeralCredentialVault):
     def put(self, instance_id: str, material: CredentialMaterial) -> None:
         raise ExpectedWriteFailure("vault write failed")
+
 
 class FailingReplaceRepository(InMemoryAccountRepository):
     fail_next_replace = False
@@ -95,6 +101,7 @@ class FailingReplaceRepository(InMemoryAccountRepository):
             self.fail_next_replace = False
             raise ExpectedWriteFailure("repository replace failed")
         return super().replace(instance)
+
 
 class StaticBetaMarketProvider:
     async def market_snapshot(self) -> dict[str, object]:
@@ -118,6 +125,7 @@ class StaticBetaMarketProvider:
             "maxAgeMs": "10000",
         }
 
+
 class RefreshTrackingBetaProvider:
     def __init__(self) -> None:
         self.refresh_calls = 0
@@ -134,8 +142,10 @@ class RefreshTrackingBetaProvider:
     async def aclose(self) -> None:
         self.closed = True
 
+
 def client() -> TestClient:
     return TestClient(create_app(ControlPlaneSettings(seed_demo_data=False)))
+
 
 def create_payload(*, mode: str = "demo") -> dict[str, object]:
     return {
@@ -153,6 +163,7 @@ def create_payload(*, mode: str = "demo") -> dict[str, object]:
         },
     }
 
+
 def strategy_payload(*, name: str = "20k shared", target: str = "20000") -> dict[str, object]:
     return {
         "name": name,
@@ -164,6 +175,7 @@ def strategy_payload(*, name: str = "20k shared", target: str = "20000") -> dict
         "roundIntervalMinSeconds": 600,
         "roundIntervalMaxSeconds": 1800,
     }
+
 
 def monitor_campaign(*, campaign_id: str, created_at_ms: int) -> BetaVolumeCampaign:
     return BetaVolumeCampaign(

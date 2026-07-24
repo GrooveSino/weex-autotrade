@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import time
 from decimal import Decimal
-from enum import StrEnum
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic.functional_validators import model_validator
+
 from .models_shared import CamelModel, StrategyDirection, StrategyTargetMode
+
 
 class BetaMarketSnapshot(CamelModel):
     schema_version: str

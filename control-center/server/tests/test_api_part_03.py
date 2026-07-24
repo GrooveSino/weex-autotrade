@@ -103,6 +103,7 @@ def test_bound_strategy_execution_creates_session_only_after_confirmed_idempoten
         assert duplicate.status_code == 409
         assert held_executor.submissions == 1
 
+
 def test_strategy_target_mode_and_funding_preflight_are_exposed_and_enforced() -> None:
     with client() as api:
         payload = strategy_payload(name="Impossible round", target="200000")
@@ -130,6 +131,7 @@ def test_strategy_target_mode_and_funding_preflight_are_exposed_and_enforced() -
     assert rejected.status_code == 409
     assert "funding preflight failed" in rejected.json()["detail"]
 
+
 def test_lifetime_target_requires_complete_trade_history_before_start() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
@@ -148,6 +150,7 @@ def test_lifetime_target_requires_complete_trade_history_before_start() -> None:
 
     assert rejected.status_code == 409
     assert "complete lifetime trade history" in rejected.json()["detail"]
+
 
 def test_health_proves_live_trading_is_disabled() -> None:
     response = client().get("/api/v1/health")
@@ -177,6 +180,7 @@ def test_health_proves_live_trading_is_disabled() -> None:
     assert payload["executorConnected"] is True
     assert isinstance(payload["executorGeneration"], str)
 
+
 def test_lifespan_runs_one_central_beta_refresher_at_the_configured_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,6 +206,7 @@ def test_lifespan_runs_one_central_beta_refresher_at_the_configured_interval(
 
     assert provider.refresh_calls >= 3
     assert provider.closed is True
+
 
 def test_readonly_adapter_exposes_health_but_rejects_execution_actions() -> None:
     app = create_app(ControlPlaneSettings(adapter="weex-readonly", seed_demo_data=False))
@@ -241,6 +246,7 @@ def test_readonly_adapter_exposes_health_but_rejects_execution_actions() -> None
     assert stop.status_code == 200
     assert stop.json()["status"] == "stopped"
 
+
 def test_mock_close_positions_endpoint_flattens_only_a_non_running_exposed_instance() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=True))
     with TestClient(app) as api:
@@ -256,6 +262,7 @@ def test_mock_close_positions_endpoint_flattens_only_a_non_running_exposed_insta
     assert closed["strategyProgress"]["generatedVolumeQuote"] == "3738.1"
     assert "一键平仓完成" in closed["phase"]
 
+
 def test_close_positions_endpoint_rejects_running_and_flat_instances() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=True))
     with TestClient(app) as api:
@@ -267,6 +274,7 @@ def test_close_positions_endpoint_rejects_running_and_flat_instances() -> None:
     assert "stop or pause" in running.json()["detail"]
     assert flat.status_code == 409
     assert "no open positions" in flat.json()["detail"]
+
 
 def test_readonly_adapter_rejects_position_close_even_when_exposure_exists() -> None:
     app = create_app(ControlPlaneSettings(adapter="weex-readonly", seed_demo_data=False))

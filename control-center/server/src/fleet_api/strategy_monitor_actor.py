@@ -64,7 +64,9 @@ def actor_active_wait(actor: ActorLifecycleProjection | None, *, updated_at_ms: 
         label=f"正常{phase}阶段排队",
         updated_at_ms=updated_at_ms,
         elapsed_ms=0,
-        remaining_ms=None if actor.estimated_start_at_ms is None else max(0, actor.estimated_start_at_ms - updated_at_ms),
+        remaining_ms=None
+        if actor.estimated_start_at_ms is None
+        else max(0, actor.estimated_start_at_ms - updated_at_ms),
         detail=position + proxy_hint,
         deadline_at_ms=actor.estimated_start_at_ms,
     )
@@ -74,7 +76,13 @@ def actor_timeline_entry(campaign_id: str, event: dict[str, Any]) -> ExecutionTi
     if _event_name(event) != "actor_lifecycle":
         return None
     state = str(_field(event, "phase") or "admitted")
-    level = "warn" if state in {"stopping", "recovering", "failed"} else "success" if state in {"completed", "stopped"} else "info"
+    level = (
+        "warn"
+        if state in {"stopping", "recovering", "failed"}
+        else "success"
+        if state in {"completed", "stopped"}
+        else "info"
+    )
     detail = _actor_detail(event)
     sequence = int(event.get("sequence") or 0)
     return ExecutionTimelineEntry(

@@ -1,6 +1,3 @@
-
-
-
 from decimal import Decimal
 from pathlib import Path
 
@@ -54,6 +51,7 @@ class FakeGateway:
     def close(self) -> None:
         self.closed = True
 
+
 class FakeBetaProvider:
     def __init__(self, allocation: BetaAllocation) -> None:
         self.allocation = allocation
@@ -61,9 +59,11 @@ class FakeBetaProvider:
     def get(self) -> BetaAllocation:
         return self.allocation
 
+
 class UnavailableBetaProvider:
     def get(self) -> BetaAllocation:
         raise BetaUnavailable("beta_request_failed:httperror")
+
 
 def live_settings(tmp_path, *, workers: int = 1) -> ControlPlaneSettings:
     return ControlPlaneSettings(
@@ -75,6 +75,7 @@ def live_settings(tmp_path, *, workers: int = 1) -> ControlPlaneSettings:
         live_campaign_worker_count=workers,
         campaign_data_directory=tmp_path / "campaign-data",
     )
+
 
 def live_profile(tmp_path: Path) -> LiveProfile:
     return LiveProfile(
@@ -88,6 +89,7 @@ def live_profile(tmp_path: Path) -> LiveProfile:
         allow_live_mutations=True,
         post_only_only=True,
     )
+
 
 def sample_campaign() -> BetaVolumeCampaign:
     btc_weight = Decimal(1) / (Decimal(1) + Decimal("0.4"))
@@ -126,6 +128,7 @@ def sample_campaign() -> BetaVolumeCampaign:
         margin_mode="isolated",
         allocation=allocation,
     )._with_computed_id()
+
 
 def metadata(campaign: BetaVolumeCampaign) -> dict[str, object]:
     return {

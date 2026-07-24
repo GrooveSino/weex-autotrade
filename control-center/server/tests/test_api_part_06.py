@@ -84,6 +84,7 @@ def test_execution_history_is_account_scoped_read_only_and_marks_uncertain_cycle
     ]
     assert missing.status_code == 404
 
+
 def test_strategy_run_history_is_session_scoped_and_hides_cycle_details() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
@@ -126,6 +127,7 @@ def test_strategy_run_history_is_session_scoped_and_hides_cycle_details() -> Non
     assert "cycleId" not in body["items"][0]
     assert "orderId" not in body["items"][0]
 
+
 def test_demo_instance_lifecycle_and_exact_global_stop() -> None:
     with client() as api:
         instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
@@ -141,6 +143,7 @@ def test_demo_instance_lifecycle_and_exact_global_stop() -> None:
         assert stopped.json() == {"stopped": 1, "cancelVerified": 1, "cancelFailed": 0}
         assert api.get(f"/api/v1/instances/{instance_id}").json()["status"] == "stopped"
 
+
 def test_live_instance_cannot_start_with_mock_adapter() -> None:
     with client() as api:
         instance_id = api.post("/api/v1/instances", json=create_payload(mode="live")).json()["id"]
@@ -148,6 +151,7 @@ def test_live_instance_cannot_start_with_mock_adapter() -> None:
 
     assert response.status_code == 409
     assert "cannot start" in response.json()["detail"]
+
 
 def test_stopped_instance_can_replace_proxy_without_echoing_credentials() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -173,6 +177,7 @@ def test_stopped_instance_can_replace_proxy_without_echoing_credentials() -> Non
     assert material is not None
     assert material.proxy_url.get_secret_value().endswith("proxy.example.com:1080")
 
+
 def test_stopped_instance_keeps_stored_credentials_when_edit_payload_omits_them() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
@@ -192,6 +197,7 @@ def test_stopped_instance_keeps_stored_credentials_when_edit_payload_omits_them(
     assert after.api_secret.get_secret_value() == before.api_secret.get_secret_value()
     assert after.passphrase.get_secret_value() == before.passphrase.get_secret_value()
 
+
 def test_stopped_instance_can_disable_proxy_without_replacing_credentials() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
@@ -208,6 +214,7 @@ def test_stopped_instance_can_disable_proxy_without_replacing_credentials() -> N
     assert after.api_key.get_secret_value() == before.api_key.get_secret_value()
     assert after.api_secret.get_secret_value() == before.api_secret.get_secret_value()
     assert after.passphrase.get_secret_value() == before.passphrase.get_secret_value()
+
 
 def test_error_instance_can_recover_http_proxy_without_changing_strategy() -> None:
     repository = InMemoryAccountRepository()
@@ -235,6 +242,7 @@ def test_error_instance_can_recover_http_proxy_without_changing_strategy() -> No
     assert material is not None
     assert material.proxy_url.get_secret_value() == "http://user:password@proxy.example.com:8080"
 
+
 def test_update_restores_credentials_when_public_account_write_fails() -> None:
     repository = FailingReplaceRepository()
     vault = EphemeralCredentialVault()
@@ -261,6 +269,7 @@ def test_update_restores_credentials_when_public_account_write_fails() -> None:
     assert restored == original
     assert service.get_instance(created.id).api_key_tail == "ABCD"
 
+
 def test_running_instance_configuration_is_immutable() -> None:
     with client() as api:
         instance_id = api.post("/api/v1/instances", json=create_payload()).json()["id"]
@@ -269,6 +278,7 @@ def test_running_instance_configuration_is_immutable() -> None:
 
     assert response.status_code == 409
     assert "stop the instance" in response.json()["detail"]
+
 
 def test_running_instance_must_stop_before_delete() -> None:
     with client() as api:

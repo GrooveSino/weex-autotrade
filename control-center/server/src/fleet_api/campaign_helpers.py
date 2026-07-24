@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
@@ -12,6 +11,7 @@ from weex_cli.gateway import WeexGateway
 from .campaign_contracts import CampaignRecord
 from .models import BetaCampaignStatus
 from .service import ValidationFailed
+
 
 def _preview_metadata(campaign: BetaVolumeCampaign, available: Decimal, readiness: dict[str, Any]) -> dict[str, Any]:
     confirmation = campaign_confirmation(campaign)
@@ -31,10 +31,7 @@ def _preview_metadata(campaign: BetaVolumeCampaign, available: Decimal, readines
 
 
 def _bound_strategy_confirmation(campaign: BetaVolumeCampaign) -> str:
-    return (
-        f"EXECUTE WEEX LIVE STRATEGY {campaign.campaign_id.upper()} "
-        f"DIRECTION_{campaign.direction.upper()} POST_ONLY"
-    )
+    return f"EXECUTE WEEX LIVE STRATEGY {campaign.campaign_id.upper()} DIRECTION_{campaign.direction.upper()} POST_ONLY"
 
 
 def _bound_strategy_stop_confirmation(campaign_id: str) -> str:

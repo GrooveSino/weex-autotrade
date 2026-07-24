@@ -133,7 +133,9 @@ class WeexReadonlyAccountTelemetryAdapter(AccountTelemetryAdapter):
         credentials = context.credentials
         proxy_url = credentials.proxy_url.get_secret_value() if credentials.proxy_url is not None else None
         if proxy_url is not None and "://" not in proxy_url:
-            credentials = replace(credentials, proxy_url=SecretStr(f"{context.instance.proxy.type.value}://{proxy_url}"))
+            credentials = replace(
+                credentials, proxy_url=SecretStr(f"{context.instance.proxy.type.value}://{proxy_url}")
+            )
         self._gateway = self._gateway_factory(credentials, self._request_timeout_ms)
 
     def _read_snapshot(self):

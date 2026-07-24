@@ -1,45 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-from fastapi import Response, status
-from .instance_projection import project_instance_session
-from .models import AccountInstance, CreateInstanceRequest, StrategyAssignmentRequest, StrategyAssignmentResult, TradingMode, VolumeStrategy, VolumeStrategyInput
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
+
+from .instance_projection import project_instance_session
 from .main_context import FleetAppContext
+from .models import (
+    AccountInstance,
+    CreateInstanceRequest,
+    StrategyAssignmentRequest,
+    StrategyAssignmentResult,
+    TradingMode,
+    VolumeStrategy,
+    VolumeStrategyInput,
+)
 
 
 def register_account_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     selected = ctx.selected
     service = ctx.service
-    repository = ctx.repository
-    vault = ctx.vault
     volume_ledger = ctx.volume_ledger
-    execution_journal = ctx.execution_journal
-    execution_coordinator = ctx.execution_coordinator
-    selected_allocation_provider = ctx.selected_allocation_provider
     runtime = ctx.runtime
-    beta_source_runtime = ctx.beta_source_runtime
-    campaign_journal = ctx.campaign_journal
     campaign_manager = ctx.campaign_manager
-    app_state_campaign_manager = ctx.campaign_manager
-    broker = ctx.broker
-    session_volume = ctx.session_volume
     strategy_monitor = ctx.strategy_monitor
-    command_ledger = ctx.command_ledger
-    executor_generation = ctx.executor_generation
-    executor_release_id = ctx.executor_release_id
-    latest_bound_record = ctx.latest_bound_record
-    finalize_bound_strategy_session = ctx.finalize_bound_strategy_session
-    schedule_session_finalization = ctx.schedule_session_finalization
-    notify_campaign_change = ctx.notify_campaign_change
-    establish_bound_strategy_session = ctx.establish_bound_strategy_session
     publish_snapshot = ctx.publish_snapshot
-    refresh_beta_state = ctx.refresh_beta_state
     projected_instances = ctx.projected_instances
-    combined_log_updates = ctx.combined_log_updates
-    strategy_run_plan = ctx.strategy_run_plan
-    require_command_id = ctx.require_command_id
     trade_history_scheduler = ctx.trade_history_scheduler
 
     @app.get("/api/v1/instances", response_model=list[AccountInstance])

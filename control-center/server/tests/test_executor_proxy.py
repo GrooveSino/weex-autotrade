@@ -238,9 +238,7 @@ def test_proxy_streams_monitor_sse_and_forwards_resume_cursor() -> None:
 
 
 def test_primary_frontend_flow_uses_bound_strategy_execution_not_legacy_campaign_dialog() -> None:
-    app_source = (
-        Path(__file__).resolve().parents[2] / "src" / "App.tsx"
-    ).read_text(encoding="utf-8")
+    app_source = (Path(__file__).resolve().parents[2] / "src" / "App.tsx").read_text(encoding="utf-8")
 
     assert "BoundStrategyExecutionDialog" in app_source
     assert "BetaCampaignDialog" not in app_source

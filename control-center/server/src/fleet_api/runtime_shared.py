@@ -15,6 +15,7 @@ class GlobalStopAccountResult:
     cancel_verified: bool
     cancel_failed: bool
 
+
 def session_projection_verified(session: dict[str, object]) -> bool:
     return (
         session.get("source_complete") is True

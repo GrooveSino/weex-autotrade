@@ -7,9 +7,7 @@ from typing import Literal
 
 from .models import BetaCampaignView
 
-LifecycleDisposition = Literal[
-    "idle", "ready", "running", "stopping", "recovering", "cleanup_required", "unavailable"
-]
+LifecycleDisposition = Literal["idle", "ready", "running", "stopping", "recovering", "cleanup_required", "unavailable"]
 
 
 @dataclass(frozen=True, slots=True)

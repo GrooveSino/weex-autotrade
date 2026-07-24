@@ -1,5 +1,3 @@
-
-
 import httpx
 
 from fleet_api.beta_allocation import HttpBetaAllocationProvider
@@ -7,6 +5,7 @@ from fleet_api.models import AccountInstance, InstanceStatus, ProxySnapshot, Pro
 from fleet_api.telemetry import AccountTelemetryContext
 
 RATIO_URL = "https://ratio.example.test/api/v1/hedge-ratio"
+
 
 def healthy_payload() -> dict[str, object]:
     return {
@@ -26,6 +25,7 @@ def healthy_payload() -> dict[str, object]:
         "source": "beta_v2",
     }
 
+
 def account_context(instance_id: str = "ins-beta") -> AccountTelemetryContext:
     return AccountTelemetryContext(
         AccountInstance(
@@ -41,6 +41,7 @@ def account_context(instance_id: str = "ins-beta") -> AccountTelemetryContext:
         None,
     )
 
+
 async def allocation_from_response(response: httpx.Response):
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response))
     provider = HttpBetaAllocationProvider(
@@ -54,6 +55,7 @@ async def allocation_from_response(response: httpx.Response):
     finally:
         await provider.aclose()
         await client.aclose()
+
 
 async def snapshot_from_payload(payload: dict[str, object]):
     client = httpx.AsyncClient(

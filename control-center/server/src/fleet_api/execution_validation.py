@@ -6,10 +6,10 @@ from decimal import Decimal
 from .execution_contracts import (
     CycleExecutionStatus,
     ExecutionStateError,
+    PairCyclePlan,
     PairDirection,
     PairExecutionOutcome,
     PairLegAction,
-    PairCyclePlan,
     PositionCloseOutcome,
 )
 from .models import ExposureSnapshot

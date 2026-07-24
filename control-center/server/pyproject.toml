@@ -33,7 +33,7 @@ packages = ["src/fleet_api"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
-pythonpath = ["src"]
+pythonpath = ["src", "../../src"]
 testpaths = ["tests"]
 
 [tool.ruff]

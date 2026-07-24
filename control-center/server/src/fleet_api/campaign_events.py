@@ -9,8 +9,9 @@ from typing import Any
 
 from .campaign_contracts import CampaignRecord
 from .campaign_helpers import _reconciliation_confirmation, _reconciliation_required
-from .models import BetaCampaignEvent, BetaCampaignStatus, BetaCampaignView
+from .models import BetaCampaignEvent, BetaCampaignView
 from .service import ValidationFailed
+
 
 def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
     name = str(payload.get("event") or payload.get("name") or "event")[:96]

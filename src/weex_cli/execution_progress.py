@@ -260,7 +260,7 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
     if name == "safe_stop_cancel_unverified":
         return TimelinePresentation("error", f"{symbol} 撤单未能核验", "停止自动平仓，需人工核对挂单和仓位")
     if name == "safe_stop_flattening":
-        return TimelinePresentation("warn", f"{symbol} 正在 Maker-only 平仓", f"残仓 {value('quantity')}" )
+        return TimelinePresentation("warn", f"{symbol} 正在 Maker-only 平仓", f"残仓 {value('quantity')}")
     if name == "safe_stop_leg_completed":
         return TimelinePresentation("success", f"{symbol} Maker-only 平仓已完成")
     if name == "safe_stop_verified":
@@ -348,9 +348,7 @@ class ExecutionProgressProjector:
             "eth_quote_volume": format(self.eth_quote_volume, "f"),
             "active_waits": [asdict(wait) for wait in self.active_waits.values()],
             "current_run_base_quote": format(self._current_run_base_quote, "f"),
-            "completed_leg_quotes": {
-                key: format(value, "f") for key, value in self._completed_leg_quotes.items()
-            },
+            "completed_leg_quotes": {key: format(value, "f") for key, value in self._completed_leg_quotes.items()},
         }
 
     @classmethod
@@ -364,9 +362,7 @@ class ExecutionProgressProjector:
         projector.submissions = _nonnegative_int(snapshot.get("submissions"))
         projector.cancels = _nonnegative_int(snapshot.get("cancels"))
         projector.requotes = _nonnegative_int(snapshot.get("requotes"))
-        projector.execution_verified_quote_volume = _decimal_or_zero(
-            snapshot.get("execution_verified_quote_volume")
-        )
+        projector.execution_verified_quote_volume = _decimal_or_zero(snapshot.get("execution_verified_quote_volume"))
         projector.btc_quote_volume = _decimal_or_zero(snapshot.get("btc_quote_volume"))
         projector.eth_quote_volume = _decimal_or_zero(snapshot.get("eth_quote_volume"))
         projector._current_run_base_quote = _decimal_or_zero(snapshot.get("current_run_base_quote"))
@@ -394,12 +390,8 @@ class ExecutionProgressProjector:
                         detail=str(raw.get("detail") or ""),
                         symbol=str(raw["symbol"]) if raw.get("symbol") else None,
                         action=str(raw["action"]) if raw.get("action") else None,
-                        started_at_ms=(
-                            None if raw.get("started_at_ms") is None else int(raw["started_at_ms"])
-                        ),
-                        deadline_at_ms=(
-                            None if raw.get("deadline_at_ms") is None else int(raw["deadline_at_ms"])
-                        ),
+                        started_at_ms=(None if raw.get("started_at_ms") is None else int(raw["started_at_ms"])),
+                        deadline_at_ms=(None if raw.get("deadline_at_ms") is None else int(raw["deadline_at_ms"])),
                     )
                 except (TypeError, ValueError):
                     continue

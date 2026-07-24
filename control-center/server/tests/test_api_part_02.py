@@ -20,9 +20,7 @@ from .test_api_support import (
 )
 
 
-def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     from weex_cli.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
@@ -59,16 +57,12 @@ def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(
         payload = create_payload(mode="live")
         payload["strategyId"] = strategy["id"]
         instance = api.post("/api/v1/instances", json=payload).json()
-        first = api.post(
-            f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={}
-        ).json()
+        first = api.post(f"/api/v1/instances/{instance['id']}/strategy-executions/preview", json={}).json()
         record = app.state.campaign_journal.get(first["campaignId"])
         assert record is not None
         session_id = str(record.metadata["session_id"])
         started_at_ms = int(time.time() * 1000) - 2_000
-        assert app.state.campaign_journal.claim_execution(
-            first["campaignId"], started_at_ms=started_at_ms
-        )
+        assert app.state.campaign_journal.claim_execution(first["campaignId"], started_at_ms=started_at_ms)
         app.state.session_volume.start(
             session_id=session_id,
             account_id=instance["id"],
@@ -103,6 +97,7 @@ def test_bound_strategy_preview_keeps_incomplete_recovery_blocked(
         assert blocked.json()["disposition"] == "recovering"
         assert app.state.trade_volume_ledger.active_session(instance["id"], "live") is not None
         assert app.state.campaign_journal.get(first["campaignId"]).status == "recovering"
+
 
 def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailable(
     tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -145,6 +140,7 @@ def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailabl
 
     assert preview.status_code == 503
     assert preview.json()["detail"] == "final beta source unavailable: beta_request_failed:httperror"
+
 
 def test_reassigning_a_shared_strategy_invalidates_old_planned_preview(
     tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -206,6 +202,7 @@ def test_reassigning_a_shared_strategy_invalidates_old_planned_preview(
         assert current_preview.status_code == 200, current_preview.text
         assert current_preview.json()["campaignId"] != old_preview["campaignId"]
         assert current_preview.json()["strategyId"] == first["id"]
+
 
 def test_shared_strategy_update_is_rejected_while_bound_execution_is_active(
     tmp_path, monkeypatch: pytest.MonkeyPatch

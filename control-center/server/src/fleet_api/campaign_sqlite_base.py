@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import threading
 import time
 from pathlib import Path
 from threading import RLock
@@ -13,6 +12,7 @@ from weex_cli.beta_campaign import BetaVolumeCampaign
 from .campaign_contracts import ACTIVE_STATUSES, CampaignRecord, ExecutionMonitorProjection
 from .models import BetaCampaignStatus
 from .service import UnsafeOperation
+
 
 class SQLiteCampaignJournalBase:
     def __init__(self, path: Path) -> None:

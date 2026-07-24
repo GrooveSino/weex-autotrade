@@ -59,6 +59,7 @@ def test_completed_pair_latches_one_beta_allocation_for_open_and_close() -> None
 
     asyncio.run(scenario())
 
+
 def test_cancel_active_orders_delegates_once_and_returns_verified_outcome() -> None:
     async def scenario() -> None:
         target, _journal, _ledger, adapter, allocation = coordinator()
@@ -74,6 +75,7 @@ def test_cancel_active_orders_delegates_once_and_returns_verified_outcome() -> N
         await target.close()
 
     asyncio.run(scenario())
+
 
 def test_manual_pair_close_reconciles_only_the_matching_opened_cycle_without_submission() -> None:
     async def scenario() -> None:
@@ -107,6 +109,7 @@ def test_manual_pair_close_reconciles_only_the_matching_opened_cycle_without_sub
         await target.close()
 
     asyncio.run(scenario())
+
 
 def test_opened_pair_is_not_closed_before_the_configured_hold_time() -> None:
     async def scenario() -> None:
@@ -149,6 +152,7 @@ def test_opened_pair_is_not_closed_before_the_configured_hold_time() -> None:
 
     asyncio.run(scenario())
 
+
 def test_post_only_rejection_is_terminal_and_never_resubmitted() -> None:
     async def scenario() -> None:
         target, _journal, ledger, adapter, allocation = coordinator("reject")
@@ -167,6 +171,7 @@ def test_post_only_rejection_is_terminal_and_never_resubmitted() -> None:
 
     asyncio.run(scenario())
 
+
 def test_transport_exception_becomes_redacted_uncertain_and_never_resubmits() -> None:
     async def scenario() -> None:
         target, _journal, ledger, adapter, _allocation = coordinator("raise")
@@ -184,6 +189,7 @@ def test_transport_exception_becomes_redacted_uncertain_and_never_resubmits() ->
         await target.close()
 
     asyncio.run(scenario())
+
 
 def test_close_transport_exception_is_uncertain_and_never_retried() -> None:
     async def scenario() -> None:
@@ -205,6 +211,7 @@ def test_close_transport_exception_is_uncertain_and_never_retried() -> None:
         await target.close()
 
     asyncio.run(scenario())
+
 
 def test_allocation_unavailable_stops_before_plan_journal_or_submission() -> None:
     async def scenario() -> None:
@@ -233,6 +240,7 @@ def test_allocation_unavailable_stops_before_plan_journal_or_submission() -> Non
 
     asyncio.run(scenario())
 
+
 def test_preexisting_planned_cycle_is_marked_uncertain_without_adapter_or_ratio_call() -> None:
     async def scenario() -> None:
         target, journal, _ledger, adapter, allocation = coordinator()
@@ -257,6 +265,7 @@ def test_preexisting_planned_cycle_is_marked_uncertain_without_adapter_or_ratio_
         await target.close()
 
     asyncio.run(scenario())
+
 
 def test_sqlite_journal_recovers_planned_cycle_and_cascades_with_account(tmp_path: Path) -> None:
     path = tmp_path / "fleet.db"
@@ -287,6 +296,7 @@ def test_sqlite_journal_recovers_planned_cycle_and_cascades_with_account(tmp_pat
     assert restored.list_recent(instance.id, 20) == []
     restored.close()
     repository.close()
+
 
 def test_sqlite_journal_marks_opened_pair_uncertain_after_restart(tmp_path: Path) -> None:
     path = tmp_path / "fleet-opened.db"

@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from decimal import Decimal
-from pathlib import Path
-from threading import RLock
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -158,27 +154,19 @@ class VolumeSession:
             "strategy_version": self.strategy_version,
             "direction": self.direction,
             "target_mode": self.target_mode,
-            "strategy_target_quote_volume": str(
-                self.strategy_target_quote_volume or self.target_quote_volume
-            ),
+            "strategy_target_quote_volume": str(self.strategy_target_quote_volume or self.target_quote_volume),
             "baseline_lifetime_quote_volume": str(self.baseline_lifetime_quote_volume),
             "finished_at_ms": self.finished_at_ms,
             "result": self.result,
             "result_reason": self.result_reason,
             "final_lifetime_quote_volume": (
-                None
-                if self.final_lifetime_quote_volume is None
-                else str(self.final_lifetime_quote_volume)
+                None if self.final_lifetime_quote_volume is None else str(self.final_lifetime_quote_volume)
             ),
             "starting_available_balance_quote": (
-                None
-                if self.starting_available_balance_quote is None
-                else str(self.starting_available_balance_quote)
+                None if self.starting_available_balance_quote is None else str(self.starting_available_balance_quote)
             ),
             "ending_available_balance_quote": (
-                None
-                if self.ending_available_balance_quote is None
-                else str(self.ending_available_balance_quote)
+                None if self.ending_available_balance_quote is None else str(self.ending_available_balance_quote)
             ),
         }
 

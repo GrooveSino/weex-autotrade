@@ -1,4 +1,3 @@
-
 from decimal import Decimal
 
 from fleet_api.execution import (
@@ -26,6 +25,7 @@ def running_account(instance_id: str = "ins-execution") -> AccountInstance:
         phase="运行中",
         proxy=ProxySnapshot(type=ProxyType.HTTPS, host="proxy.example.com:9000"),
     )
+
 
 class ControlledAdapter:
     def __init__(self, behavior: str) -> None:
@@ -59,12 +59,14 @@ class ControlledAdapter:
     async def aclose(self) -> None:
         return None
 
+
 class SingleAdapterFactory:
     def __init__(self, adapter: ControlledAdapter) -> None:
         self.adapter = adapter
 
     def create(self, instance_id: str) -> ControlledAdapter:
         return self.adapter
+
 
 class CountingAllocationProvider:
     def __init__(self) -> None:
@@ -78,11 +80,13 @@ class CountingAllocationProvider:
     async def aclose(self) -> None:
         return None
 
+
 class UnavailableAllocationProvider(CountingAllocationProvider):
     async def get(self, context: AccountTelemetryContext):
         del context
         self.calls += 1
         raise AllocationUnavailable("beta_unusable")
+
 
 def coordinator(behavior: str = "complete"):
     journal = InMemoryExecutionJournal()

@@ -45,8 +45,12 @@ class _Volume:
 
 def _plans() -> tuple[PairLegPlan, PairLegPlan]:
     return (
-        PairLegPlan("BTC", "long", "buy", "sell", Decimal("50"), Decimal("100"), Decimal("1"), Decimal("0.1"), "bo", "bc"),
-        PairLegPlan("ETH", "short", "sell", "buy", Decimal("50"), Decimal("100"), Decimal("1"), Decimal("0.1"), "eo", "ec"),
+        PairLegPlan(
+            "BTC", "long", "buy", "sell", Decimal("50"), Decimal("100"), Decimal("1"), Decimal("0.1"), "bo", "bc"
+        ),
+        PairLegPlan(
+            "ETH", "short", "sell", "buy", Decimal("50"), Decimal("100"), Decimal("1"), Decimal("0.1"), "eo", "ec"
+        ),
     )
 
 

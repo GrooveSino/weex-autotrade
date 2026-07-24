@@ -35,6 +35,7 @@ def test_strategy_monitor_is_idle_without_a_run_and_never_exposes_credentials() 
     assert "pass-never-return" not in response.text
     assert "proxy-password" not in response.text
 
+
 def test_beta_source_settings_update_runtime_without_storing_endpoint_credentials() -> None:
     class NoNetworkProvider:
         last_refresh_error = None
@@ -81,6 +82,7 @@ def test_beta_source_settings_update_runtime_without_storing_endpoint_credential
         assert updated.json()["url"] == "https://beta.example.test/api/v1/ratio"
         assert updated.json()["timeoutSeconds"] == 2.5
         assert api.get("/api/v1/beta/source").json()["url"] == "https://beta.example.test/api/v1/ratio"
+
 
 def test_bound_strategy_live_preview_is_read_only_and_confirmation_gated(
     tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -172,6 +174,7 @@ def test_bound_strategy_live_preview_is_read_only_and_confirmation_gated(
         )
         assert api.get("/api/v1/health").json()["liveCampaignActiveWorkerCount"] == 0
 
+
 def test_bound_strategy_preview_automatically_converges_a_flat_uncertain_run(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,9 +222,7 @@ def test_bound_strategy_preview_automatically_converges_a_flat_uncertain_run(
         assert record is not None
         session_id = str(record.metadata["session_id"])
         started_at_ms = int(time.time() * 1000) - 2_000
-        assert app.state.campaign_journal.claim_execution(
-            first["campaignId"], started_at_ms=started_at_ms
-        )
+        assert app.state.campaign_journal.claim_execution(first["campaignId"], started_at_ms=started_at_ms)
         app.state.session_volume.start(
             session_id=session_id,
             account_id=instance["id"],

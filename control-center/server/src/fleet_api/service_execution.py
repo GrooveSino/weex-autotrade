@@ -1,30 +1,22 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
-from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
 
-from pydantic import SecretStr
-
-from .campaign_log import campaign_event_log
-from .execution import CycleExecutionStatus, ExecutionRecord, PositionCloseExecutionResult
-from .funding import funding_preflight
+from .execution import CycleExecutionStatus, PositionCloseExecutionResult
 from .models import (
-    AccountInstance, CreateInstanceRequest, CycleSnapshot, ExposureSnapshot, FundingPreflightStatus,
-    InstanceAction, InstanceStatus, LogBatch, LogLevel, LogLine, ProxySnapshot, ProxyStatus, ProxyType,
-    RuntimeHealthSnapshot, StrategyProgress, StrategyStage, StrategyTargetMode, UpdateInstanceRequest,
-    VolumeSnapshot, VolumeStrategy, VolumeStrategyInput, WalletSnapshot, default_volume_strategy,
+    AccountInstance,
+    ExposureSnapshot,
+    InstanceStatus,
+    LogLevel,
+    StrategyStage,
+    StrategyTargetMode,
+    VolumeSnapshot,
 )
-from .ownership import LEGACY_OWNER_USER_ID, current_owner_user_id
-from .proxy import ProxyValidationError, normalize_proxy_url, proxy_host
-from .repository import AccountRepository
-from .service_errors import BetaSourceUnavailable, InstanceNotFound, StrategyNotFound, TelemetryUnavailable, UnsafeOperation, ValidationFailed
-from .service_shared import delay_label as _delay_label, now as _now
-from .strategy import estimate_rounds, target_progress_quote
-from .telemetry import AccountTelemetry
-from .vault import CredentialMaterial, CredentialVault
+from .service_errors import (
+    UnsafeOperation,
+)
+from .strategy import target_progress_quote
 from .volume_history import TradeVolumeAggregate
 
 
@@ -272,9 +264,7 @@ class ServiceExecutionMixin:
         updated = instance.model_copy(
             update={
                 "runtime": instance.runtime.model_copy(
-                    update={"last_stop_verified_at_ms": verified_at_ms}
-                    if marks_stop_verified
-                    else {}
+                    update={"last_stop_verified_at_ms": verified_at_ms} if marks_stop_verified else {}
                 ),
                 "updated_at": "刚刚",
                 "unread_logs": instance.unread_logs + 1,

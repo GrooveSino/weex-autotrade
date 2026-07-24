@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
-from .volume_contracts import ACTIVE_SESSION_STATUSES, SHANGHAI, TERMINAL_SESSION_STATUSES, NormalizedTradeFill, TradeVolumeAggregate, VolumeSession
-
-SHANGHAI = ZoneInfo("Asia/Shanghai")
+from .volume_contracts import (
+    SHANGHAI,
+    NormalizedTradeFill,
+    TradeVolumeAggregate,
+    VolumeSession,
+)
 
 
 def utc_day_start_ms(now_ms: int) -> int:
@@ -84,15 +86,6 @@ def _session_projection(
     summary = _fill_summary(fills)
     remaining = max(session.target_quote_volume - verified, Decimal(0))
     eligible_maker = all(f.maker is True for f in fills if f.authoritative) if fills else True
-    complete = (
-        remaining <= 0
-        and session.source_complete
-        and not session.stale
-        and not session.reconciliation_required
-        and not session.pending_sync
-        and not session.uncertain_order_state
-        and (not session.maker_only_required or eligible_maker)
-    )
     status = _normalized_session_status(session.status)
     available_balance_change = (
         None
@@ -107,9 +100,7 @@ def _session_projection(
         "status": status,
         "audit_status": session.audit_status,
         "maker_only_verified": eligible_maker,
-        "available_balance_change_quote": (
-            None if available_balance_change is None else str(available_balance_change)
-        ),
+        "available_balance_change_quote": (None if available_balance_change is None else str(available_balance_change)),
         "retry_allowed": False,
     }
 

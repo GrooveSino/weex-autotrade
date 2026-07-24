@@ -47,6 +47,7 @@ def test_readonly_metadata_update_keeps_existing_trade_history() -> None:
     assert aggregate.lifetime == Decimal("25")
     assert aggregate.fill_count == 1
 
+
 @pytest.mark.parametrize("change", ["credentials", "history-start"])
 def test_readonly_identity_or_history_change_resets_derived_trade_history(change: str) -> None:
     now_ms = int(time.time() * 1000)
@@ -85,6 +86,7 @@ def test_readonly_identity_or_history_change_resets_derived_trade_history(change
     assert aggregate.fill_count == 0
     assert aggregate.complete is False
 
+
 def test_create_removes_public_account_when_credential_write_fails() -> None:
     repository = InMemoryAccountRepository()
     service = FleetControlService(repository, FailingCredentialVault())
@@ -94,6 +96,7 @@ def test_create_removes_public_account_when_credential_write_fails() -> None:
 
     assert repository.list() == []
 
+
 def test_validation_errors_do_not_echo_invalid_credential_input() -> None:
     payload = create_payload()
     payload["credentials"] = "malformed-secret-payload"
@@ -101,6 +104,7 @@ def test_validation_errors_do_not_echo_invalid_credential_input() -> None:
 
     assert response.status_code == 422
     assert "malformed-secret-payload" not in response.text
+
 
 def test_listing_instances_does_not_load_logs() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -113,6 +117,7 @@ def test_listing_instances_does_not_load_logs() -> None:
         logs = api.get(f"/api/v1/instances/{instance_id}/logs")
         assert logs.status_code == 200
         assert app.state.fleet_repository.log_read_count(instance_id) == 1
+
 
 def test_incremental_log_updates_are_account_scoped_and_cursor_safe() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
@@ -157,6 +162,7 @@ def test_incremental_log_updates_are_account_scoped_and_cursor_safe() -> None:
     assert reset.json()["reset"] is True
     assert reset.json()["cursor"] == incremental_body["cursor"]
 
+
 def test_clearing_logs_is_account_scoped_and_new_events_continue_from_an_empty_cursor() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
     with TestClient(app) as api:
@@ -189,6 +195,7 @@ def test_clearing_logs_is_account_scoped_and_new_events_continue_from_an_empty_c
     assert len(second_logs["lines"]) == 1
     assert [line["message"] for line in new_logs["lines"]] == ["实盘执行：运行 1 开始；剩余目标 500 USDT"]
 
+
 def test_explicit_refresh_is_visible_in_realtime_logs() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
     with TestClient(app) as api:
@@ -202,6 +209,7 @@ def test_explicit_refresh_is_visible_in_realtime_logs() -> None:
 
     assert refreshed.status_code == 200
     assert [line["message"] for line in updates["lines"]] == ["刷新成功：价格、钱包与仓位已同步"]
+
 
 def test_campaign_progress_is_projected_to_account_log_updates() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
@@ -231,6 +239,7 @@ def test_campaign_progress_is_projected_to_account_log_updates() -> None:
     assert updates["lines"][0]["level"] == "success"
     assert updates["lines"][0]["message"] == "实盘执行：BTCUSDT open 成交已核验；250 USDT / 2 笔"
     assert "must-not-appear" not in str(updates["lines"])
+
 
 def test_instance_projection_uses_live_fill_reconciliation_before_ledger_catches_up() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))

@@ -108,6 +108,7 @@ def test_worker_uses_independent_lane_gateways_and_records_events(monkeypatch, t
     assert lanes["BTC"] is not captured["primary"]
     manager.close()
 
+
 def test_campaign_progress_formatter_is_safe_and_keeps_verified_fill_context() -> None:
     level, message = campaign_event_log(
         {
@@ -125,6 +126,7 @@ def test_campaign_progress_formatter_is_safe_and_keeps_verified_fill_context() -
     assert level.value == "success"
     assert message == "实盘执行：BTCUSDT open 成交已核验；250.50 USDT / 2 笔"
     assert "must-not-render" not in message
+
 
 def test_progress_and_end_balance_failures_do_not_change_worker_result(monkeypatch, tmp_path) -> None:
     allocation = sample_campaign().allocation
@@ -194,6 +196,7 @@ def test_progress_and_end_balance_failures_do_not_change_worker_result(monkeypat
     assert [event["name"] for event in record.events] == ["campaign_run_started"]
     manager.close()
 
+
 def test_worker_initialization_failure_aborts_launch_and_is_immediately_restartable(monkeypatch, tmp_path) -> None:
     manager = CampaignWorkerManager(
         live_settings(tmp_path),
@@ -228,6 +231,7 @@ def test_worker_initialization_failure_aborts_launch_and_is_immediately_restarta
     assert record.events[0]["sequence"] == 1
     manager.close()
 
+
 def test_worker_failure_after_submission_boundary_enters_read_only_recovery(tmp_path) -> None:
     journal = InMemoryCampaignJournal()
     manager = CampaignWorkerManager(
@@ -245,17 +249,22 @@ def test_worker_failure_after_submission_boundary_enters_read_only_recovery(tmp_
         profile_fingerprint=live_profile_fingerprint(profile),
     )._with_computed_id()
     journal.create("ins-1", campaign, metadata(campaign))
-    journal.add_event(campaign.campaign_id, {
-        "sequence": 1,
-        "name": "leg_progress",
-        "at_ms": now_ms,
-        "fields": {"progress_event": "order_submission_attempted"},
-    })
+    journal.add_event(
+        campaign.campaign_id,
+        {
+            "sequence": 1,
+            "name": "leg_progress",
+            "at_ms": now_ms,
+            "fields": {"progress_event": "order_submission_attempted"},
+        },
+    )
     manager._verify_execution_boundary = lambda _record, _material: Decimal("1000")  # type: ignore[method-assign]
     manager._profile_and_gateway = lambda _material: (_ for _ in ()).throw(RuntimeError("gateway failed"))  # type: ignore[method-assign]
     material = CredentialMaterial(
-        api_key=SecretStr("key"), api_secret=SecretStr("secret"),
-        passphrase=SecretStr("passphrase"), proxy_url=None,
+        api_key=SecretStr("key"),
+        api_secret=SecretStr("secret"),
+        passphrase=SecretStr("passphrase"),
+        proxy_url=None,
     )
 
     manager.start("ins-1", campaign.campaign_id, str(metadata(campaign)["confirmation"]), True, material)
@@ -266,6 +275,7 @@ def test_worker_failure_after_submission_boundary_enters_read_only_recovery(tmp_
     assert record.status == BetaCampaignStatus.RECOVERING.value
     assert record.metadata["reason"] == "worker_exception:runtimeerror"
     manager.close()
+
 
 def test_start_rechecks_flat_boundary_before_worker_submission(tmp_path) -> None:
     manager = CampaignWorkerManager(

@@ -73,7 +73,9 @@ def install_http_support(app: FastAPI, ctx: FleetAppContext) -> None:
         existing = ctx.command_ledger.claim(ledger_command_id, fingerprint)
         if existing is not None:
             if existing.fingerprint != fingerprint:
-                return JSONResponse(status_code=409, content={"detail": "command id conflicts with a different request"})
+                return JSONResponse(
+                    status_code=409, content={"detail": "command id conflicts with a different request"}
+                )
             return JSONResponse(
                 status_code=409,
                 content={"detail": "command already accepted; query account or campaign state instead of retrying"},

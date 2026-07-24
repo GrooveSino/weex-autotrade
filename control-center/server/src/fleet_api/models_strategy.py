@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import time
 from decimal import Decimal
-from enum import StrEnum
-from typing import Any, Literal, Self
-from urllib.parse import urlsplit
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from pydantic.alias_generators import to_camel
+from pydantic import Field, SecretStr
 from pydantic.functional_validators import model_validator
+
 from .models_shared import CamelModel, ProxyType, StrategyStage, StrategyTargetMode
+
 
 class CredentialInput(CamelModel):
     api_key: SecretStr = Field(min_length=1)

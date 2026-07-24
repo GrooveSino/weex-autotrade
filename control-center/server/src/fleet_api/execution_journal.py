@@ -7,13 +7,12 @@ from pathlib import Path
 from threading import RLock
 
 from .execution_contracts import (
+    _TERMINAL_STATUSES,
     BeginCycleResult,
     CycleExecutionStatus,
-    ExecutionJournal,
     ExecutionRecord,
     ExecutionStateError,
     PairCyclePlan,
-    _TERMINAL_STATUSES,
     _require_reason_code,
 )
 

@@ -2,12 +2,29 @@ from __future__ import annotations
 
 import asyncio
 from uuid import uuid4
-from fastapi import Query
-from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignView, BoundStrategyExecutionExecuteRequest, BoundStrategyExecutionPreviewRequest, BoundStrategyExecutionStopRequest, StrategyMonitorSnapshot, StrategyRunCapacity, StrategyRunCleanupRequest, StrategyRunConfirmRequest, StrategyRunConfirmResponse, StrategyRunPage, StrategyRunPhaseQueue, StrategyRunPrepareResponse, StrategyRunSummary, TradingMode
-from .service import BetaSourceUnavailable, InstanceNotFound, UnsafeOperation
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
+
 from .main_context import FleetAppContext
+from .models import (
+    BetaCampaignEvent,
+    BetaCampaignPreview,
+    BetaCampaignView,
+    BoundStrategyExecutionExecuteRequest,
+    BoundStrategyExecutionPreviewRequest,
+    BoundStrategyExecutionStopRequest,
+    StrategyMonitorSnapshot,
+    StrategyRunCapacity,
+    StrategyRunCleanupRequest,
+    StrategyRunConfirmRequest,
+    StrategyRunConfirmResponse,
+    StrategyRunPage,
+    StrategyRunPhaseQueue,
+    StrategyRunPrepareResponse,
+    StrategyRunSummary,
+    TradingMode,
+)
+from .service import BetaSourceUnavailable, InstanceNotFound, UnsafeOperation
 
 
 def _strategy_run_capacity(snapshot) -> StrategyRunCapacity:  # type: ignore[no-untyped-def]
@@ -22,37 +39,14 @@ def _strategy_run_capacity(snapshot) -> StrategyRunCapacity:  # type: ignore[no-
 
 
 def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
-    selected = ctx.selected
     service = ctx.service
-    repository = ctx.repository
     vault = ctx.vault
     volume_ledger = ctx.volume_ledger
-    execution_journal = ctx.execution_journal
-    execution_coordinator = ctx.execution_coordinator
-    selected_allocation_provider = ctx.selected_allocation_provider
-    runtime = ctx.runtime
-    beta_source_runtime = ctx.beta_source_runtime
-    campaign_journal = ctx.campaign_journal
     campaign_manager = ctx.campaign_manager
-    app_state_campaign_manager = ctx.campaign_manager
-    broker = ctx.broker
-    session_volume = ctx.session_volume
     strategy_monitor = ctx.strategy_monitor
-    command_ledger = ctx.command_ledger
-    executor_generation = ctx.executor_generation
-    executor_release_id = ctx.executor_release_id
-    latest_bound_record = ctx.latest_bound_record
-    finalize_bound_strategy_session = ctx.finalize_bound_strategy_session
-    schedule_session_finalization = ctx.schedule_session_finalization
-    notify_campaign_change = ctx.notify_campaign_change
-    establish_bound_strategy_session = ctx.establish_bound_strategy_session
     publish_snapshot = ctx.publish_snapshot
-    refresh_beta_state = ctx.refresh_beta_state
-    projected_instances = ctx.projected_instances
-    combined_log_updates = ctx.combined_log_updates
     strategy_run_plan = ctx.strategy_run_plan
     strategy_run_lifecycle = ctx.strategy_run_lifecycle
-    require_command_id = ctx.require_command_id
 
     async def prepare_strategy_run(instance_id: str, direction) -> StrategyRunPrepareResponse:
         instance = service.get_instance(instance_id)

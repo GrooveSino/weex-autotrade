@@ -68,9 +68,7 @@ def create_app(
     release_id = api_release_id or os.environ.get("FLEET_API_RELEASE_ID", "dev").strip() or "dev"
     registry = user_registry or LocalUserRegistry(registry_path_from_env())
     require_auth = (
-        _as_bool(os.environ.get("FLEET_LOCAL_USER_AUTH_REQUIRED", "true"))
-        if auth_required is None
-        else auth_required
+        _as_bool(os.environ.get("FLEET_LOCAL_USER_AUTH_REQUIRED", "true")) if auth_required is None else auth_required
     )
     cookie_secure = _as_bool(os.environ.get("FLEET_LOCAL_USER_COOKIE_SECURE", "false"))
 
@@ -194,7 +192,7 @@ def create_app(
                     timeout=None,
                 ) as response:
                     if response.status_code >= status.HTTP_400_BAD_REQUEST:
-                        yield b"event: error\ndata: {\"detail\":\"executor unavailable\"}\n\n"
+                        yield b'event: error\ndata: {"detail":"executor unavailable"}\n\n'
                         return
                     async for chunk in response.aiter_raw():
                         yield chunk
@@ -202,7 +200,7 @@ def create_app(
                 # EventSource reconnects by itself.  This deliberately reports
                 # a stream interruption rather than claiming the executor or a
                 # running strategy has failed.
-                yield b"event: error\ndata: {\"detail\":\"executor stream interrupted; reconnecting\"}\n\n"
+                yield b'event: error\ndata: {"detail":"executor stream interrupted; reconnecting"}\n\n'
 
         return StreamingResponse(
             stream(),
@@ -224,12 +222,12 @@ def create_app(
                     timeout=None,
                 ) as response:
                     if response.status_code >= status.HTTP_400_BAD_REQUEST:
-                        yield b"event: error\ndata: {\"detail\":\"executor unavailable\"}\n\n"
+                        yield b'event: error\ndata: {"detail":"executor unavailable"}\n\n'
                         return
                     async for chunk in response.aiter_raw():
                         yield chunk
             except httpx.HTTPError:
-                yield b"event: error\ndata: {\"detail\":\"executor stream interrupted; reconnecting\"}\n\n"
+                yield b'event: error\ndata: {"detail":"executor stream interrupted; reconnecting"}\n\n'
 
         return StreamingResponse(
             stream(),
@@ -262,11 +260,15 @@ def create_app(
                         "commandId": request.headers.get("X-Fleet-Command-Id", ""),
                     },
                 )
-            return JSONResponse(status_code=status.HTTP_504_GATEWAY_TIMEOUT, content={"detail": "executor response timed out"})
+            return JSONResponse(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT, content={"detail": "executor response timed out"}
+            )
         except httpx.ConnectError:
             return JSONResponse(status_code=503, content={"detail": "executor unavailable; no command was retried"})
         except httpx.HTTPError:
-            return JSONResponse(status_code=502, content={"detail": "executor proxy request failed; no command was retried"})
+            return JSONResponse(
+                status_code=502, content={"detail": "executor proxy request failed; no command was retried"}
+            )
         return Response(
             content=response.content,
             status_code=response.status_code,

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import time
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Self
-from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from pydantic.alias_generators import to_camel
+from pydantic import Field
 from pydantic.functional_validators import model_validator
+
 from .models_shared import CamelModel, StrategyDirection, StrategyTargetMode
+
 
 class BetaCampaignStatus(StrEnum):
     PLANNED = "planned"
@@ -183,9 +182,7 @@ class BetaCampaignPreview(BetaCampaignView):
 
 
 class StrategyRunPrepareResponse(CamelModel):
-    disposition: Literal[
-        "ready", "running", "stopping", "recovering", "cleanup_required", "unavailable"
-    ]
+    disposition: Literal["ready", "running", "stopping", "recovering", "cleanup_required", "unavailable"]
     preview: BetaCampaignPreview | None = None
     current: BetaCampaignView | None = None
     reason_code: str | None = None

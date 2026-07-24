@@ -252,8 +252,7 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 campaigns = [
                     item
                     for item in campaign_manager.public_snapshot()
-                    if owner_user_id is None
-                    or str(item.get("instanceId", item.get("instance_id", ""))) in owned_ids
+                    if owner_user_id is None or str(item.get("instanceId", item.get("instance_id", ""))) in owned_ids
                 ]
                 yield broker.sse_message(broker.snapshot_payload(initial_instances, runtime.metrics(), campaigns))
                 while not await request.is_disconnected():

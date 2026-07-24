@@ -18,8 +18,8 @@ from fleet_api.repository import SQLiteAccountRepository
 
 def _write_users(path: Path) -> LocalUserRegistry:
     path.write_text(
-        "[users.gg]\npassword = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
-        "[users.colin]\npassword = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n",
+        '[users.gg]\npassword = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+        '[users.colin]\npassword = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n',
         encoding="utf-8",
     )
     path.chmod(0o600)

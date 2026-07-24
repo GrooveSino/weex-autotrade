@@ -65,6 +65,7 @@ def test_uncertain_campaign_is_recovered_by_read_only_boundary_check_before_prev
     assert gateway.closed
     manager.close()
 
+
 def test_uncertain_campaign_with_positions_still_blocks_preview_without_mutation(tmp_path) -> None:
     manager = CampaignWorkerManager(
         live_settings(tmp_path),
@@ -101,6 +102,7 @@ def test_uncertain_campaign_with_positions_still_blocks_preview_without_mutation
     assert record.events == ()
     assert gateway.closed
     manager.close()
+
 
 def test_uncertain_campaign_with_changed_live_profile_cannot_be_auto_recovered(tmp_path) -> None:
     manager = CampaignWorkerManager(
@@ -140,6 +142,7 @@ def test_uncertain_campaign_with_changed_live_profile_cannot_be_auto_recovered(t
     assert gateway.closed
     manager.close()
 
+
 def test_manager_keeps_live_campaigns_disabled_by_default() -> None:
     settings = ControlPlaneSettings(seed_demo_data=False)
     manager = CampaignWorkerManager(settings, EphemeralCredentialVault(), InMemoryCampaignJournal(), lambda: None)  # type: ignore[arg-type]
@@ -151,6 +154,7 @@ def test_manager_keeps_live_campaigns_disabled_by_default() -> None:
         )
     manager.close()
 
+
 def test_campaign_payload_never_contains_credential_material() -> None:
     material = {
         "api_key": SecretStr("key"),
@@ -158,6 +162,7 @@ def test_campaign_payload_never_contains_credential_material() -> None:
         "passphrase": SecretStr("pass"),
     }
     assert all(value.get_secret_value() not in str(metadata(sample_campaign())) for value in material.values())
+
 
 def test_bound_strategy_preview_uses_persisted_range_and_read_only_snapshot(tmp_path) -> None:
     manager = CampaignWorkerManager(
@@ -216,6 +221,7 @@ def test_bound_strategy_preview_uses_persisted_range_and_read_only_snapshot(tmp_
     assert gateway.balance_reads == 1
     manager.close()
 
+
 def test_bound_strategy_prepare_returns_the_existing_active_execution_without_another_preflight(tmp_path) -> None:
     manager = CampaignWorkerManager(
         live_settings(tmp_path),
@@ -253,6 +259,7 @@ def test_bound_strategy_prepare_returns_the_existing_active_execution_without_an
     assert len(manager.journal.list_for_instance("ins-1")) == 1
     assert gateway.balance_reads == balance_reads_after_first
     manager.close()
+
 
 def test_bound_strategy_preview_reports_beta_source_unavailable_without_creating_a_campaign(tmp_path) -> None:
     journal = InMemoryCampaignJournal()

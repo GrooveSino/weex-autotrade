@@ -60,7 +60,10 @@ def install_application_lifecycle(ctx: FleetAppContext) -> None:
         ctx.event_loop = asyncio.get_running_loop()
         for record in ctx.campaign_journal.list_all():
             if record.metadata.get("strategy_id") and record.status in {
-                "completed", "stopped", "recovering", "uncertain"
+                "completed",
+                "stopped",
+                "recovering",
+                "uncertain",
             }:
                 ctx.schedule_session_finalization(record)
         beta_task: asyncio.Task[None] | None = None

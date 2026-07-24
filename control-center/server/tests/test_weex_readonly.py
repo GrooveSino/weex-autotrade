@@ -244,8 +244,6 @@ def test_history_failure_is_isolated_from_wallet_and_position_telemetry() -> Non
     asyncio.run(scenario())
 
 
-
-
 def test_each_account_gets_an_independent_gateway_and_proxy_material() -> None:
     async def scenario() -> None:
         ledger = InMemoryTradeVolumeLedger()

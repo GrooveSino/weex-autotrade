@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
-from enum import StrEnum
 from typing import Literal, Self
-from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic.functional_validators import model_validator
+
 from .models_shared import (
     CamelModel,
     FundingPreflightStatus,
@@ -20,6 +19,7 @@ from .models_shared import (
     TradingMode,
 )
 from .models_strategy import CredentialInput, ProxyInput, StrategyProgress, VolumeStrategy, default_volume_strategy
+
 
 class CreateInstanceRequest(CamelModel):
     name: str = Field(min_length=1, max_length=64)

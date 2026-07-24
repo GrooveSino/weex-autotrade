@@ -9,6 +9,7 @@ from weex_cli.execution_progress import ExecutionProgressProjector
 from .campaign_contracts import ExecutionMonitorProjection
 from .service import UnsafeOperation
 
+
 class SQLiteCampaignJournalMonitorMixin:
     def add_event(self, campaign_id: str, event: dict[str, Any]) -> int:
         with self._lock:
@@ -229,9 +230,7 @@ class SQLiteCampaignJournalMonitorMixin:
                 LEFT JOIN execution_monitor_projections projection
                     ON projection.execution_id = latest.campaign_id"""
             ).fetchone()
-            last_row = self._connection.execute(
-                "SELECT MAX(created_at_ms) FROM beta_campaign_events"
-            ).fetchone()
+            last_row = self._connection.execute("SELECT MAX(created_at_ms) FROM beta_campaign_events").fetchone()
         return {
             "projection_lag": int(lag_row[0] or 0),
             "transaction_failures": self._monitor_transaction_failures,

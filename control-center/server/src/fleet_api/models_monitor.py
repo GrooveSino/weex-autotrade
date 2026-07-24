@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import time
 from decimal import Decimal
-from enum import StrEnum
 from typing import Literal, Self
-from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from pydantic.alias_generators import to_camel
+from pydantic import Field
 from pydantic.functional_validators import model_validator
+
 from .models_account import AccountInstance
 from .models_shared import CamelModel, LogLevel
 from .models_strategy import VolumeStrategy
+
 
 class LogLine(CamelModel):
     id: str

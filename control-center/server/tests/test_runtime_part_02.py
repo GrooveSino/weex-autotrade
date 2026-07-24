@@ -83,6 +83,7 @@ def test_paused_and_running_runtime_failures_preserve_control_state_or_halt_exec
 
     asyncio.run(scenario())
 
+
 def test_repeated_stop_after_verified_cancellation_is_idempotent_even_after_telemetry_failure() -> None:
     async def scenario() -> None:
         repository = InMemoryAccountRepository()
@@ -128,6 +129,7 @@ def test_repeated_stop_after_verified_cancellation_is_idempotent_even_after_tele
         await runtime.close()
 
     asyncio.run(scenario())
+
 
 def test_runtime_caps_parallelism_for_a_forty_account_fleet() -> None:
     async def scenario() -> None:
@@ -186,6 +188,7 @@ def test_runtime_caps_parallelism_for_a_forty_account_fleet() -> None:
 
     asyncio.run(scenario())
 
+
 def test_manual_refresh_never_advances_btc_long_eth_short_execution_cycle() -> None:
     allocation = StaticAllocationProvider()
     app = create_app(
@@ -213,6 +216,7 @@ def test_manual_refresh_never_advances_btc_long_eth_short_execution_cycle() -> N
     assert allocation.calls == 0
     assert body["volume"]["lifetime"] == float(ledger_aggregate.lifetime)
     assert body["exposure"]["btcLong"] == body["exposure"]["ethShort"] == 0
+
 
 def test_manual_pause_ends_incremental_run_and_explicit_start_begins_a_fresh_run() -> None:
     async def scenario() -> None:

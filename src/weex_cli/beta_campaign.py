@@ -112,10 +112,7 @@ class BetaVolumeCampaign:
         )
         max_position = decimal_value(max_position_quote, name="max_position_quote")
         assert (
-            target is not None
-            and round_quote is not None
-            and round_quote_min is not None
-            and max_position is not None
+            target is not None and round_quote is not None and round_quote_min is not None and max_position is not None
         )
         if not profile_fingerprint or len(profile_fingerprint) < 12:
             raise ValidationError("profile fingerprint is invalid")

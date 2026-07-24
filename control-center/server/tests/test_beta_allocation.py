@@ -28,6 +28,7 @@ def test_healthy_response_generates_authoritative_decimal_weights() -> None:
     assert allocation.btc_weight + allocation.eth_weight == Decimal(1)
     assert allocation.version == "beta-v1:1784370658590"
 
+
 def test_market_snapshot_exposes_final_beta_even_when_upstream_marks_it_unusable() -> None:
     payload = healthy_payload()
     payload.update({"status": "low_confidence", "usable": False, "reason_codes": ["confidence_below_threshold"]})
@@ -42,6 +43,7 @@ def test_market_snapshot_exposes_final_beta_even_when_upstream_marks_it_unusable
     assert snapshot.btc_long_weight == Decimal("0.8295")
     assert snapshot.eth_short_weight == Decimal("0.1705")
 
+
 def test_status_ok_but_low_confidence_is_accepted_for_execution() -> None:
     payload = healthy_payload()
     payload["confidence"] = 0.60
@@ -50,6 +52,7 @@ def test_status_ok_but_low_confidence_is_accepted_for_execution() -> None:
 
     assert allocation.eth_weight / allocation.btc_weight == Decimal("0.2055")
 
+
 def test_low_confidence_status_and_unusable_flag_are_accepted_for_execution() -> None:
     payload = healthy_payload()
     payload.update({"status": "low_confidence", "usable": False, "confidence": 0.25})
@@ -57,6 +60,7 @@ def test_low_confidence_status_and_unusable_flag_are_accepted_for_execution() ->
     allocation = asyncio.run(allocation_from_response(httpx.Response(200, json=payload)))
 
     assert allocation.version == "beta-v1:1784370658590"
+
 
 @pytest.mark.parametrize(
     ("payload_update", "reason_code"),
@@ -81,6 +85,7 @@ def test_unusable_or_incompatible_payloads_fail_closed(
     assert caught.value.reason_code == reason_code
     assert caught.value.args == (reason_code,)
 
+
 @pytest.mark.parametrize("beta", [0, -1, "NaN", "Infinity", True, None])
 def test_invalid_beta_never_generates_an_allocation(beta: object) -> None:
     payload = healthy_payload()
@@ -89,12 +94,14 @@ def test_invalid_beta_never_generates_an_allocation(beta: object) -> None:
     with pytest.raises(AllocationUnavailable, match="^beta_invalid_ratio$"):
         asyncio.run(allocation_from_response(httpx.Response(200, json=payload)))
 
+
 def test_http_503_fails_closed_without_one_to_one_fallback() -> None:
     with pytest.raises(AllocationUnavailable) as caught:
         asyncio.run(allocation_from_response(httpx.Response(503, text="upstream unavailable details")))
 
     assert caught.value.reason_code == "beta_http_status"
     assert caught.value.args == ("beta_http_status",)
+
 
 def test_timeout_fails_closed() -> None:
     async def scenario() -> None:
@@ -114,9 +121,11 @@ def test_timeout_fails_closed() -> None:
 
     asyncio.run(scenario())
 
+
 def test_invalid_json_fails_closed() -> None:
     with pytest.raises(AllocationUnavailable, match="^beta_invalid_json$"):
         asyncio.run(allocation_from_response(httpx.Response(200, content=b"{not-json")))
+
 
 def test_concurrent_accounts_share_one_upstream_request() -> None:
     async def scenario() -> None:
@@ -142,6 +151,7 @@ def test_concurrent_accounts_share_one_upstream_request() -> None:
             await client.aclose()
 
     asyncio.run(scenario())
+
 
 def test_centralized_refresh_distributes_one_snapshot_without_consumer_network_requests() -> None:
     async def scenario() -> None:
@@ -180,6 +190,7 @@ def test_centralized_refresh_distributes_one_snapshot_without_consumer_network_r
             await client.aclose()
 
     asyncio.run(scenario())
+
 
 def test_centralized_refresh_replaces_the_snapshot_used_by_the_next_cycle() -> None:
     async def scenario() -> None:
@@ -222,6 +233,7 @@ def test_centralized_refresh_replaces_the_snapshot_used_by_the_next_cycle() -> N
 
     asyncio.run(scenario())
 
+
 def test_centralized_low_confidence_snapshot_remains_visible_and_drives_execution() -> None:
     async def scenario() -> None:
         calls = 0
@@ -256,6 +268,7 @@ def test_centralized_low_confidence_snapshot_remains_visible_and_drives_executio
 
     asyncio.run(scenario())
 
+
 def test_centralized_consumers_fail_stale_without_triggering_an_upstream_refresh() -> None:
     async def scenario() -> None:
         calls = 0
@@ -284,6 +297,7 @@ def test_centralized_consumers_fail_stale_without_triggering_an_upstream_refresh
             await client.aclose()
 
     asyncio.run(scenario())
+
 
 def test_concurrent_accounts_share_one_failed_upstream_request() -> None:
     async def scenario() -> None:

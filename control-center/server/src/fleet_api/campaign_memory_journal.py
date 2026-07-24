@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import replace
 from threading import RLock
 from typing import Any
 
@@ -12,6 +11,7 @@ from weex_cli.execution_progress import ExecutionProgressProjector
 from .campaign_contracts import ACTIVE_STATUSES, CampaignRecord, ExecutionMonitorProjection
 from .models import BetaCampaignStatus
 from .service import UnsafeOperation
+
 
 class InMemoryCampaignJournal:
     def __init__(self) -> None:

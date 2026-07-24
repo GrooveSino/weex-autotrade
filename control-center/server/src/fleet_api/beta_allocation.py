@@ -12,6 +12,7 @@ from .execution import AllocationUnavailable, PairAllocation
 from .models import BetaMarketSnapshot
 from .telemetry import AccountTelemetryContext
 
+
 class HttpBetaAllocationProvider:
     """Fetches and distributes one validated Beta v2 snapshot to concurrent cycles."""
 

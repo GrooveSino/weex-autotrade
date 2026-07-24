@@ -35,6 +35,7 @@ def test_runtime_metrics_start_empty_and_expose_the_configured_parallelism_cap()
         "lastRoundDurationMs": None,
     }
 
+
 def test_beta_snapshot_endpoint_exposes_final_beta_without_filtering_upstream_usable() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
@@ -46,6 +47,7 @@ def test_beta_snapshot_endpoint_exposes_final_beta_without_filtering_upstream_us
     assert response.json()["upstreamUsable"] is False
     assert response.json()["status"] == "low_confidence"
     assert response.json()["source"] == "beta_v2"
+
 
 def test_create_returns_only_redacted_account_and_keeps_secrets_in_ephemeral_vault() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -62,6 +64,7 @@ def test_create_returns_only_redacted_account_and_keeps_secrets_in_ephemeral_vau
     assert "secret-never-return" not in serialized
     assert "proxy-password" not in serialized
     assert len(app.state.credential_vault) == 1
+
 
 def test_create_http_proxy_preserves_the_http_connection_scheme() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -80,6 +83,7 @@ def test_create_http_proxy_preserves_the_http_connection_scheme() -> None:
     assert material is not None
     assert material.proxy_url.get_secret_value() == "http://proxy-user:proxy-password@proxy.example.com:8080"
 
+
 def test_create_without_proxy_keeps_direct_connection_out_of_the_vault() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     payload = create_payload()
@@ -95,6 +99,7 @@ def test_create_without_proxy_keeps_direct_connection_out_of_the_vault() -> None
     material = app.state.credential_vault.get(instance_id)
     assert material is not None
     assert material.proxy_url is None
+
 
 def test_shared_strategy_is_created_once_and_updates_every_assigned_account_projection() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -131,6 +136,7 @@ def test_shared_strategy_is_created_once_and_updates_every_assigned_account_proj
     assert updated.json()["roundTurnoverQuoteMin"] == "800"
     assert {instance["strategy"]["name"] for instance in instances} == {"25k shared"}
     assert {instance["strategyId"] for instance in instances} == {strategy_id}
+
 
 def test_bulk_strategy_assignment_resets_strategy_progress_but_preserves_execution_sequence_and_audit() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -193,6 +199,7 @@ def test_bulk_strategy_assignment_resets_strategy_progress_but_preserves_executi
     assert protected.status_code == 409
     assert unused.status_code == 204
 
+
 def test_strategy_edit_and_assignment_require_stopped_accounts_without_open_pairs() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False, mock_tick_interval_seconds=60))
     with TestClient(app) as api:
@@ -213,6 +220,7 @@ def test_strategy_edit_and_assignment_require_stopped_accounts_without_open_pair
     assert "stop instance" in edit.json()["detail"]
     assert assign.status_code == 409
     assert "stop instance" in assign.json()["detail"]
+
 
 def test_stopped_instance_can_update_independent_mock_execution_settings() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
@@ -249,6 +257,7 @@ def test_stopped_instance_can_update_independent_mock_execution_settings() -> No
     assert below_completed.status_code == 422
     assert below_completed.json()["detail"] == "cycle target cannot be lower than completed cycles"
 
+
 def test_history_start_is_returned_persisted_and_can_be_cleared() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     history_start = int(time.time() * 1000) - 86_400_000
@@ -265,6 +274,7 @@ def test_history_start_is_returned_persisted_and_can_be_cleared() -> None:
     assert cleared.status_code == 200
     assert cleared.json()["historyStartAtMs"] is None
     assert app.state.fleet_repository.get(instance_id).history_start_at_ms is None
+
 
 def test_future_history_start_is_rejected() -> None:
     payload = create_payload()
