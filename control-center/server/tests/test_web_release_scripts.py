@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import time
@@ -15,8 +16,10 @@ def _write_build(source: Path, asset: str) -> None:
 
 
 def _run(script: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    shell = shutil.which("zsh")
+    assert shell is not None, "zsh must be installed to exercise Fleet release scripts"
     return subprocess.run(
-        ["/bin/zsh", str(script)],
+        [shell, str(script)],
         check=True,
         env=environment,
         text=True,
