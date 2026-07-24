@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from .campaign_log import campaign_event_log
 from .instance_projection import project_instance_session
 from .main_context import FleetAppContext
-from .models import AccountInstance, LogBatch, LogLine
+from .models import AccountInstance, LogBatch, LogLine, StrategyDirection
 from .service import UnsafeOperation
 from .strategy import StrategyRunBlocked, StrategyTargetReached, resolve_strategy_run_plan
 
@@ -84,11 +84,15 @@ def install_projection_support(ctx: FleetAppContext) -> None:
         cursor = lines[-1].id if lines else (None if reset else after)
         return LogBatch(lines=lines, cursor=cursor, reset=reset)
 
-    def strategy_run_plan(instance: AccountInstance):
+    def strategy_run_plan(
+        instance: AccountInstance,
+        direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
+    ):
         try:
             return resolve_strategy_run_plan(
                 instance,
                 ctx.volume_ledger.active_session(instance.id, instance.mode.value),
+                direction,
             )
         except (StrategyRunBlocked, StrategyTargetReached) as exc:
             raise UnsafeOperation(str(exc)) from None

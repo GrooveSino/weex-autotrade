@@ -8,7 +8,9 @@ function strategyPayload(draft: StrategyDraft) {
   return {
     name: draft.name,
     targetMode: draft.targetMode,
-    targetVolumeQuote: draft.targetVolumeQuote,
+    targetVolumeQuote: draft.targetVolumeQuoteMax,
+    targetVolumeQuoteMin: draft.targetVolumeQuoteMin,
+    targetVolumeQuoteMax: draft.targetVolumeQuoteMax,
     roundTurnoverQuoteMin: draft.roundTurnoverQuoteMin,
     roundTurnoverQuoteMax: draft.roundTurnoverQuoteMax,
     positionHoldMinSeconds: draft.positionHoldMinSeconds,

@@ -120,6 +120,7 @@ class VolumeSession:
     strategy_id: str | None = None
     strategy_name: str | None = None
     strategy_version: int | None = None
+    direction: str = "btc_long_eth_short"
     target_mode: str = "incremental"
     strategy_target_quote_volume: Decimal | None = None
     baseline_lifetime_quote_volume: Decimal = Decimal(0)
@@ -155,6 +156,7 @@ class VolumeSession:
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
             "strategy_version": self.strategy_version,
+            "direction": self.direction,
             "target_mode": self.target_mode,
             "strategy_target_quote_volume": str(
                 self.strategy_target_quote_volume or self.target_quote_volume
@@ -214,6 +216,7 @@ class TradeVolumeLedger(Protocol):
         strategy_id: str | None = None,
         strategy_name: str | None = None,
         strategy_version: int | None = None,
+        direction: str = "btc_long_eth_short",
         target_mode: str = "incremental",
         strategy_target_quote_volume: Decimal | None = None,
         baseline_lifetime_quote_volume: Decimal = Decimal(0),

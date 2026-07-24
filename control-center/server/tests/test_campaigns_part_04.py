@@ -13,7 +13,7 @@ from fleet_api.campaigns import (
     InMemoryCampaignJournal,
 )
 from fleet_api.config import ControlPlaneSettings
-from fleet_api.models import BetaCampaignPreviewRequest, BetaCampaignStatus, VolumeStrategy
+from fleet_api.models import BetaCampaignPreviewRequest, BetaCampaignStatus, StrategyDirection, VolumeStrategy
 from fleet_api.service import BetaSourceUnavailable, UnsafeOperation
 from fleet_api.vault import CredentialMaterial, EphemeralCredentialVault
 
@@ -192,12 +192,18 @@ def test_bound_strategy_preview_uses_persisted_range_and_read_only_snapshot(tmp_
         Decimal("1250"),
         material,
         session_id="session-bound",
+        strategy_target_quote=Decimal("1500"),
+        direction=StrategyDirection.BTC_SHORT_ETH_LONG,
     )
     record = manager.journal.get(preview.campaign_id)
     assert record is not None
     assert preview.strategy_id == strategy.id
     assert preview.strategy_name == strategy.name
     assert preview.strategy_version == 1
+    assert preview.direction is StrategyDirection.BTC_SHORT_ETH_LONG
+    assert preview.selected_target_quote_volume == Decimal("1500")
+    assert preview.leverage == 400
+    assert preview.margin_mode == "cross"
     assert preview.round_turnover_quote_min == Decimal("220")
     assert preview.cycle_volume == Decimal("480")
     assert record.metadata["session_id"] == "session-bound"
@@ -206,7 +212,7 @@ def test_bound_strategy_preview_uses_persisted_range_and_read_only_snapshot(tmp_
     selected = _selected_round_turnover(record.campaign, Decimal("1250"), 2)
     assert Decimal("220") <= selected <= Decimal("480")
     assert selected == _selected_round_turnover(record.campaign, Decimal("1250"), 2)
-    assert "STRATEGY" in preview.confirmation
+    assert "DIRECTION_BTC_SHORT_ETH_LONG" in preview.confirmation
     assert gateway.balance_reads == 1
     manager.close()
 

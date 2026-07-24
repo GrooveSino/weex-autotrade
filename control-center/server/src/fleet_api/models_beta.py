@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic.alias_generators import to_camel
 from pydantic.functional_validators import model_validator
-from .models_shared import CamelModel, StrategyTargetMode
+from .models_shared import CamelModel, StrategyDirection, StrategyTargetMode
 
 class BetaMarketSnapshot(CamelModel):
     schema_version: str
@@ -85,6 +85,7 @@ class VolumeSessionResponse(CamelModel):
     strategy_id: str | None = None
     strategy_name: str | None = None
     strategy_version: int | None = None
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
     target_mode: StrategyTargetMode = StrategyTargetMode.INCREMENTAL
     strategy_target_quote_volume: Decimal
     baseline_lifetime_quote_volume: Decimal = Decimal(0)
@@ -116,6 +117,7 @@ class StrategyRunSummary(CamelModel):
     strategy_id: str | None = None
     strategy_name: str | None = None
     strategy_version: int | None = None
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
     target_mode: StrategyTargetMode
     started_at_ms: int
     finished_at_ms: int | None = None

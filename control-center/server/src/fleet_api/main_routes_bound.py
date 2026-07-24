@@ -43,11 +43,11 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     strategy_run_lifecycle = ctx.strategy_run_lifecycle
     require_command_id = ctx.require_command_id
 
-    async def prepare_strategy_run(instance_id: str) -> StrategyRunPrepareResponse:
+    async def prepare_strategy_run(instance_id: str, direction) -> StrategyRunPrepareResponse:
         instance = service.get_instance(instance_id)
         if instance.mode is not TradingMode.LIVE:
             raise UnsafeOperation("bound strategy execution requires a Live account")
-        prepared = await strategy_run_lifecycle.prepare(instance, vault.get(instance_id))
+        prepared = await strategy_run_lifecycle.prepare(instance, vault.get(instance_id), direction)
         if prepared.disposition != "idle":
             if prepared.disposition == "ready" and prepared.execution is not None:
                 preview = BetaCampaignPreview.model_validate(
@@ -69,7 +69,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 cleanup_confirmation=prepared.cleanup_confirmation,
             )
         instance = service.get_instance(instance_id)
-        plan = strategy_run_plan(instance)
+        plan = strategy_run_plan(instance, direction)
         session_id = f"session-{uuid4().hex}"
         try:
             view = await asyncio.to_thread(
@@ -100,9 +100,9 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     )
     async def prepare_bound_strategy_run(
         instance_id: str,
-        _payload: BoundStrategyExecutionPreviewRequest,
+        payload: BoundStrategyExecutionPreviewRequest,
     ) -> StrategyRunPrepareResponse:
-        return await prepare_strategy_run(instance_id)
+        return await prepare_strategy_run(instance_id, payload.direction)
 
     @app.post(
         "/api/v1/instances/{instance_id}/strategy-executions/preview",
@@ -110,9 +110,9 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     )
     async def preview_bound_strategy_execution(
         instance_id: str,
-        _payload: BoundStrategyExecutionPreviewRequest,
+        payload: BoundStrategyExecutionPreviewRequest,
     ) -> BetaCampaignPreview:
-        prepared = await prepare_strategy_run(instance_id)
+        prepared = await prepare_strategy_run(instance_id, payload.direction)
         if prepared.disposition != "ready" or prepared.preview is None:
             if prepared.reason_code == "final_beta_unavailable":
                 raise BetaSourceUnavailable(prepared.message or "Final Beta source unavailable")
@@ -135,7 +135,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
             vault.get(instance_id),
         )
         await publish_snapshot()
-        return await prepare_strategy_run(instance_id)
+        return await prepare_strategy_run(instance_id, payload.direction)
 
     @app.post(
         "/api/v1/instances/{instance_id}/strategy-executions/{execution_id}/execute",
@@ -207,6 +207,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                     "strategy_id": row.get("strategy_id"),
                     "strategy_name": row.get("strategy_name"),
                     "strategy_version": row.get("strategy_version"),
+                    "direction": row.get("direction", "btc_long_eth_short"),
                     "target_mode": row["target_mode"],
                     "started_at_ms": row["started_at_ms"],
                     "finished_at_ms": row.get("finished_at_ms"),

@@ -16,7 +16,8 @@ interface StrategyDialogProps {
 const initialDraft: StrategyDraft = {
   name: '新成交量策略',
   targetMode: 'incremental',
-  targetVolumeQuote: '20000',
+  targetVolumeQuoteMin: '10000',
+  targetVolumeQuoteMax: '15000',
   roundTurnoverQuoteMin: '500',
   roundTurnoverQuoteMax: '750',
   positionHoldMinSeconds: 300,
@@ -32,7 +33,8 @@ function draftFor(strategy: VolumeStrategy | null): StrategyDraft {
   return {
     name: strategy.name,
     targetMode: strategy.targetMode,
-    targetVolumeQuote: strategy.targetVolumeQuote,
+    targetVolumeQuoteMin: strategy.targetVolumeQuoteMin ?? strategy.targetVolumeQuote,
+    targetVolumeQuoteMax: strategy.targetVolumeQuoteMax ?? strategy.targetVolumeQuote,
     roundTurnoverQuoteMin: strategy.roundTurnoverQuoteMin,
     roundTurnoverQuoteMax: strategy.roundTurnoverQuoteMax,
     positionHoldMinSeconds: strategy.positionHoldMinSeconds,
@@ -133,6 +135,10 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
       setError('请填写有效的策略名称、目标交易量和每轮总交易量范围')
       return
     }
+    if (Number(draft.targetVolumeQuoteMin) > Number(draft.targetVolumeQuoteMax)) {
+      setError('任务目标最小值不能大于最大值')
+      return
+    }
     if (draft.positionHoldMinSeconds > draft.positionHoldMaxSeconds) {
       setError('持仓最短时间不能大于最长时间')
       return
@@ -181,7 +187,7 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
                 return (
                   <button key={strategy.id} type="button" className={!creating && selectedId === strategy.id ? 'active' : ''} onClick={() => choose(strategy)}>
                     <strong>{strategy.name}</strong>
-                    <span>{strategy.targetMode === 'lifetime' ? '历史累计' : '启动后新增'} · {quote.format(Number(strategy.roundTurnoverQuoteMin))}-{quote.format(Number(strategy.roundTurnoverQuoteMax))} / 轮</span>
+                    <span>{strategy.targetMode === 'lifetime' ? '历史累计' : '启动后新增'} · 目标 {quote.format(Number(strategy.targetVolumeQuoteMin))}-{quote.format(Number(strategy.targetVolumeQuoteMax))}</span>
                     <small>{usage} 个账号</small>
                   </button>
                 )
@@ -193,7 +199,6 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
             <div className="strategy-target-row">
               <div className="strategy-target-mark"><ChartNoAxesCombined size={18} /></div>
               <label><span>策略名称</span><input required disabled={blocked || busy} value={draft.name} onChange={(event) => update('name', event.target.value)} autoFocus /></label>
-              <label className="target-input"><span>目标交易量</span><div className="input-suffix"><input required disabled={blocked || busy} type="number" min="0.01" max="1000000000000" step="0.01" value={draft.targetVolumeQuote} onChange={(event) => update('targetVolumeQuote', event.target.value)} /><span>USDT</span></div></label>
             </div>
 
             <div className="target-mode-control" role="radiogroup" aria-label="目标交易量统计口径">
@@ -203,6 +208,13 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
               <button type="button" role="radio" aria-checked={draft.targetMode === 'lifetime'} className={draft.targetMode === 'lifetime' ? 'active' : ''} disabled={blocked || busy} onClick={() => update('targetMode', 'lifetime')}>
                 <History size={14} /><span><strong>历史累计目标</strong><small>以账号累计成交量为进度</small></span>
               </button>
+            </div>
+
+            <div className="dialog-section-title"><ChartNoAxesCombined size={14} />每次任务目标交易量</div>
+            <div className="amount-range-row">
+              <label><span>最小</span><div className="input-suffix"><input required disabled={blocked || busy} type="number" min="0.01" max="1000000000000" step="0.01" value={draft.targetVolumeQuoteMin} onChange={(event) => update('targetVolumeQuoteMin', event.target.value)} /><span>USDT</span></div></label>
+              <span className="range-separator">至</span>
+              <label><span>最大</span><div className="input-suffix"><input required disabled={blocked || busy} type="number" min="0.01" max="1000000000000" step="0.01" value={draft.targetVolumeQuoteMax} onChange={(event) => update('targetVolumeQuoteMax', event.target.value)} /><span>USDT</span></div></label>
             </div>
 
             <div className="strategy-progress-summary">
@@ -229,7 +241,7 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
               <DurationRange title="轮次间隔" subtitle="双腿平仓完成 → 开始下一轮" minimum={draft.roundIntervalMinSeconds} maximum={draft.roundIntervalMaxSeconds} disabled={blocked || busy} onMinimumChange={(value) => update('roundIntervalMinSeconds', value)} onMaximumChange={(value) => update('roundIntervalMaxSeconds', value)} />
             </div>
 
-            <div className="residual-policy"><ShieldCheck size={15} /><span>残差收尾</span><strong>最后一轮按剩余目标规划 · 容差 {targetTolerance(Number(draft.targetVolumeQuote)).toFixed(2)} USDT</strong></div>
+            <div className="residual-policy"><ShieldCheck size={15} /><span>任务目标</span><strong>启动预览时在范围内抽取并固定 · 容差 {targetTolerance(Number(draft.targetVolumeQuoteMax)).toFixed(2)} USDT</strong></div>
             {blocked && <div className="edit-lock-note">已绑定账号中存在运行实例或未平双腿，当前策略已锁定。</div>}
             {confirmDelete && <div className="form-error">再次点击删除确认。</div>}
             {error && <div className="form-error">{error}</div>}

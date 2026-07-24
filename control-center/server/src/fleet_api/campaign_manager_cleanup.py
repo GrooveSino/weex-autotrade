@@ -210,5 +210,6 @@ class CampaignCleanupMixin:
             max_auto_leverage=campaign.max_auto_leverage,
             margin_buffer=campaign.margin_buffer,
             margin_mode=campaign.margin_mode,
+            direction=campaign.direction,
             now_ms=int(time.time() * 1000),
         )

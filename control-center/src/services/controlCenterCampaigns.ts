@@ -1,7 +1,7 @@
 import type {
   AccountInstance, BetaCampaign, BetaCampaignEvent, BetaCampaignPreview,
   BetaCampaignPreviewRequest, BetaMarketSnapshot, BetaSourceSettings,
-  StrategyRunPrepareResponse, VolumeStrategy,
+  StrategyDirection, StrategyRunPrepareResponse, VolumeStrategy,
 } from '../types'
 import { mockStrategies } from '../data/mockAccounts'
 import { apiRequest, controlPlaneEnabled } from './controlCenterCore'
@@ -17,29 +17,36 @@ export async function previewBetaCampaign(
   })
 }
 
-export async function previewBoundStrategyExecution(account: AccountInstance): Promise<BetaCampaignPreview> {
+export async function previewBoundStrategyExecution(
+  account: AccountInstance,
+  direction: StrategyDirection = 'btc_long_eth_short',
+): Promise<BetaCampaignPreview> {
   if (!controlPlaneEnabled) throw new Error('已绑定策略实盘执行需要控制平面 API')
   return apiRequest<BetaCampaignPreview>(`/instances/${account.id}/strategy-executions/preview`, {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify({ direction }),
   })
 }
 
-export async function prepareBoundStrategyRun(account: AccountInstance): Promise<StrategyRunPrepareResponse> {
+export async function prepareBoundStrategyRun(
+  account: AccountInstance,
+  direction: StrategyDirection = 'btc_long_eth_short',
+): Promise<StrategyRunPrepareResponse> {
   if (!controlPlaneEnabled) throw new Error('已绑定策略实盘执行需要控制平面 API')
   return apiRequest<StrategyRunPrepareResponse>(`/instances/${account.id}/strategy-run/prepare`, {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify({ direction }),
   })
 }
 
 export async function cleanupBoundStrategyRun(
   account: AccountInstance,
   confirmation: string,
+  direction: StrategyDirection = 'btc_long_eth_short',
 ): Promise<StrategyRunPrepareResponse> {
   return apiRequest<StrategyRunPrepareResponse>(`/instances/${account.id}/strategy-run/cleanup`, {
     method: 'POST',
-    body: JSON.stringify({ confirmation }),
+    body: JSON.stringify({ confirmation, direction }),
   })
 }
 

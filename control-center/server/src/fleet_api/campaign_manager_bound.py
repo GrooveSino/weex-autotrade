@@ -16,10 +16,12 @@ from .campaign_helpers import (
     _bound_strategy_stop_confirmation,
     _preview_metadata,
 )
-from .models import BetaCampaignPreview, BetaCampaignStatus, VolumeStrategy
+from .models import BetaCampaignPreview, BetaCampaignStatus, StrategyDirection, VolumeStrategy
 from .ownership import LEGACY_OWNER_USER_ID
 from .service import BetaSourceUnavailable, UnsafeOperation
 from .vault import CredentialMaterial
+
+FIXED_BOUND_STRATEGY_LEVERAGE = 400
 
 class CampaignBoundStrategyMixin:
     def preview_bound_strategy(
@@ -34,6 +36,7 @@ class CampaignBoundStrategyMixin:
         run_disposition: str = "new_incremental",
         strategy_target_quote: Decimal | None = None,
         baseline_lifetime_quote: Decimal = Decimal(0),
+        direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
         owner_user_id: str = LEGACY_OWNER_USER_ID,
     ) -> BetaCampaignPreview:
         """Create an executable Live preview solely from a persisted strategy binding."""
@@ -42,7 +45,7 @@ class CampaignBoundStrategyMixin:
             raise UnsafeOperation("bound strategy has no remaining verified target")
         if material is None:
             raise UnsafeOperation("account credentials are unavailable")
-        invalidated = self._invalidate_stale_preview_for_current_strategy(instance_id, strategy)
+        invalidated = self._invalidate_stale_preview_for_current_strategy(instance_id, strategy, direction)
         active = self.journal.active_for_instance(instance_id)
         if active is not None:
             if active.metadata.get("strategy_id") != strategy.id:
@@ -68,9 +71,12 @@ class CampaignBoundStrategyMixin:
                 hold_max_seconds=strategy.position_hold_max_seconds,
                 round_gap_min_seconds=strategy.round_interval_min_seconds,
                 round_gap_max_seconds=strategy.round_interval_max_seconds,
+                leverage=FIXED_BOUND_STRATEGY_LEVERAGE,
+                margin_mode="cross",
+                direction=direction.value,
             )
             opening_notional = min(campaign.round_turnover_quote, campaign.target_turnover_quote) / Decimal(2)
-            required = opening_notional / Decimal(campaign.max_auto_leverage) * campaign.margin_buffer
+            required = opening_notional / Decimal(FIXED_BOUND_STRATEGY_LEVERAGE) * campaign.margin_buffer
             readiness = inspect_live_account(
                 gateway,
                 required,
@@ -107,6 +113,7 @@ class CampaignBoundStrategyMixin:
                     "run_disposition": run_disposition,
                     "strategy_target_quote": str(strategy_target_quote or target_quote),
                     "baseline_lifetime_quote": str(baseline_lifetime_quote),
+                    "direction": direction.value,
                     "owner_user_id": owner_user_id,
                 }
             )
@@ -162,10 +169,15 @@ class CampaignBoundStrategyMixin:
             self._notify(instance_id)
         return invalidated
 
-    def _invalidate_stale_preview_for_current_strategy(self, instance_id: str, strategy: VolumeStrategy) -> bool:
+    def _invalidate_stale_preview_for_current_strategy(
+        self,
+        instance_id: str,
+        strategy: VolumeStrategy,
+        direction: StrategyDirection | None = None,
+    ) -> bool:
         with self._lock:
             record = self.journal.active_for_instance(instance_id)
-            if record is None or not self._is_stale_bound_strategy_preview(record, strategy):
+            if record is None or not self._is_stale_bound_strategy_preview(record, strategy, direction):
                 return False
             self._invalidate_planned_record_locked(record, reason="bound_strategy_version_stale")
             return True
@@ -207,12 +219,21 @@ class CampaignBoundStrategyMixin:
         )
 
     @classmethod
-    def _is_stale_bound_strategy_preview(cls, record: CampaignRecord, strategy: VolumeStrategy) -> bool:
+    def _is_stale_bound_strategy_preview(
+        cls,
+        record: CampaignRecord,
+        strategy: VolumeStrategy,
+        direction: StrategyDirection | None = None,
+    ) -> bool:
         if not cls._is_planned_bound_strategy_preview(record):
             return False
         return (
             record.metadata.get("strategy_id") != strategy.id
             or record.metadata.get("strategy_version") != strategy.version
+            or record.campaign.schema_version < 4
+            or record.campaign.leverage != FIXED_BOUND_STRATEGY_LEVERAGE
+            or record.campaign.margin_mode != "cross"
+            or (direction is not None and record.campaign.direction != direction.value)
         )
 
     def _invalidate_planned_record_locked(self, record: CampaignRecord, *, reason: str) -> None:

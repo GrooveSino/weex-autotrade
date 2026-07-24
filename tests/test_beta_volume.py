@@ -142,6 +142,30 @@ class DeniedBalanceGateway(BalanceSequenceGateway):
         raise ccxt.PermissionDenied("leverage mutation denied")
 
 
+class ConfigurationFailureGateway(Gateway):
+    def __init__(self, failure: str) -> None:
+        super().__init__()
+        self.failure = failure
+
+    def configure_margin_mode(self, symbol: str, margin_mode: str) -> dict:
+        self.margin_mode_updates.append((symbol, margin_mode))
+        if self.failure == "margin_denied":
+            raise ccxt.PermissionDenied("margin mutation denied")
+        if self.failure != "margin_mismatch":
+            self.margin_mode_by_symbol[symbol] = margin_mode
+        if self.failure == "ambiguous_applied":
+            raise ccxt.RequestTimeout("margin response lost")
+        return {"status": "accepted"}
+
+    def configure_leverage(self, symbol: str, leverage: int, margin_mode: str) -> dict:
+        self.leverage_updates.append((symbol, leverage, margin_mode))
+        if self.failure != "leverage_mismatch":
+            self.leverage_by_symbol[symbol] = leverage
+        if self.failure == "ambiguous_applied":
+            raise ccxt.RequestTimeout("leverage response lost")
+        return {"status": "accepted"}
+
+
 class FlakyPreflightGateway(Gateway):
     def __init__(self, failures: int) -> None:
         super().__init__()
@@ -551,6 +575,54 @@ def test_leverage_is_bound_to_plan_confirmation_and_margin_requirement(allocatio
     assert "LEVERAGE_5X POST_ONLY" in beta_volume_confirmation(plan)
 
 
+def test_v4_reverse_plan_uses_fixed_cross_leverage_and_persisted_sides(
+    tmp_path,
+    allocation: BetaAllocation,
+) -> None:
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="200",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        leverage=400,
+        margin_mode="cross",
+        direction="btc_short_eth_long",
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    store.save(plan)
+    events: list[dict[str, object]] = []
+
+    result = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=lambda unused, symbol, side: ImmediateVenue(symbol, side),  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        reconciler_factory=lambda unused: DeterministicReconciler(),
+        event_sink=events.append,  # type: ignore[arg-type]
+        now_ms=lambda: 1000,
+        sleep=lambda _seconds: None,
+    ).execute(plan)
+
+    assert plan.schema_version == 4
+    assert (plan.btc.position_side, plan.btc.opening_side, plan.btc.closing_side) == ("short", "sell", "buy")
+    assert (plan.eth.position_side, plan.eth.opening_side, plan.eth.closing_side) == ("long", "buy", "sell")
+    assert gateway.margin_mode_updates == [("BTC", "cross"), ("ETH", "cross")]
+    assert gateway.leverage_updates == [("BTC", 400, "cross"), ("ETH", 400, "cross")]
+    assert result["status"] == "completed"
+    assert result["strategy"] == "btc_short_eth_long"
+    opening_sides = {
+        str(event["symbol"]): str(event["side"])
+        for event in events
+        if event["event"] == "leg_started" and event["action"] == "open"
+    }
+    assert opening_sides == {"BTC": "sell", "ETH": "buy"}
+
+
 def test_auto_leverage_uses_wallet_round_size_and_safety_buffer() -> None:
     assert select_leverage("auto", Decimal("250"), Decimal("10")) == 30
     assert select_leverage("auto", Decimal("250"), Decimal("1000")) == 1
@@ -561,23 +633,23 @@ def test_auto_leverage_uses_wallet_round_size_and_safety_buffer() -> None:
 
 
 def test_plan_rejects_unsupported_leverage_or_margin(allocation: BetaAllocation) -> None:
-    with pytest.raises(ValidationError, match="integer between 1 and 125"):
+    with pytest.raises(ValidationError, match="integer between 1 and 400"):
         BetaVolumePlan.create(
             Gateway(),
             allocation,
             target_turnover_quote="200",
             max_position_quote="1200",
             timeout_seconds=120,
-            leverage=126,
+            leverage=401,
         )
-    with pytest.raises(ValidationError, match="requires isolated"):
+    with pytest.raises(ValidationError, match="margin_mode must be isolated or cross"):
         BetaVolumePlan.create(
             Gateway(),
             allocation,
             target_turnover_quote="200",
             max_position_quote="1200",
             timeout_seconds=120,
-            margin_mode="cross",
+            margin_mode="portfolio",
         )
 
 
@@ -1098,7 +1170,7 @@ def test_hold_wait_requires_both_open_positions_to_reach_their_cycle_targets(
         sleep=lambda seconds: None,
     )
     service.current_plan_id = plan.plan_id
-    lanes = service._create_lanes()
+    lanes = service._create_lanes(plan)
     assert plan.btc.quantity > plan.btc.amount_step
     partial_btc = plan.btc.quantity - plan.btc.amount_step
     assert partial_btc > plan.btc.amount_step / 2
@@ -1109,6 +1181,153 @@ def test_hold_wait_requires_both_open_positions_to_reach_their_cycle_targets(
 
     assert hold_seconds == 0
     assert [event["event"] for event in events] == ["open_barrier_not_ready"]
+
+
+def test_reverse_direction_hold_wait_uses_persisted_opening_sides(
+    tmp_path,
+    allocation: BetaAllocation,
+) -> None:
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="200",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        direction="btc_short_eth_long",
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    events: list[dict[str, object]] = []
+    venues: dict[str, ImmediateVenue] = {}
+
+    def venue_factory(unused_gateway: Gateway, symbol: str, position_side: str) -> ImmediateVenue:
+        venues.setdefault(symbol, ImmediateVenue(symbol, position_side))
+        return venues[symbol]
+
+    service = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=venue_factory,  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        event_sink=events.append,  # type: ignore[arg-type]
+        hold_delay_seconds=lambda round_number: 3,
+        now_ms=lambda: 1000,
+        sleep=lambda seconds: None,
+    )
+    service.current_plan_id = plan.plan_id
+    lanes = service._create_lanes(plan)
+    venues["BTC"].position = -float(plan.btc.quantity)
+    venues["ETH"].position = float(plan.eth.quantity)
+
+    hold_seconds = service._hold_open_pair(1, {}, lanes, plan.btc, plan.eth)
+
+    assert hold_seconds == 3
+    assert [event["event"] for event in events] == [
+        "open_barrier_verified",
+        "hold_started",
+        "hold_completed",
+    ]
+
+
+def test_close_pacing_rereads_beta_market_orders_and_positions(
+    tmp_path,
+    allocation: BetaAllocation,
+) -> None:
+    class CountingProvider(Provider):
+        def __init__(self, selected: BetaAllocation) -> None:
+            super().__init__(selected)
+            self.calls = 0
+
+        def get(self) -> BetaAllocation:
+            self.calls += 1
+            return super().get()
+
+    class CountingGateway(Gateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.book_calls = 0
+            self.regular_order_calls = 0
+            self.trigger_order_calls = 0
+
+        def order_book(self, symbol: str, limit: int = 5) -> dict:
+            self.book_calls += 1
+            return super().order_book(symbol, limit)
+
+        def open_orders(self, symbol: str | None = None, *, mode: str = "live", trigger: bool = False) -> list[dict]:
+            self.regular_order_calls += 1
+            return super().open_orders(symbol, mode=mode, trigger=trigger)
+
+        def algo_orders(self, symbol: str | None = None) -> list[dict]:
+            self.trigger_order_calls += 1
+            return super().algo_orders(symbol)
+
+    class CountingVenue(ImmediateVenue):
+        def __init__(self, symbol: str, position_side: str) -> None:
+            super().__init__(symbol, position_side)
+            self.position_calls = 0
+
+        def position_quantity(self) -> float:
+            self.position_calls += 1
+            return super().position_quantity()
+
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="200",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    store.save(plan)
+    provider = CountingProvider(allocation)
+    lanes = {"BTC": CountingGateway(), "ETH": CountingGateway()}
+    venues: dict[str, CountingVenue] = {}
+    before_close: dict[str, object] = {}
+
+    def venue_factory(unused_gateway: Gateway, symbol: str, position_side: str) -> CountingVenue:
+        venue = CountingVenue(symbol, position_side)
+        venues[symbol] = venue
+        return venue
+
+    def phase_waiter(unused_plan_id: str, phase: str, unused_round: int) -> bool:
+        if phase == "close":
+            before_close["provider"] = provider.calls
+            before_close["lanes"] = {
+                symbol: (lane.book_calls, lane.regular_order_calls, lane.trigger_order_calls)
+                for symbol, lane in lanes.items()
+            }
+            before_close["positions"] = {symbol: venue.position_calls for symbol, venue in venues.items()}
+        return True
+
+    result = LiveBetaVolumeService(
+        gateway,
+        provider,  # type: ignore[arg-type]
+        store,
+        venue_factory=venue_factory,  # type: ignore[arg-type]
+        lane_gateways=lanes,  # type: ignore[arg-type]
+        reconciler_factory=lambda unused: DeterministicReconciler(),
+        phase_waiter=phase_waiter,
+        now_ms=lambda: 1000,
+        sleep=lambda _seconds: None,
+    ).execute(plan)
+
+    assert result["status"] == "completed"
+    assert provider.calls > int(before_close["provider"])
+    lane_counts = before_close["lanes"]
+    position_counts = before_close["positions"]
+    assert isinstance(lane_counts, dict) and isinstance(position_counts, dict)
+    for symbol, lane in lanes.items():
+        book, regular, trigger = lane_counts[symbol]
+        assert lane.book_calls > book
+        assert lane.regular_order_calls > regular
+        assert lane.trigger_order_calls > trigger
+        assert venues[symbol].position_calls > position_counts[symbol]
 
 
 def test_stop_during_hold_cancels_both_lanes_then_maker_flattens_before_stopping(
@@ -1335,6 +1554,97 @@ def test_denied_leverage_stops_before_any_order_submission(tmp_path, allocation:
     assert result["reason"] == "btc_leverage_update_permissiondenied"
     assert result["legs"] == []
     assert all(venue.order is None for venue in venues)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason", "expected_margin_calls", "expected_leverage_calls"),
+    [
+        ("margin_denied", "btc_margin_mode_update_permissiondenied", 1, 0),
+        ("margin_mismatch", "btc_margin_mode_verify_mismatch", 1, 0),
+        ("leverage_mismatch", "btc_leverage_verify_mismatch", 1, 1),
+    ],
+)
+def test_cross_configuration_failure_stops_before_order_submission(
+    tmp_path,
+    allocation: BetaAllocation,
+    failure: str,
+    reason: str,
+    expected_margin_calls: int,
+    expected_leverage_calls: int,
+) -> None:
+    gateway = ConfigurationFailureGateway(failure)
+    plan = BetaVolumePlan.create(
+        Gateway(),
+        allocation,
+        target_turnover_quote="200",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        leverage=400,
+        margin_mode="cross",
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    store.save(plan)
+    venues: list[ImmediateVenue] = []
+
+    def venue_factory(unused, symbol: str, side: str) -> ImmediateVenue:
+        venue = ImmediateVenue(symbol, side)
+        venues.append(venue)
+        return venue
+
+    result = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=venue_factory,  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        reconciler_factory=lambda unused: DeterministicReconciler(),
+        now_ms=lambda: 1000,
+        sleep=lambda _seconds: None,
+    ).execute(plan)
+
+    assert result["status"] == "stopped"
+    assert result["reason"] == reason
+    assert len(gateway.margin_mode_updates) == expected_margin_calls
+    assert len(gateway.leverage_updates) == expected_leverage_calls
+    assert result["legs"] == []
+    assert all(venue.order is None for venue in venues)
+
+
+def test_ambiguous_cross_configuration_is_only_read_back_and_never_resubmitted(
+    tmp_path,
+    allocation: BetaAllocation,
+) -> None:
+    gateway = ConfigurationFailureGateway("ambiguous_applied")
+    plan = BetaVolumePlan.create(
+        Gateway(),
+        allocation,
+        target_turnover_quote="200",
+        round_turnover_quote="200",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        leverage=400,
+        margin_mode="cross",
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    store.save(plan)
+
+    result = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=lambda unused, symbol, side: ImmediateVenue(symbol, side),  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        reconciler_factory=lambda unused: DeterministicReconciler(),
+        now_ms=lambda: 1000,
+        sleep=lambda _seconds: None,
+    ).execute(plan)
+
+    assert result["status"] == "completed"
+    assert gateway.margin_mode_updates == [("BTC", "cross"), ("ETH", "cross")]
+    assert gateway.leverage_updates == [("BTC", 400, "cross"), ("ETH", 400, "cross")]
 
 
 def test_separately_claimed_recovery_flattens_observed_position_with_verified_maker_fill(

@@ -35,6 +35,13 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
             LogLevel.SUCCESS,
             f"实盘执行：运行 {run} 已完成；本次 {value('child_quote')} USDT，累计 {value('total_quote')} USDT",
         )
+    if name in {"phase_pacing_started", "phase_pacing_completed", "phase_pacing_cancelled"}:
+        phase = "开仓" if core("phase") == "open" else "平仓"
+        if name == "phase_pacing_started":
+            return LogLevel.INFO, f"实盘执行：全局执行错峰；第 {value('round')} 轮 {phase} 等待槽位"
+        if name == "phase_pacing_completed":
+            return LogLevel.SUCCESS, f"实盘执行：全局执行错峰完成；第 {value('round')} 轮准备{phase}"
+        return LogLevel.WARN, f"实盘执行：全局执行错峰已取消；{value('reason')}"
     if name in {"campaign_boundary_started", "campaign_boundary_completed"}:
         action = "正在核验账户边界" if name.endswith("started") else "账户边界核验完成"
         return (LogLevel.INFO if name.endswith("started") else LogLevel.SUCCESS, f"实盘执行：{action}")

@@ -294,9 +294,14 @@ def test_lifetime_run_plan_uses_authoritative_residual_and_blocks_reached_target
     )
     instance = instance.model_copy(
         update={
-            "strategy": instance.strategy.model_copy(
-                update={"target_mode": StrategyTargetMode.LIFETIME, "target_volume_quote": Decimal("200")}
-            ),
+                "strategy": instance.strategy.model_copy(
+                    update={
+                        "target_mode": StrategyTargetMode.LIFETIME,
+                        "target_volume_quote": Decimal("200"),
+                        "target_volume_quote_min": Decimal("200"),
+                        "target_volume_quote_max": Decimal("200"),
+                    }
+                ),
             "volume": instance.volume.model_copy(update={"lifetime": 150.0, "complete": True}),
         },
         deep=True,

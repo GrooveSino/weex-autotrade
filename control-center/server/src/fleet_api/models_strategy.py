@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -37,6 +37,8 @@ class VolumeStrategyInput(CamelModel):
     name: str = Field(default="成交量策略", min_length=1, max_length=64)
     target_mode: StrategyTargetMode = StrategyTargetMode.INCREMENTAL
     target_volume_quote: Decimal = Field(gt=0, le=1_000_000_000_000, multiple_of=Decimal("0.01"))
+    target_volume_quote_min: Decimal = Field(gt=0, le=1_000_000_000_000, multiple_of=Decimal("0.01"))
+    target_volume_quote_max: Decimal = Field(gt=0, le=1_000_000_000_000, multiple_of=Decimal("0.01"))
     round_turnover_quote_min: Decimal = Field(gt=0, le=1_000_000_000, multiple_of=Decimal("0.01"))
     round_turnover_quote_max: Decimal = Field(gt=0, le=1_000_000_000, multiple_of=Decimal("0.01"))
     position_hold_min_seconds: int = Field(default=5, ge=0, le=2_592_000)
@@ -44,8 +46,26 @@ class VolumeStrategyInput(CamelModel):
     round_interval_min_seconds: int = Field(default=10, ge=0, le=2_592_000)
     round_interval_max_seconds: int = Field(default=30, ge=0, le=2_592_000)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_target_range(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        legacy = payload.pop("targetVolumeQuote", payload.get("target_volume_quote"))
+        minimum = payload.pop("targetVolumeQuoteMin", payload.get("target_volume_quote_min", legacy))
+        maximum = payload.pop("targetVolumeQuoteMax", payload.get("target_volume_quote_max", legacy))
+        if minimum is not None:
+            payload["target_volume_quote_min"] = minimum
+        if maximum is not None:
+            payload["target_volume_quote_max"] = maximum
+            payload["target_volume_quote"] = maximum
+        return payload
+
     @model_validator(mode="after")
     def validate_ranges(self) -> Self:
+        if self.target_volume_quote_min > self.target_volume_quote_max:
+            raise ValueError("target volume minimum cannot exceed maximum")
         if self.round_turnover_quote_min > self.round_turnover_quote_max:
             raise ValueError("round turnover minimum cannot exceed maximum")
         if self.position_hold_min_seconds > self.position_hold_max_seconds:

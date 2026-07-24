@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import math
 import random
+import secrets
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal, localcontext
-from typing import TYPE_CHECKING
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
+from typing import TYPE_CHECKING, Callable
 
-from .models import AccountInstance, StrategyTargetMode, VolumeStrategy
+from .models import AccountInstance, StrategyDirection, StrategyTargetMode, VolumeStrategy
 
 if TYPE_CHECKING:
     from .execution import PairAllocation
@@ -22,6 +23,7 @@ class StrategyRunBlocked(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class StrategyRunPlan:
+    direction: StrategyDirection
     target_mode: StrategyTargetMode
     run_disposition: str
     strategy_target_quote_volume: Decimal
@@ -32,21 +34,33 @@ class StrategyRunPlan:
 def resolve_strategy_run_plan(
     instance: AccountInstance,
     active_session: dict[str, object] | None,
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
+    randbelow: Callable[[int], int] = secrets.randbelow,
 ) -> StrategyRunPlan:
     if active_session is not None:
         status = str(active_session.get("status") or "")
         if status in {"active", "stopping", "recovering"}:
             raise StrategyRunBlocked(f"this account already has an operational strategy run ({status})")
 
-    strategy_target = Decimal(instance.strategy.target_volume_quote)
     lifetime = Decimal(str(instance.volume.lifetime))
     if instance.strategy.target_mode is StrategyTargetMode.LIFETIME:
         if not instance.volume.complete:
             raise StrategyRunBlocked("complete lifetime trade history synchronization before starting")
+        if lifetime >= instance.strategy.target_volume_quote_max:
+            raise StrategyTargetReached("the lifetime strategy target range is already verified complete")
+        next_cent = (
+            (lifetime * Decimal(100)).to_integral_value(rounding=ROUND_FLOOR) + Decimal(1)
+        ) / Decimal(100)
+        strategy_target = _sample_target_quote(
+            max(instance.strategy.target_volume_quote_min, next_cent),
+            instance.strategy.target_volume_quote_max,
+            randbelow,
+        )
         execution_target = max(strategy_target - lifetime, Decimal(0))
         if execution_target <= 0:
             raise StrategyTargetReached("the lifetime strategy target is already verified complete")
         return StrategyRunPlan(
+            direction=direction,
             target_mode=StrategyTargetMode.LIFETIME,
             run_disposition="lifetime_residual",
             strategy_target_quote_volume=strategy_target,
@@ -54,7 +68,13 @@ def resolve_strategy_run_plan(
             baseline_lifetime_quote_volume=lifetime,
         )
 
+    strategy_target = _sample_target_quote(
+        instance.strategy.target_volume_quote_min,
+        instance.strategy.target_volume_quote_max,
+        randbelow,
+    )
     return StrategyRunPlan(
+        direction=direction,
         target_mode=StrategyTargetMode.INCREMENTAL,
         run_disposition="new_incremental",
         strategy_target_quote_volume=strategy_target,
@@ -151,6 +171,14 @@ def _random_quote(minimum: Decimal, maximum: Decimal, rng: random.Random) -> Dec
     if minimum_cents > maximum_cents:
         raise ValueError("round turnover range contains no cent-sized value")
     return Decimal(rng.randint(minimum_cents, maximum_cents)) / Decimal(100)
+
+
+def _sample_target_quote(minimum: Decimal, maximum: Decimal, randbelow: Callable[[int], int]) -> Decimal:
+    minimum_cents = int((minimum * 100).to_integral_value(rounding=ROUND_CEILING))
+    maximum_cents = int((maximum * 100).to_integral_value(rounding=ROUND_FLOOR))
+    if minimum_cents > maximum_cents:
+        raise StrategyTargetReached("the lifetime strategy target range is already verified complete")
+    return Decimal(minimum_cents + randbelow(maximum_cents - minimum_cents + 1)) / Decimal(100)
 
 
 def _ceil_decimal(value: Decimal) -> int:

@@ -8,7 +8,6 @@ from typing import Any
 
 from weex_cli.beta_campaign import BetaVolumeCampaignStore, inspect_live_account, live_profile_fingerprint
 from weex_cli.beta_volume import BetaVolumePlanStore
-from weex_cli.config import Credentials, Settings
 from weex_cli.execution_progress import EXECUTION_PROGRESS_PROJECTION_VERSION
 from weex_cli.gateway import WeexGateway
 from weex_cli.live_profile import LiveProfile
@@ -21,10 +20,10 @@ from .campaign_helpers import (
     _available_quote_from_readiness,
     _account_boundary_is_flat,
     _campaign_result_metrics,
-    _normalize_proxy_url,
     _reconciliation_required,
     _worker_exception_reason,
 )
+from .campaign_profile import build_live_profile_gateway
 from .campaign_recovery import acknowledge_recovered_uncertain, recover_uncertain_before_preview
 from .models import BetaCampaignStatus
 from .ownership import LEGACY_OWNER_USER_ID
@@ -47,6 +46,16 @@ class CampaignWorkerRuntimeMixin:
             self._notify_progress(record.instance_id, event)
             if _publishes_fleet_snapshot(str(event["name"])):
                 self._notify(record.instance_id)
+
+        def phase_waiter(plan_id: str, phase: str, round_number: int) -> bool:
+            key = f"{record.campaign_id}:{plan_id}:{round_number}:{phase}"
+            return self.phase_pacer.wait(
+                key,
+                phase=phase,
+                round_number=round_number,
+                stop_event=stop,
+                event_sink=event_sink,
+            )
 
         try:
             profile, gateway = self._profile_and_gateway(material)
@@ -75,6 +84,7 @@ class CampaignWorkerRuntimeMixin:
                 market_data=websocket_runtime,
                 order_updates=websocket_runtime,
                 stop_requested=stop.is_set,
+                phase_waiter=phase_waiter,
             ).execute(record.campaign)
             try:
                 ending_available_balance = _available_quote(gateway)
@@ -154,28 +164,7 @@ class CampaignWorkerRuntimeMixin:
             self._notify(record.instance_id)
 
     def _profile_and_gateway(self, material: CredentialMaterial) -> tuple[LiveProfile, WeexGateway]:
-        settings = Settings(
-            credentials=Credentials(
-                api_key=material.api_key.get_secret_value(),
-                api_secret=material.api_secret.get_secret_value(),
-                passphrase=material.passphrase.get_secret_value(),
-            ),
-            default_mode="live",
-            live_trading_enabled=True,
-            timeout_ms=self.settings.weex_request_timeout_ms,
-            enable_rate_limit=True,
-        )
-        profile = LiveProfile(
-            path=self.settings.campaign_data_directory / "control-plane-live.toml",
-            settings=settings,
-            proxy_url=_normalize_proxy_url(
-                material.proxy_url.get_secret_value() if material.proxy_url is not None else None
-            ),
-            allow_live_mutations=True,
-            post_only_only=True,
-        )
-        profile.require_maker_execution()
-        return profile, WeexGateway(settings, proxy_url=profile.proxy_url)
+        return build_live_profile_gateway(self.settings, material)
 
     def _notify_progress(self, instance_id: str, event: Mapping[str, Any]) -> None:
         """Keep observability failures out of the live execution state machine."""

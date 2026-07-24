@@ -15,6 +15,7 @@ from .models_shared import (
     InstanceStatus,
     ProxyStatus,
     ProxyType,
+    StrategyDirection,
     StrategyTargetMode,
     TradingMode,
 )
@@ -116,6 +117,7 @@ class SessionVolumeProjection(CamelModel):
     strategy_id: str | None = None
     strategy_name: str | None = None
     strategy_version: int | None = None
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
     target_mode: StrategyTargetMode = StrategyTargetMode.INCREMENTAL
     strategy_target_quote_volume: Decimal
     baseline_lifetime_quote_volume: Decimal = Decimal(0)

@@ -17,10 +17,13 @@ from urllib.parse import urlsplit
 
 from weex_cli.beta_allocation import BetaAllocation, HttpBetaAllocationProvider
 from weex_cli.beta_volume import (
+    DEFAULT_STRATEGY_DIRECTION,
     MAX_BETA_DRIFT,
+    STRATEGY_DIRECTIONS,
     BetaVolumePlan,
     BetaVolumePlanStore,
     LiveBetaVolumeService,
+    PhaseWaiter,
     inspect_live_account,
 )
 from weex_cli.errors import SafetyError, ValidationError
@@ -74,6 +77,7 @@ class BetaVolumeCampaign:
     margin_buffer: Decimal
     margin_mode: str
     allocation: BetaAllocation
+    direction: str = DEFAULT_STRATEGY_DIRECTION
 
     @classmethod
     def create(
@@ -95,6 +99,8 @@ class BetaVolumeCampaign:
         round_gap_max_seconds: float = 1.0,
         max_runs: int = MAX_CAMPAIGN_RUNS,
         leverage: str | int = "auto",
+        margin_mode: str = "isolated",
+        direction: str = DEFAULT_STRATEGY_DIRECTION,
         authorization_minutes: int = DEFAULT_AUTHORIZATION_MINUTES,
         now_ms: int | None = None,
     ) -> BetaVolumeCampaign:
@@ -136,11 +142,13 @@ class BetaVolumeCampaign:
             max_empty_rounds=max_empty_rounds,
             cooldown_seconds=0.0,
             leverage=leverage,
+            margin_mode=margin_mode,
+            direction=direction,
             now_ms=now_ms,
         )
         created_at_ms = preview.created_at_ms
         campaign = cls(
-            schema_version=3,
+            schema_version=4,
             campaign_id="",
             created_at_ms=created_at_ms,
             expires_at_ms=created_at_ms + authorization_minutes * 60_000,
@@ -162,6 +170,7 @@ class BetaVolumeCampaign:
             max_auto_leverage=preview.max_auto_leverage,
             margin_buffer=preview.margin_buffer,
             margin_mode=preview.margin_mode,
+            direction=preview.direction,
             allocation=allocation,
         )
         return campaign._with_computed_id()
@@ -177,7 +186,7 @@ class BetaVolumeCampaign:
             "created_at_ms": self.created_at_ms,
             "expires_at_ms": self.expires_at_ms,
             "mode": "live",
-            "strategy": "btc_long_eth_short",
+            "strategy": self.direction,
             "profile_fingerprint": self.profile_fingerprint,
             "target_turnover_quote": decimal_text(self.target_turnover_quote),
             "round_turnover_quote_min": decimal_text(self.round_turnover_quote_min),
@@ -197,6 +206,7 @@ class BetaVolumeCampaign:
             "max_auto_leverage": self.max_auto_leverage,
             "margin_buffer": decimal_text(self.margin_buffer),
             "margin_mode": self.margin_mode,
+            "direction": self.direction,
             "time_in_force": "POST_ONLY",
             "allocation": self.allocation.as_dict(),
         }
@@ -245,12 +255,13 @@ class BetaVolumeCampaign:
                 max_auto_leverage=int(payload["max_auto_leverage"]),
                 margin_buffer=Decimal(str(payload["margin_buffer"])),
                 margin_mode=str(payload["margin_mode"]),
+                direction=str(payload.get("direction", payload.get("strategy", DEFAULT_STRATEGY_DIRECTION))),
                 allocation=allocation,
             )
         except (DecimalException, KeyError, TypeError, ValueError) as exc:
             raise ValidationError("stored campaign payload is invalid") from exc
         if (
-            campaign.schema_version not in {1, 2, 3}
+            campaign.schema_version not in {1, 2, 3, 4}
             or not 1 <= campaign.max_runs <= MAX_CAMPAIGN_RUNS
             or campaign.expires_at_ms <= campaign.created_at_ms
             or campaign.expires_at_ms - campaign.created_at_ms > 86_400_000
@@ -260,6 +271,7 @@ class BetaVolumeCampaign:
             or campaign.round_turnover_quote_min > campaign.round_turnover_quote
             or campaign.round_turnover_quote > campaign.target_turnover_quote
             or campaign.max_position_quote <= 0
+            or campaign.direction not in STRATEGY_DIRECTIONS
             or not _valid_delay_range(
                 campaign.hold_min_seconds,
                 campaign.hold_max_seconds,
@@ -303,6 +315,8 @@ class BetaVolumeCampaign:
             )
         if self.schema_version >= 3:
             fields.append(decimal_text(self.round_turnover_quote_min) or "0")
+        if self.schema_version >= 4:
+            fields.append(self.direction)
         fields.extend(
             (
                 str(self.max_runs),
@@ -398,7 +412,7 @@ class BetaVolumeCampaignStore:
         if not isinstance(payload, Mapping):
             raise ValidationError("stored campaign schema is invalid")
         campaign_row = payload.get("campaign")
-        if payload.get("schema_version") not in {1, 2, 3} or not isinstance(campaign_row, Mapping):
+        if payload.get("schema_version") not in {1, 2, 3, 4} or not isinstance(campaign_row, Mapping):
             raise ValidationError("stored campaign schema is invalid")
         return BetaVolumeCampaignRecord(
             campaign=BetaVolumeCampaign.from_dict(campaign_row),
@@ -426,6 +440,7 @@ class LiveBetaVolumeCampaignService:
         market_data: Any | None = None,
         order_updates: Any | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        phase_waiter: PhaseWaiter | None = None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         sleep: Callable[[float], None] = time.sleep,
         uniform: Callable[[float, float], float] = random.uniform,
@@ -440,6 +455,7 @@ class LiveBetaVolumeCampaignService:
         self.market_data = market_data
         self.order_updates = order_updates
         self.stop_requested = stop_requested or (lambda: False)
+        self.phase_waiter = phase_waiter
         self.now_ms = now_ms
         self.sleep = sleep
         self.uniform = uniform
@@ -657,7 +673,7 @@ class LiveBetaVolumeCampaignService:
         )
 
     def _validate_authorization(self, campaign: BetaVolumeCampaign) -> None:
-        if campaign.schema_version not in {1, 2, 3}:
+        if campaign.schema_version not in {1, 2, 3, 4}:
             raise SafetyError("unsupported campaign schema")
         if campaign.profile_fingerprint != self.profile_fingerprint:
             raise SafetyError("campaign was authorized for a different live profile")
@@ -686,6 +702,7 @@ class LiveBetaVolumeCampaignService:
                 max_auto_leverage=campaign.max_auto_leverage,
                 margin_buffer=campaign.margin_buffer,
                 margin_mode=campaign.margin_mode,
+                direction=campaign.direction,
                 now_ms=created_at_ms,
             )
         except ValidationError as exc:
@@ -708,6 +725,7 @@ class LiveBetaVolumeCampaignService:
                 max_auto_leverage=campaign.max_auto_leverage,
                 margin_buffer=campaign.margin_buffer,
                 margin_mode=campaign.margin_mode,
+                direction=campaign.direction,
                 now_ms=created_at_ms,
             )
 
@@ -770,6 +788,7 @@ class LiveBetaVolumeCampaignService:
             market_data=self.market_data,
             order_updates=self.order_updates,
             stop_requested=self.stop_requested,
+            phase_waiter=self.phase_waiter,
             now_ms=self.now_ms,
             sleep=self.sleep,
             hold_delay_seconds=lambda round_number: self._sample_delay(

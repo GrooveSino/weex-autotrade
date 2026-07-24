@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic.alias_generators import to_camel
 from pydantic.functional_validators import model_validator
-from .models_shared import CamelModel, StrategyTargetMode
+from .models_shared import CamelModel, StrategyDirection, StrategyTargetMode
 
 class BetaCampaignStatus(StrEnum):
     PLANNED = "planned"
@@ -41,7 +41,7 @@ class BetaCampaignPreviewRequest(CamelModel):
 
 
 class BoundStrategyExecutionPreviewRequest(CamelModel):
-    """Intentionally empty: sizing and timing always come from the binding."""
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
 
 
 class BoundStrategyExecutionExecuteRequest(CamelModel):
@@ -55,6 +55,7 @@ class BoundStrategyExecutionStopRequest(CamelModel):
 
 class StrategyRunCleanupRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=240)
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
 
 
 class BetaCampaignExecuteRequest(CamelModel):
@@ -93,6 +94,10 @@ class BetaCampaignView(CamelModel):
     strategy_target_quote_volume: Decimal | None = None
     execution_target_quote_volume: Decimal | None = None
     baseline_lifetime_quote_volume: Decimal | None = None
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
+    selected_target_quote_volume: Decimal | None = None
+    leverage: str | int
+    margin_mode: str
     target_quote: Decimal
     round_turnover_quote_min: Decimal | None = None
     cycle_volume: Decimal

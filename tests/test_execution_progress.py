@@ -183,3 +183,26 @@ def test_projector_snapshot_restores_dedupe_counts_and_absolute_wait_deadline() 
     wait = restored.active_waits["round-gap"]
     assert wait.started_at_ms == 3_000
     assert wait.deadline_at_ms == 13_000
+
+
+def test_phase_pacing_wait_uses_absolute_deadline_and_clears_on_completion() -> None:
+    projector = ExecutionProgressProjector()
+    assert projector.apply(
+        {
+            "event": "phase_pacing_started",
+            "phase": "open",
+            "round": 2,
+            "deadline_at_ms": 21_000,
+        },
+        at_ms=10_000,
+    ) is None
+    wait = projector.active_waits["phase-pacing:2:open"]
+    assert wait.label == "全局执行错峰 · 开仓"
+    assert wait.deadline_at_ms == 21_000
+    completed = projector.apply(
+        {"event": "phase_pacing_completed", "phase": "open", "round": 2},
+        at_ms=21_000,
+    )
+    assert "phase-pacing:2:open" not in projector.active_waits
+    assert completed is not None
+    assert completed.title == "全局执行错峰完成"

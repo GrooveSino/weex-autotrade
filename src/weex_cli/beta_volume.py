@@ -40,11 +40,15 @@ MAX_BETA_DRIFT = Decimal("0.05")
 MAX_PRICE_DRIFT = Decimal("0.01")
 MARGIN_BUFFER = Decimal("1.20")
 MAX_AUTO_LEVERAGE = 99
+MAX_FIXED_LEVERAGE = 400
+DEFAULT_STRATEGY_DIRECTION = "btc_long_eth_short"
+STRATEGY_DIRECTIONS = {DEFAULT_STRATEGY_DIRECTION, "btc_short_eth_long"}
 POST_FLAT_ACCOUNTING_ATTEMPTS = 8
 BETA_READ_RETRY_POLICY = ReadRetryPolicy(attempts=8, initial_delay_seconds=1, max_delay_seconds=8)
 POSITION_READ_RETRY_POLICY = ReadRetryPolicy(attempts=6, initial_delay_seconds=0.5, max_delay_seconds=4)
 RETRYABLE_ACCOUNTING_STATUSES = {"fills_not_visible", "fill_source_incomplete", "quantity_mismatch"}
 DEFAULT_PLAN_DIRECTORY = Path("data/beta-volume-plans")
+PhaseWaiter = Callable[[str, str, int], bool]
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ class BetaVolumePlan:
     btc: PairLegPlan
     eth: PairLegPlan
     estimated_turnover_quote: Decimal
+    direction: str = DEFAULT_STRATEGY_DIRECTION
 
     @classmethod
     def create(
@@ -115,6 +120,7 @@ class BetaVolumePlan:
         max_auto_leverage: int = MAX_AUTO_LEVERAGE,
         margin_buffer: str | Decimal = MARGIN_BUFFER,
         margin_mode: str = "isolated",
+        direction: str = DEFAULT_STRATEGY_DIRECTION,
         now_ms: int | None = None,
     ) -> BetaVolumePlan:
         target = decimal_value(target_turnover_quote, name="target_turnover_quote")
@@ -122,6 +128,8 @@ class BetaVolumePlan:
         max_position = decimal_value(max_position_quote, name="max_position_quote")
         assert target is not None and per_round is not None and max_position is not None
         normalized_leverage = _normalize_leverage(leverage)
+        normalized_margin_mode = _normalize_margin_mode(margin_mode)
+        normalized_direction = _normalize_direction(direction)
         normalized_margin_buffer = decimal_value(margin_buffer, name="margin_buffer")
         assert normalized_margin_buffer is not None
         if timeout_seconds < 1:
@@ -136,8 +144,6 @@ class BetaVolumePlan:
             raise ValidationError("max_empty_rounds must be between 0 and 20")
         if not math.isfinite(cooldown_seconds) or not 0 <= cooldown_seconds <= 300:
             raise ValidationError("cooldown_seconds must be finite and between 0 and 300")
-        if margin_mode != "isolated":
-            raise ValidationError("Beta volume currently requires isolated margin")
         per_round = min(per_round, target)
         opening_budget = per_round / 2
         btc_quote = opening_budget * allocation.btc_long_weight
@@ -187,17 +193,20 @@ class BetaVolumePlan:
                 str(normalized_leverage),
                 str(max_auto_leverage),
                 decimal_text(normalized_margin_buffer) or "0",
-                margin_mode,
+                normalized_margin_mode,
+                normalized_direction,
                 str(created_at_ms),
             )
         )
         digest = hashlib.sha256(identity.encode("ascii")).hexdigest()[:10]
         plan_id = f"wv-{digest}"
+        btc_position, btc_open, btc_close = _direction_sides(normalized_direction, "BTC")
+        eth_position, eth_open, eth_close = _direction_sides(normalized_direction, "ETH")
         btc = PairLegPlan(
             symbol="BTC",
-            position_side="long",
-            opening_side="buy",
-            closing_side="sell",
+            position_side=btc_position,
+            opening_side=btc_open,
+            closing_side=btc_close,
             allocated_quote=btc_quote,
             reference_price=btc_price,
             quantity=btc_quantity,
@@ -207,9 +216,9 @@ class BetaVolumePlan:
         )
         eth = PairLegPlan(
             symbol="ETH",
-            position_side="short",
-            opening_side="sell",
-            closing_side="buy",
+            position_side=eth_position,
+            opening_side=eth_open,
+            closing_side=eth_close,
             allocated_quote=eth_quote,
             reference_price=eth_price,
             quantity=eth_quantity,
@@ -218,7 +227,7 @@ class BetaVolumePlan:
             close_client_prefix=f"{plan_id}-ec",
         )
         return cls(
-            schema_version=3,
+            schema_version=4,
             plan_id=plan_id,
             created_at_ms=created_at_ms,
             target_turnover_quote=target,
@@ -232,7 +241,8 @@ class BetaVolumePlan:
             leverage=normalized_leverage,
             max_auto_leverage=max_auto_leverage,
             margin_buffer=normalized_margin_buffer,
-            margin_mode=margin_mode,
+            margin_mode=normalized_margin_mode,
+            direction=normalized_direction,
             allocation=allocation,
             btc=btc,
             eth=eth,
@@ -246,7 +256,7 @@ class BetaVolumePlan:
             "created_at_ms": self.created_at_ms,
             "expires_at_ms": self.created_at_ms + PLAN_MAX_AGE_SECONDS * 1000,
             "mode": "live",
-            "strategy": "btc_long_eth_short",
+            "strategy": self.direction,
             "target_turnover_quote": decimal_text(self.target_turnover_quote),
             "round_turnover_quote": decimal_text(self.round_turnover_quote),
             "opening_budget_quote": decimal_text(self.opening_budget_quote),
@@ -259,6 +269,7 @@ class BetaVolumePlan:
             "max_auto_leverage": self.max_auto_leverage,
             "margin_buffer": decimal_text(self.margin_buffer),
             "margin_mode": self.margin_mode,
+            "direction": self.direction,
             "minimum_available_quote": decimal_text(self.required_available_quote),
             "allocation": self.allocation.as_dict(),
             "legs": [self.btc.as_dict(), self.eth.as_dict()],
@@ -298,7 +309,10 @@ class BetaVolumePlan:
             leverage=_normalize_leverage(payload.get("leverage", 1)),
             max_auto_leverage=int(payload.get("max_auto_leverage", MAX_AUTO_LEVERAGE)),
             margin_buffer=Decimal(str(payload.get("margin_buffer", MARGIN_BUFFER))),
-            margin_mode=str(payload.get("margin_mode", "isolated")),
+            margin_mode=_normalize_margin_mode(payload.get("margin_mode", "isolated")),
+            direction=_normalize_direction(
+                payload.get("direction", payload.get("strategy", DEFAULT_STRATEGY_DIRECTION))
+            ),
             allocation=allocation,
             btc=_leg_from_dict(legs[0]),
             eth=_leg_from_dict(legs[1]),
@@ -412,7 +426,7 @@ class BetaVolumePlanStore:
             raise ValidationError(f"Beta plan not found: {plan_id}") from None
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             raise ValidationError(f"Beta plan is unreadable: {plan_id}") from None
-        if not isinstance(payload, Mapping) or payload.get("schema_version") not in {1, 2, 3}:
+        if not isinstance(payload, Mapping) or payload.get("schema_version") not in {1, 2, 3, 4}:
             raise ValidationError("stored Beta plan schema is invalid")
         plan_row = payload.get("plan")
         if not isinstance(plan_row, Mapping):
@@ -482,6 +496,7 @@ class LiveBetaVolumeService:
         market_data: Any | None = None,
         order_updates: Any | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        phase_waiter: PhaseWaiter | None = None,
     ) -> None:
         self.gateway = gateway
         self.provider = provider
@@ -500,6 +515,7 @@ class LiveBetaVolumeService:
         self.market_data = market_data
         self.order_updates = order_updates
         self.stop_requested = stop_requested or (lambda: False)
+        self.phase_waiter = phase_waiter
         self._stop_callback_configured = stop_requested is not None
         self.timeline: list[dict[str, Any]] = []
         self.current_plan_id: str | None = None
@@ -543,7 +559,7 @@ class LiveBetaVolumeService:
         preflight = self._preflight_with_read_retry(plan)
         self.store.claim_for_execution(plan)
         self._emit("preflight_completed", message="Account is ready and flat")
-        lanes = self._create_lanes()
+        lanes = self._create_lanes(plan)
         try:
             if self.stop_requested():
                 return self._safe_stop(
@@ -747,7 +763,7 @@ class LiveBetaVolumeService:
 
     def cleanup(self, plan: BetaVolumePlan) -> dict[str, Any]:
         """Run the existing single-pass safe-stop convergence for a persisted plan."""
-        lanes = self._create_lanes()
+        lanes = self._create_lanes(plan)
         return self._safe_stop(
             plan,
             lanes,
@@ -759,7 +775,7 @@ class LiveBetaVolumeService:
             round_number=1,
         )
 
-    def _create_lanes(self) -> dict[str, _Lane]:
+    def _create_lanes(self, plan: BetaVolumePlan) -> dict[str, _Lane]:
         external_gateways = self.lane_gateways is not None
         if external_gateways:
             assert self.lane_gateways is not None
@@ -790,12 +806,12 @@ class LiveBetaVolumeService:
             return {
                 "BTC": _Lane(
                     gateways[0],
-                    self._create_venue(gateways[0], "BTC", "long"),
+                    self._create_venue(gateways[0], "BTC", plan.btc.position_side),
                     self.reconciler_factory(gateways[0]),
                 ),
                 "ETH": _Lane(
                     gateways[1],
-                    self._create_venue(gateways[1], "ETH", "short"),
+                    self._create_venue(gateways[1], "ETH", plan.eth.position_side),
                     self.reconciler_factory(gateways[1]),
                 ),
             }
@@ -847,6 +863,20 @@ class LiveBetaVolumeService:
                     )
                 if total_quote >= plan.target_turnover_quote:
                     break
+                if self.phase_waiter is not None and not self.phase_waiter(plan.plan_id, "open", round_number):
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
+                if self.phase_waiter is not None:
+                    preflight = self._preflight_with_read_retry(plan)
                 desired_quote = min(plan.round_turnover_quote, plan.target_turnover_quote - total_quote)
                 self._emit(
                     "cycle_preparing",
@@ -910,15 +940,15 @@ class LiveBetaVolumeService:
                     "BTC": _LegSpec(
                         btc_plan,
                         "open",
-                        "buy",
-                        float(btc_plan.quantity),
+                        btc_plan.opening_side,
+                        _signed_open_quantity(btc_plan),
                         f"{plan.plan_id}-r{round_number:03d}-bo",
                     ),
                     "ETH": _LegSpec(
                         eth_plan,
                         "open",
-                        "sell",
-                        -float(eth_plan.quantity),
+                        eth_plan.opening_side,
+                        _signed_open_quantity(eth_plan),
                         f"{plan.plan_id}-r{round_number:03d}-eo",
                     ),
                 }
@@ -950,6 +980,32 @@ class LiveBetaVolumeService:
                     eth_plan,
                 )
                 if self.stop_requested():
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
+                if self.phase_waiter is not None and not self.phase_waiter(plan.plan_id, "close", round_number):
+                    return self._safe_stop(
+                        plan,
+                        lanes,
+                        preflight,
+                        execution_started_ms,
+                        summaries=summaries,
+                        cycles=cycles,
+                        total_quote=total_quote,
+                        round_number=round_number,
+                        pool=pool,
+                    )
+                if self.phase_waiter is not None and not self._close_phase_boundary_ready(
+                    plan, lanes, round_number
+                ):
                     return self._safe_stop(
                         plan,
                         lanes,
@@ -1213,8 +1269,8 @@ class LiveBetaVolumeService:
                     lane_stops[symbol] = ("observation_uncertain", "position_observation_unavailable")
             return 0.0
         expected_positions = {
-            "BTC": btc_plan.quantity,
-            "ETH": -eth_plan.quantity,
+            "BTC": Decimal(str(_signed_open_quantity(btc_plan))),
+            "ETH": Decimal(str(_signed_open_quantity(eth_plan))),
         }
         tolerances = {
             "BTC": btc_plan.amount_step / 2,
@@ -1236,6 +1292,50 @@ class LiveBetaVolumeService:
                 return seconds
             self._emit("hold_completed", round=round_number, seconds=seconds)
         return seconds
+
+    def _close_phase_boundary_ready(
+        self,
+        plan: BetaVolumePlan,
+        lanes: Mapping[str, _Lane],
+        round_number: int,
+    ) -> bool:
+        try:
+            if self.provider is None:
+                return False
+            self._read_with_retry(
+                self.provider.get,
+                operation="close_beta_observation",
+                round=round_number,
+            )
+            for symbol, lane in lanes.items():
+                self._read_with_retry(
+                    lambda lane=lane, symbol=symbol: _mid_price(lane.gateway, symbol),
+                    operation="close_market_observation",
+                    round=round_number,
+                    symbol=symbol,
+                )
+                position = self._observe_position(
+                    lane.venue,
+                    round_number=round_number,
+                    sequence="pacing-boundary",
+                    symbol=symbol,
+                    action="close",
+                )
+                orders = self._observe_orders(
+                    lane,
+                    round_number=round_number,
+                    sequence="pacing-boundary",
+                    symbol=symbol,
+                    action="close",
+                )
+                if position is None or orders is None:
+                    return False
+                active_orders, trigger_orders = orders
+                if active_orders or _row_count(trigger_orders):
+                    return False
+        except Exception:  # noqa: BLE001 - normal close falls through to unpaced safe-stop
+            return False
+        return True
 
     def _wait_for_stop(self, seconds: float) -> None:
         """Wait without making stop requests wait for a full hold/gap interval."""
@@ -1555,8 +1655,9 @@ class LiveBetaVolumeService:
             "BTC": _ensure_lane_leverage(
                 self.gateway,
                 "BTC",
-                "long",
+                plan.btc.position_side,
                 selected,
+                margin_mode=plan.margin_mode,
                 read_leverage=lambda: self._read_with_retry(
                     lambda: self.gateway.leverage("BTC"),
                     operation="leverage_observation",
@@ -1569,8 +1670,9 @@ class LiveBetaVolumeService:
             "ETH": _ensure_lane_leverage(
                 self.gateway,
                 "ETH",
-                "short",
+                plan.eth.position_side,
                 selected,
+                margin_mode=plan.margin_mode,
                 read_leverage=lambda: self._read_with_retry(
                     lambda: self.gateway.leverage("ETH"),
                     operation="leverage_observation",
@@ -2177,14 +2279,43 @@ def _normalize_leverage(value: object) -> str | int:
         try:
             parsed = int(text)
         except ValueError:
-            raise ValidationError("leverage must be 'auto' or an integer between 1 and 125") from None
+            raise ValidationError(
+                f"leverage must be 'auto' or an integer between 1 and {MAX_FIXED_LEVERAGE}"
+            ) from None
     elif isinstance(value, int) and not isinstance(value, bool):
         parsed = value
     else:
-        raise ValidationError("leverage must be 'auto' or an integer between 1 and 125")
-    if not 1 <= parsed <= 125:
-        raise ValidationError("leverage must be 'auto' or an integer between 1 and 125")
+        raise ValidationError(f"leverage must be 'auto' or an integer between 1 and {MAX_FIXED_LEVERAGE}")
+    if not 1 <= parsed <= MAX_FIXED_LEVERAGE:
+        raise ValidationError(f"leverage must be 'auto' or an integer between 1 and {MAX_FIXED_LEVERAGE}")
     return parsed
+
+
+def _normalize_margin_mode(value: object) -> str:
+    normalized = str(value).strip().lower()
+    if normalized == "crossed":
+        normalized = "cross"
+    if normalized not in {"isolated", "cross"}:
+        raise ValidationError("margin_mode must be isolated or cross")
+    return normalized
+
+
+def _normalize_direction(value: object) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in STRATEGY_DIRECTIONS:
+        raise ValidationError("strategy direction is unsupported")
+    return normalized
+
+
+def _direction_sides(direction: str, symbol: str) -> tuple[str, str, str]:
+    normal = direction == DEFAULT_STRATEGY_DIRECTION
+    is_long = normal if symbol == "BTC" else not normal
+    return ("long", "buy", "sell") if is_long else ("short", "sell", "buy")
+
+
+def _signed_open_quantity(leg: PairLegPlan) -> float:
+    quantity = float(leg.quantity)
+    return quantity if leg.opening_side == "buy" else -quantity
 
 
 def _available_quote(gateway: WeexGateway) -> Decimal:
@@ -2201,23 +2332,25 @@ def _ensure_lane_leverage(
     position_side: str,
     leverage: int,
     *,
+    margin_mode: str = "isolated",
     read_leverage: Callable[[], Mapping[str, Any]] | None = None,
 ) -> str:
+    expected_margin_mode = _normalize_margin_mode(margin_mode)
     observe = read_leverage or (lambda: gateway.leverage(symbol))
     try:
         current = observe()
     except Exception as exc:  # noqa: BLE001 - classified without exposing exchange payloads
         raise SafetyError(f"{symbol.lower()}_leverage_read_{type(exc).__name__.lower()}") from exc
     changes: list[str] = []
-    if str(current.get("marginMode") or "").lower() != "isolated":
+    if _observed_margin_mode(current) != expected_margin_mode:
         try:
-            gateway.configure_margin_mode(symbol, "isolated")
+            gateway.configure_margin_mode(symbol, expected_margin_mode)
         except Exception as exc:  # noqa: BLE001 - mutation may have landed; only observe, never resubmit
             try:
                 current = observe()
             except Exception:
                 current = {}
-            if str(current.get("marginMode") or "").lower() == "isolated":
+            if _observed_margin_mode(current) == expected_margin_mode:
                 changes.append("margin_updated_after_uncertain_response")
             else:
                 raise SafetyError(f"{symbol.lower()}_margin_mode_update_{type(exc).__name__.lower()}") from exc
@@ -2226,19 +2359,19 @@ def _ensure_lane_leverage(
                 current = observe()
             except Exception as exc:  # noqa: BLE001 - a successful mutation still requires proof
                 raise SafetyError(f"{symbol.lower()}_margin_mode_verify_{type(exc).__name__.lower()}") from exc
-            if str(current.get("marginMode") or "").lower() != "isolated":
+            if _observed_margin_mode(current) != expected_margin_mode:
                 raise SafetyError(f"{symbol.lower()}_margin_mode_verify_mismatch")
             changes.append("margin_updated")
-    if _leverage_matches(current, position_side, leverage):
+    if _leverage_matches(current, position_side, leverage, expected_margin_mode):
         return "+".join(changes) if changes else "unchanged"
     try:
-        gateway.configure_leverage(symbol, leverage, "isolated")
+        gateway.configure_leverage(symbol, leverage, expected_margin_mode)
     except Exception as exc:  # noqa: BLE001 - mutation may have landed; only observe, never resubmit
         try:
             observed = observe()
         except Exception:
             observed = {}
-        if _leverage_matches(observed, position_side, leverage):
+        if _leverage_matches(observed, position_side, leverage, expected_margin_mode):
             changes.append("leverage_updated_after_uncertain_response")
             return "+".join(changes)
         raise SafetyError(f"{symbol.lower()}_leverage_update_{type(exc).__name__.lower()}") from exc
@@ -2246,20 +2379,37 @@ def _ensure_lane_leverage(
         verified = observe()
     except Exception as exc:  # noqa: BLE001 - a successful mutation still requires proof
         raise SafetyError(f"{symbol.lower()}_leverage_verify_{type(exc).__name__.lower()}") from exc
-    if not _leverage_matches(verified, position_side, leverage):
+    if not _leverage_matches(verified, position_side, leverage, expected_margin_mode):
         raise SafetyError(f"{symbol.lower()}_leverage_verify_mismatch")
     changes.append("leverage_updated")
     return "+".join(changes)
 
 
-def _leverage_matches(payload: Mapping[str, Any], position_side: str, expected: int) -> bool:
-    margin_mode = str(payload.get("marginMode") or "").lower()
-    key = "longLeverage" if position_side == "long" else "shortLeverage"
+def _observed_margin_mode(payload: Mapping[str, Any]) -> str:
+    observed = str(payload.get("marginMode") or payload.get("marginType") or "").strip().lower()
+    return "cross" if observed in {"cross", "crossed"} else observed
+
+
+def _leverage_matches(
+    payload: Mapping[str, Any],
+    position_side: str,
+    expected: int,
+    margin_mode: str = "isolated",
+) -> bool:
+    normalized_margin = _normalize_margin_mode(margin_mode)
+    if _observed_margin_mode(payload) != normalized_margin:
+        return False
+    keys = (
+        ("crossLeverage", "leverage", "longLeverage" if position_side == "long" else "shortLeverage")
+        if normalized_margin == "cross"
+        else ("longLeverage" if position_side == "long" else "shortLeverage",)
+    )
+    raw = next((payload.get(key) for key in keys if payload.get(key) is not None), None)
     try:
-        actual = Decimal(str(payload.get(key)))
+        actual = Decimal(str(raw))
     except Exception:  # noqa: BLE001 - malformed exchange observation is simply non-matching
         return False
-    return margin_mode == "isolated" and actual == Decimal(expected)
+    return actual == Decimal(expected)
 
 
 def _cycle_leverage_failure_reason(exc: Exception) -> str:
@@ -2562,10 +2712,10 @@ def _result_payload(
     achievement = total_quote / plan.target_turnover_quote * Decimal(100)
     excess = max(Decimal(0), total_quote - plan.target_turnover_quote)
     return {
-        "schema_version": 3,
+        "schema_version": plan.schema_version,
         "kind": "beta_volume_execution",
         "mode": "live",
-        "strategy": "btc_long_eth_short",
+        "strategy": plan.direction,
         "status": status,
         "reason": reason,
         "plan_id": plan.plan_id,
@@ -2580,8 +2730,8 @@ def _result_payload(
         "legs": legs,
         "cycles": cycles,
         "final_positions": {
-            "BTC_LONG": _safe_position(venues["BTC"]),
-            "ETH_SHORT": _safe_position(venues["ETH"]),
+            f"BTC_{plan.btc.position_side}".upper(): _safe_position(venues["BTC"]),
+            f"ETH_{plan.eth.position_side}".upper(): _safe_position(venues["ETH"]),
         },
         "preflight": dict(preflight),
         "timeline": list(timeline),

@@ -15,14 +15,15 @@ from .service import ValidationFailed
 
 def _preview_metadata(campaign: BetaVolumeCampaign, available: Decimal, readiness: dict[str, Any]) -> dict[str, Any]:
     confirmation = campaign_confirmation(campaign)
+    effective_leverage = campaign.leverage if isinstance(campaign.leverage, int) else campaign.max_auto_leverage
     return {
         "confirmation": confirmation,
         "stop_confirmation": f"STOP WEEX LIVE BETA-CAMPAIGN {campaign.campaign_id.upper()} POST_ONLY",
         "available_quote": str(available),
-        "required_leverage": campaign.max_auto_leverage,
-        "planned_leverage": campaign.leverage if isinstance(campaign.leverage, int) else campaign.max_auto_leverage,
+        "required_leverage": effective_leverage,
+        "planned_leverage": effective_leverage,
         "max_supported_turnover_quote": str(
-            available * Decimal(campaign.max_auto_leverage) / campaign.margin_buffer * Decimal(2)
+            available * Decimal(effective_leverage) / campaign.margin_buffer * Decimal(2)
         ),
         "readiness": readiness,
         "phase": "planned",
@@ -30,7 +31,10 @@ def _preview_metadata(campaign: BetaVolumeCampaign, available: Decimal, readines
 
 
 def _bound_strategy_confirmation(campaign: BetaVolumeCampaign) -> str:
-    return f"EXECUTE WEEX LIVE STRATEGY {campaign.campaign_id.upper()} POST_ONLY"
+    return (
+        f"EXECUTE WEEX LIVE STRATEGY {campaign.campaign_id.upper()} "
+        f"DIRECTION_{campaign.direction.upper()} POST_ONLY"
+    )
 
 
 def _bound_strategy_stop_confirmation(campaign_id: str) -> str:

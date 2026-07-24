@@ -81,6 +81,7 @@ class StrategyRunCommandMixin:
             run_disposition=plan.run_disposition,
             strategy_target_quote=plan.strategy_target_quote_volume,
             baseline_lifetime_quote=plan.baseline_lifetime_quote_volume,
+            direction=plan.direction,
             owner_user_id=instance.owner_user_id,
         )
 

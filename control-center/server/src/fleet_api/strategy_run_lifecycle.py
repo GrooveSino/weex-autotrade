@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import time
 from decimal import Decimal
 
 from .campaign_contracts import CampaignJournal, CampaignRecord
-from .campaign_events import _view, submission_attempted
+from .campaign_events import submission_attempted
 from .campaign_helpers import _cleanup_confirmation
 from .instance_projection import optional_available_balance
-from .models import AccountInstance, BetaCampaignView, ExecutionLifecycleSnapshot
+from .models import AccountInstance, BetaCampaignView, ExecutionLifecycleSnapshot, StrategyDirection
 from .strategy_run_commands import StrategyRunCommandMixin
+from .strategy_run_helpers import active_preparation, boundary_counts, lifecycle_now_ms, view_or_none
 from .strategy_run_projection import project_strategy_run_lifecycle
-from .strategy_run_types import LifecycleDisposition, LifecyclePreparation
+from .strategy_run_types import LifecyclePreparation
 from .vault import CredentialMaterial, CredentialVault
 from .volume_contracts import FillConflictError, TradeVolumeLedger
 from .volume_sessions import SessionVolumeService
@@ -47,7 +47,12 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
         ]
         return max(records, key=lambda item: item.campaign.created_at_ms) if records else None
 
-    async def prepare(self, instance: AccountInstance, material: CredentialMaterial | None) -> LifecyclePreparation:
+    async def prepare(
+        self,
+        instance: AccountInstance,
+        material: CredentialMaterial | None,
+        direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
+    ) -> LifecyclePreparation:
         if material is None:
             return LifecyclePreparation("unavailable", reason_code="credentials_unavailable", message="账号凭据不可用")
         active = self._journal.active_for_instance(instance.id)
@@ -57,25 +62,29 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             else self.latest_bound_record(instance.id)
         )
         if self._manager.has_active_worker(instance.id):
-            return self._active_preparation(record)
+            return active_preparation(record)
         if record is not None and record.status == "planned":
             stale = (
-                self._now_ms() >= record.campaign.expires_at_ms
+                lifecycle_now_ms() >= record.campaign.expires_at_ms
                 or record.metadata.get("strategy_id") != instance.strategy_id
                 or record.metadata.get("strategy_version") != instance.strategy.version
+                or record.campaign.schema_version < 4
+                or record.campaign.direction != direction.value
+                or record.campaign.leverage != 400
+                or record.campaign.margin_mode != "cross"
             )
             if stale:
                 self._journal.update(
                     record.campaign_id,
                     status="stopped",
-                    finished_at_ms=self._now_ms(),
+                    finished_at_ms=lifecycle_now_ms(),
                     reason="launch_preview_stale",
                 )
                 record = None
             else:
                 return self.prepare_planned(instance, material, record)
         if record is not None and record.status in {"executing", "stopping"}:
-            return self._active_preparation(record)
+            return active_preparation(record)
         session = self._ledger.active_session(instance.id, instance.mode.value)
         needs_recovery = (
             record is not None and record.status in {"recovering", "uncertain"}
@@ -96,10 +105,10 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             )
         if not bool(boundary["flat"]):
             cleanup_record = self._manager.prepare_bound_strategy_cleanup(instance, material, boundary)
-            counts = self._boundary_counts(boundary)
+            counts = boundary_counts(boundary)
             return LifecyclePreparation(
                 "cleanup_required",
-                execution=self._view_or_none(cleanup_record),
+                execution=view_or_none(cleanup_record),
                 cleanup_confirmation=(
                     _cleanup_confirmation(cleanup_record.campaign_id) if cleanup_record is not None else None
                 ),
@@ -128,7 +137,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             self._sessions.mark_recovering(
                 session_id,
                 reason=str(record.metadata.get("reason") or "campaign_outcome_uncertain"),
-                finished_at_ms=int(record.metadata.get("finished_at_ms") or self._now_ms()),
+                finished_at_ms=int(record.metadata.get("finished_at_ms") or lifecycle_now_ms()),
             )
             await self.recover_after_worker(record)
             return
@@ -137,7 +146,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
         if record.status == "stopped" and not submission_attempted(record):
             self._finish_launch_aborted(record, self._ledger.session_projection(session_id))
             return
-        finished_at_ms = int(record.metadata.get("finished_at_ms") or self._now_ms())
+        finished_at_ms = int(record.metadata.get("finished_at_ms") or lifecycle_now_ms())
         ending_balance = optional_available_balance(record.metadata.get("ending_available_balance_quote"))
         self._ledger.update_session(
             session_id,
@@ -207,12 +216,12 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             return LifecyclePreparation("unavailable", reason_code="credentials_unavailable", message="账号凭据不可用")
         boundary = self._manager.inspect_bound_strategy_boundary(material)
         if not bool(boundary["flat"]):
-            counts = self._boundary_counts(boundary)
+            counts = boundary_counts(boundary)
             if record is not None:
                 self._journal.update(record.campaign_id, cleanup_required=True, **counts)
             return LifecyclePreparation(
                 "cleanup_required",
-                execution=self._view_or_none(record),
+                execution=view_or_none(record),
                 cleanup_confirmation=_cleanup_confirmation(record.campaign_id) if record is not None else None,
                 **counts,
             )
@@ -226,9 +235,9 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             return LifecyclePreparation("idle")
 
         if session is None:
-            self._manager.archive_bound_strategy_recovery(record, recovered_at_ms=self._now_ms())
+            self._manager.archive_bound_strategy_recovery(record, recovered_at_ms=lifecycle_now_ms())
             return LifecyclePreparation("idle")
-        now_ms = self._now_ms()
+        now_ms = lifecycle_now_ms()
         fills, complete, reason = await self._runtime.authoritative_session_fills(
             instance.id,
             int(session["started_at_ms"]),
@@ -242,7 +251,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
                 result_reason=f"recovery_source_incomplete:{reason}"[:160],
                 pending_sync=False,
             )
-            return LifecyclePreparation("recovering", execution=self._view_or_none(record), reason_code=str(reason))
+            return LifecyclePreparation("recovering", execution=view_or_none(record), reason_code=str(reason))
         try:
             projection = self._sessions.recover_stopped(
                 str(session["session_id"]),
@@ -276,6 +285,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             strategy_id=str(metadata.get("strategy_id")) if metadata.get("strategy_id") else None,
             strategy_name=str(metadata.get("strategy_name")) if metadata.get("strategy_name") else None,
             strategy_version=int(metadata["strategy_version"]) if metadata.get("strategy_version") else None,
+            direction=str(metadata.get("direction") or record.campaign.direction),
             target_mode=str(metadata.get("target_mode") or "incremental"),
             strategy_target_quote_volume=Decimal(str(metadata.get("strategy_target_quote") or target)),
             baseline_lifetime_quote_volume=Decimal(str(metadata.get("baseline_lifetime_quote") or "0")),
@@ -286,7 +296,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
         return project_strategy_run_lifecycle(self._journal, self._ledger, instance_id, mode)
 
     def _finish_launch_aborted(self, record: CampaignRecord, session: dict[str, object] | None) -> None:
-        now_ms = self._now_ms()
+        now_ms = lifecycle_now_ms()
         if session is not None:
             self._ledger.update_session(
                 str(session["session_id"]),
@@ -318,30 +328,19 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin):
             audit_status="discrepant" if discrepant else "pending",
             result="stopped",
             result_reason=reason,
-            finished_at_ms=self._now_ms(),
+            finished_at_ms=lifecycle_now_ms(),
             uncertain_order_state=False,
             pending_sync=False,
         )
 
     @staticmethod
-    def _boundary_counts(boundary: dict[str, object]) -> dict[str, int]:
-        return {
-            "position_count": int(boundary.get("position_count") or 0),
-            "regular_order_count": int(boundary.get("regular_order_count") or 0),
-            "trigger_order_count": int(boundary.get("trigger_order_count") or 0),
-        }
+    def _now_ms() -> int:
+        return lifecycle_now_ms()
 
     @staticmethod
-    def _active_preparation(record: CampaignRecord | None) -> LifecyclePreparation:
-        if record is None:
-            return LifecyclePreparation("running")
-        disposition: LifecycleDisposition = "stopping" if record.status == "stopping" else "running"
-        return LifecyclePreparation(disposition, execution=_view(record, include_events=False))
+    def _boundary_counts(boundary: dict[str, object]) -> dict[str, int]:
+        return boundary_counts(boundary)
 
     @staticmethod
     def _view_or_none(record: CampaignRecord | None) -> BetaCampaignView | None:
-        return _view(record, include_events=False) if record is not None else None
-
-    @staticmethod
-    def _now_ms() -> int:
-        return time.time_ns() // 1_000_000
+        return view_or_none(record)

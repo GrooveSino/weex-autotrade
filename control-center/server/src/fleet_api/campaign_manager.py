@@ -25,6 +25,7 @@ from .campaign_manager_bound import CampaignBoundStrategyMixin
 from .campaign_manager_cleanup import CampaignCleanupMixin
 from .campaign_manager_worker import CampaignWorkerRuntimeMixin
 from .config import ControlPlaneSettings
+from .execution_phase_pacer import ExecutionPhasePacer
 from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignPreviewRequest, BetaCampaignStatus, BetaCampaignView
 from .ownership import LEGACY_OWNER_USER_ID
 from .service import BetaSourceUnavailable, UnsafeOperation, ValidationFailed
@@ -51,6 +52,10 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignCleanupMixin, Ca
         self.on_progress = on_progress or (lambda _instance_id, _event: None)
         self.on_execution_claim = on_execution_claim or (lambda _record, _started_at_ms: None)
         self.executor_generation = executor_generation
+        self.phase_pacer = ExecutionPhasePacer(
+            minimum_gap_seconds=settings.execution_phase_gap_seconds,
+            jitter_max_seconds=settings.execution_phase_jitter_seconds,
+        )
         self._executor = ThreadPoolExecutor(
             max_workers=settings.live_campaign_worker_count, thread_name_prefix="weex-campaign"
         )
@@ -145,7 +150,7 @@ class CampaignWorkerManager(CampaignBoundStrategyMixin, CampaignCleanupMixin, Ca
         record = self._require_record(instance_id, campaign_id)
         if record.status != BetaCampaignStatus.PLANNED.value:
             raise UnsafeOperation("campaign is not in planned state")
-        if record.campaign.schema_version not in {2, 3}:
+        if record.campaign.schema_version not in {2, 3, 4}:
             raise UnsafeOperation("execution schema is not executable; create a new preview")
         with self._lock:
             if self._closing:

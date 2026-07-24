@@ -59,6 +59,7 @@ from .models_shared import (
     ProxyStatus,
     ProxyType,
     StrategyStage,
+    StrategyDirection,
     StrategyTargetMode,
     TradingMode,
 )

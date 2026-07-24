@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Copy, LoaderCircle, Play, RefreshCw, ShieldCheck, Square, X } from 'lucide-react'
-import type { AccountInstance, BetaCampaign, BetaCampaignPreview, StrategyRunPrepareResponse } from '../types'
+import type {
+  AccountInstance, BetaCampaign, BetaCampaignPreview, StrategyDirection, StrategyRunPrepareResponse,
+} from '../types'
 import {
   ControlPlaneRequestError,
   cleanupBoundStrategyRun,
@@ -10,6 +12,7 @@ import {
   stopBoundStrategyExecution,
 } from '../services/controlCenter'
 import { BoundStrategyPreparation, type PreparationStage } from './BoundStrategyPreparation'
+import { BoundStrategyOverview } from './BoundStrategyOverview'
 
 interface BoundStrategyExecutionDialogProps {
   account: AccountInstance
@@ -54,6 +57,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
   const [preparationStage, setPreparationStage] = useState<PreparationStage>('checking')
   const [busy, setBusy] = useState(false)
   const [riskAcknowledged, setRiskAcknowledged] = useState(false)
+  const [direction, setDirection] = useState<StrategyDirection>('btc_long_eth_short')
   const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState<string | null>(null)
   const accountRef = useRef(account)
@@ -78,6 +82,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setPreparation(next)
     const current = next.preview ?? next.current
     setExecution(current)
+    if (current?.direction) setDirection(current.direction)
     setConfirmation('')
     setRiskAcknowledged(false)
     if (current) onChangedRef.current(current)
@@ -103,7 +108,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
         // The server owns active-task detection and historical recovery, so a
         // normal launch needs one read-only preparation request rather than a
         // slow client-side list-then-preview race.
-        const prepared = await prepareBoundStrategyRun(targetAccount)
+        const prepared = await prepareBoundStrategyRun(targetAccount, direction)
         if (!current()) return
         applyPreparation(prepared)
       } catch (reason) {
@@ -114,7 +119,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     }
     void load()
     return () => { cancelled = true }
-  }, [applyPreparation, dialogKey, enabled])
+  }, [applyPreparation, dialogKey, direction, enabled])
 
   const preview = async () => {
     const requestId = ++preparationRequestRef.current
@@ -125,7 +130,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setConfirmation('')
     setError(null)
     try {
-      const next = await prepareBoundStrategyRun(targetAccount)
+      const next = await prepareBoundStrategyRun(targetAccount, direction)
       if (preparationRequestRef.current === requestId) applyPreparation(next)
     } catch (reason) {
       if (preparationRequestRef.current === requestId) setError(launchErrorMessage(reason, '预览失败'))
@@ -139,7 +144,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setBusy(true)
     setError(null)
     try {
-      const next = await cleanupBoundStrategyRun(accountRef.current, confirmation)
+      const next = await cleanupBoundStrategyRun(accountRef.current, confirmation, direction)
       applyPreparation(next)
       onToastRef.current(`${accountRef.current.name} 的残留订单与仓位已完成一次安全清理和边界核验`)
     } catch (reason) {
@@ -179,7 +184,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
             onStartedRef.current(resolved)
             onToastRef.current(`${accountRef.current.name} 的启动命令已确认，策略正在执行`)
           } else if (resolved.status === 'stopped') {
-            const prepared = await prepareBoundStrategyRun(accountRef.current)
+            const prepared = await prepareBoundStrategyRun(accountRef.current, direction)
             applyPreparation(prepared)
             setError('启动条件已变化，请重新确认；首笔订单前已安全终止，本次没有自动重试。')
           } else if (resolved.status === 'uncertain') {
@@ -234,28 +239,13 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
         </header>
 
         <div className="beta-campaign-body">
-          <div className="beta-campaign-summary">
-            <div className="beta-campaign-summary-primary">
-              <span>已绑定共享策略</span>
-              <strong>{execution?.strategyName ?? account.strategy.name}<small>v{execution?.strategyVersion ?? account.strategy.version}</small></strong>
-            </div>
-            <div>
-              <span>{execution?.targetMode === 'lifetime' || account.strategy.targetMode === 'lifetime' ? '本次执行差额' : '本次新增目标'}</span>
-              <strong>{quote.format(Number(execution?.executionTargetQuoteVolume ?? execution?.targetQuote ?? account.strategy.targetVolumeQuote))}<small>USDT</small></strong>
-            </div>
-            <div>
-              <span>每轮总交易量</span>
-              <strong>{quote.format(Number(execution?.roundTurnoverQuoteMin ?? account.strategy.roundTurnoverQuoteMin))} - {quote.format(Number(execution?.cycleVolume ?? account.strategy.roundTurnoverQuoteMax))}<small>USDT</small></strong>
-            </div>
-            <div>
-              <span>持仓时间</span>
-              <strong>{execution ? `${execution.holdMinSeconds}-${execution.holdMaxSeconds}s` : `${account.strategy.positionHoldMinSeconds}-${account.strategy.positionHoldMaxSeconds}s`}</strong>
-            </div>
-            <div>
-              <span>轮次间隔</span>
-              <strong>{execution ? `${execution.roundGapMinSeconds}-${execution.roundGapMaxSeconds}s` : `${account.strategy.roundIntervalMinSeconds}-${account.strategy.roundIntervalMaxSeconds}s`}</strong>
-            </div>
-          </div>
+          <BoundStrategyOverview
+            account={account}
+            execution={execution}
+            direction={direction}
+            directionDisabled={busy || Boolean(preparationStage) || Boolean(execution && execution.status !== 'planned')}
+            onDirectionChange={setDirection}
+          />
 
           {!enabled && <div className="execution-warning"><AlertTriangle size={16} /><p>执行器不可用或实盘门禁未启用。不会把普通策略启动当作实盘交易。</p></div>}
           {error && <div className="execution-warning"><AlertTriangle size={16} /><p>{error}</p></div>}
@@ -297,6 +287,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
                 <div><span>Final Beta</span><strong>{Number(execution.beta).toFixed(6)}</strong></div>
                 <div><span>可用余额</span><strong>{execution.availableQuote === null ? '--' : quote.format(Number(execution.availableQuote))}<small>{execution.availableQuote === null ? '' : 'USDT'}</small></strong></div>
                 <div><span>目标口径</span><strong>{execution.targetMode === 'lifetime' ? '累计达到' : '每次新增'}</strong></div>
+                <div><span>执行参数</span><strong>{execution.leverage}x · {execution.marginMode === 'cross' ? '全仓' : '逐仓'}</strong></div>
                 <div><span>已核验成交</span><strong>{quote.format(Number(account.volume.activeSession?.verifiedQuoteVolume ?? 0))}<small>USDT</small></strong></div>
                 <div><span>数据状态</span><strong>{account.volume.activeSession?.stale || account.volume.activeSession?.reconciliationRequired ? '待核验' : '已核验'}</strong></div>
               </div>
@@ -309,7 +300,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
                 </div>
                 <label className="bound-risk-check">
                   <input type="checkbox" checked={riskAcknowledged} onChange={(event) => setRiskAcknowledged(event.target.checked)} />
-                  <span>我理解这会在实盘提交 BTC 多、ETH 空的 POST_ONLY 订单。<small>网络不确定时不会自动补单或重试。</small></span>
+                  <span>我理解这会在实盘提交 {direction === 'btc_long_eth_short' ? 'BTC 多、ETH 空' : 'BTC 空、ETH 多'}的 POST_ONLY 订单。<small>固定 400x 全仓；网络不确定时不会自动补单或重试。</small></span>
                 </label>
                 <div className="bound-phrase-panel">
                   <div className="bound-phrase-heading">

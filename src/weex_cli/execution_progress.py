@@ -28,7 +28,7 @@ WAITING_LABELS_ZH = {
     "open_order_clearance": "确认无残留挂单",
 }
 
-EXECUTION_PROGRESS_PROJECTION_VERSION = 3
+EXECUTION_PROGRESS_PROJECTION_VERSION = 4
 
 _ACTION_ZH = {"open": "开仓", "close": "平仓", "buy": "买入", "sell": "卖出"}
 _STATUS_ZH = {
@@ -122,6 +122,8 @@ def execution_phase(event: Mapping[str, Any]) -> str:
         return "持仓等待"
     if name.startswith("round_gap"):
         return "轮次间隔"
+    if name.startswith("phase_pacing"):
+        return "全局执行错峰"
     if name in {"campaign_finished", "workflow_finished"}:
         return "任务完成"
     return name.replace("_", " ")
@@ -143,6 +145,14 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
             f"Campaign 运行 {run} 已保存检查点",
             f"本次 {value('child_quote')} USDT / 累计 {value('total_quote')} USDT",
         )
+    if name == "phase_pacing_completed":
+        return TimelinePresentation(
+            "success",
+            "全局执行错峰完成",
+            f"第 {round_number} 轮 / {action_label(value('phase'))}",
+        )
+    if name == "phase_pacing_cancelled":
+        return TimelinePresentation("warn", "全局执行错峰已取消", str(value("reason")))
     if name == "campaign_boundary_completed":
         return TimelinePresentation(
             "success", "账户边界读取完成", "启动前" if value("phase", "") == "initial" else "周期检查点"
@@ -475,6 +485,26 @@ class ExecutionProgressProjector:
         leg_key = f"leg:{round_number}:{leg_sequence}:{symbol or ''}:{action}"
         if name != "campaign_read_retry":
             self.active_waits.pop("campaign-read-retry", None)
+
+        pacing_key = f"phase-pacing:{round_number}:{event_value(event, 'phase', '')}"
+        if name == "phase_pacing_started":
+            phase = action_label(event_value(event, "phase", ""))
+            deadline_at_ms = int(event_value(event, "deadline_at_ms", at_ms) or at_ms)
+            self._set_wait(
+                ActiveWait(
+                    key=pacing_key,
+                    label=f"全局执行错峰 · {phase}",
+                    updated_at_ms=at_ms,
+                    remaining_ms=max(0, deadline_at_ms - at_ms),
+                    detail="到达槽位后重新读取账户与行情边界",
+                    action=str(event_value(event, "phase", "")) or None,
+                    started_at_ms=at_ms,
+                    deadline_at_ms=deadline_at_ms,
+                )
+            )
+            return True
+        if name in {"phase_pacing_completed", "phase_pacing_cancelled"}:
+            self.active_waits.pop(pacing_key, None)
 
         if name in {"pair_waiting", "pair_wait_progress"}:
             active = event_value(event, "active_symbols", event_value(event, "symbols", ())) or ()

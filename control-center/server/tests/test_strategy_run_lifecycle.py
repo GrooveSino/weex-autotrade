@@ -88,6 +88,55 @@ def test_reopening_planned_preview_rechecks_boundary_and_offers_cleanup(tmp_path
         assert archived.metadata["reason"] == "launch_preview_boundary_changed"
 
 
+def test_prepare_reuses_sampled_target_until_direction_or_run_changes(tmp_path, monkeypatch) -> None:
+    profile = _profile(tmp_path)
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(_live_settings(tmp_path))
+    with TestClient(app) as api:
+        strategy_request = strategy_payload(target="1500")
+        strategy_request.update(
+            {
+                "targetVolumeQuoteMin": "1000.00",
+                "targetVolumeQuoteMax": "1500.00",
+            }
+        )
+        strategy = api.post("/api/v1/strategies", json=strategy_request).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+        path = f"/api/v1/instances/{instance['id']}/strategy-run/prepare"
+
+        first = api.post(path, json={}).json()["preview"]
+        repeated = api.post(path, json={}).json()["preview"]
+
+        assert repeated["campaignId"] == first["campaignId"]
+        assert repeated["selectedTargetQuoteVolume"] == first["selectedTargetQuoteVolume"]
+        assert repeated["confirmation"] == first["confirmation"]
+
+        reverse = api.post(path, json={"direction": "btc_short_eth_long"}).json()["preview"]
+        assert reverse["campaignId"] != first["campaignId"]
+        assert reverse["direction"] == "btc_short_eth_long"
+        assert "DIRECTION_BTC_SHORT_ETH_LONG" in reverse["confirmation"]
+        archived = app.state.campaign_journal.get(first["campaignId"])
+        assert archived is not None
+        assert archived.status == BetaCampaignStatus.STOPPED.value
+
+        app.state.campaign_journal.update(
+            reverse["campaignId"],
+            status=BetaCampaignStatus.STOPPED.value,
+            finished_at_ms=int(time.time() * 1000),
+            reason="test_run_finished",
+        )
+        next_run = api.post(path, json={"direction": "btc_short_eth_long"}).json()["preview"]
+        assert next_run["campaignId"] != reverse["campaignId"]
+        assert 1000 <= float(next_run["selectedTargetQuoteVolume"]) <= 1500
+
+
 def test_cleanup_rejects_concurrent_command_for_same_account(tmp_path, monkeypatch) -> None:
     manager = CampaignWorkerManager(
         live_settings(tmp_path),

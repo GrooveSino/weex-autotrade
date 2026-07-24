@@ -68,6 +68,8 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "elapsed_ms",
         "remaining_ms",
         "next_check_ms",
+        "started_at_ms",
+        "deadline_at_ms",
         "leverage",
         "fill_count",
         "submissions",
@@ -134,6 +136,8 @@ def _phase_for_event(name: str) -> str:
         return "planning"
     if "run_started" in name:
         return "opening"
+    if name.startswith("phase_pacing"):
+        return "phase_pacing"
     if "run_completed" in name:
         return "reconciled"
     if "boundary" in name:
@@ -172,6 +176,9 @@ def _publishes_fleet_snapshot(name: str) -> bool:
         "campaign_uncertain",
         "campaign_recovering",
         "launch_aborted",
+        "phase_pacing_started",
+        "phase_pacing_completed",
+        "phase_pacing_cancelled",
     }
 
 
@@ -241,6 +248,12 @@ def _view(record: CampaignRecord | None, *, include_events: bool = True) -> Beta
             if metadata.get("baseline_lifetime_quote") is not None
             else None
         ),
+        direction=campaign.direction,
+        selected_target_quote_volume=Decimal(
+            str(metadata.get("strategy_target_quote") or campaign.target_turnover_quote)
+        ),
+        leverage=campaign.leverage,
+        margin_mode=campaign.margin_mode,
         target_quote=campaign.target_turnover_quote,
         round_turnover_quote_min=campaign.round_turnover_quote_min,
         cycle_volume=campaign.round_turnover_quote,

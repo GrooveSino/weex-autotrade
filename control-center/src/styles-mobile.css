@@ -133,6 +133,8 @@
   .dialog-header { min-height: 54px; flex: 0 0 auto; padding-top: max(8px, env(safe-area-inset-top)); }
   .dialog form, .beta-campaign-body, .close-positions-body, .strategy-library-layout { min-height: 0; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   .beta-campaign-body { padding: 8px 10px max(10px, env(safe-area-inset-bottom)); }
+  .bound-direction-control { grid-template-columns: 1fr; gap: 5px; }
+  .bound-direction-control button { height: 34px; font-size: 10px; }
   .beta-campaign-summary > div { min-height: 54px; padding: 7px 9px; }
   .bound-start-confirmation { min-height: 0; }
   .dialog-actions { margin-top: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); position: sticky; bottom: 0; z-index: 3; background: #fff; }

@@ -65,6 +65,11 @@ class StrategyTargetMode(StrEnum):
     LIFETIME = "lifetime"
 
 
+class StrategyDirection(StrEnum):
+    BTC_LONG_ETH_SHORT = "btc_long_eth_short"
+    BTC_SHORT_ETH_LONG = "btc_short_eth_long"
+
+
 class FundingPreflightStatus(StrEnum):
     PENDING = "pending"
     READY = "ready"

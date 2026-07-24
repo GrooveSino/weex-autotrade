@@ -1,5 +1,5 @@
 import type { AccountInstance } from './account'
-import type { StrategyTargetMode, VolumeStrategy } from './strategy'
+import type { StrategyDirection, StrategyTargetMode, VolumeStrategy } from './strategy'
 
 export interface ExecutionCycle {
   cycleId: string
@@ -51,6 +51,10 @@ export interface BetaCampaign {
   strategyTargetQuoteVolume?: string | null
   executionTargetQuoteVolume?: string | null
   baselineLifetimeQuoteVolume?: string | null
+  direction: StrategyDirection
+  selectedTargetQuoteVolume: string | null
+  leverage: number | 'auto'
+  marginMode: 'isolated' | 'cross'
   targetQuote: string
   roundTurnoverQuoteMin: string | null
   cycleVolume: string

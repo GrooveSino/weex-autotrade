@@ -1,5 +1,6 @@
 export type StrategyStage = 'idle' | 'holding' | 'cooldown' | 'complete'
 export type StrategyTargetMode = 'incremental' | 'lifetime'
+export type StrategyDirection = 'btc_long_eth_short' | 'btc_short_eth_long'
 export type StrategyRunStatus = 'active' | 'recovering' | 'stopping' | 'completed' | 'stopped'
 
 export interface StrategyRunSummary {
@@ -7,6 +8,7 @@ export interface StrategyRunSummary {
   strategyId: string | null
   strategyName: string | null
   strategyVersion: number | null
+  direction: StrategyDirection
   targetMode: StrategyTargetMode
   startedAtMs: number
   finishedAtMs: number | null
@@ -39,6 +41,8 @@ export interface VolumeStrategy {
   name: string
   targetMode: StrategyTargetMode
   targetVolumeQuote: string
+  targetVolumeQuoteMin: string
+  targetVolumeQuoteMax: string
   roundTurnoverQuoteMin: string
   roundTurnoverQuoteMax: string
   positionHoldMinSeconds: number
@@ -50,7 +54,8 @@ export interface VolumeStrategy {
 export interface StrategyDraft {
   name: string
   targetMode: StrategyTargetMode
-  targetVolumeQuote: string
+  targetVolumeQuoteMin: string
+  targetVolumeQuoteMax: string
   roundTurnoverQuoteMin: string
   roundTurnoverQuoteMax: string
   positionHoldMinSeconds: number

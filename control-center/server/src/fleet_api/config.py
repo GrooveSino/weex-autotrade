@@ -44,6 +44,8 @@ class ControlPlaneSettings:
     live_campaigns_enabled: bool = False
     live_trading_enabled: bool = False
     live_campaign_worker_count: int = 1
+    execution_phase_gap_seconds: float = 5
+    execution_phase_jitter_seconds: float = 15
     campaign_data_directory: Path = Path("server/data/beta-campaigns")
     executor_socket: Path = Path("run/weex-fleet-executor.sock")
     # Local-console identity is intentionally separate from exchange
@@ -68,6 +70,8 @@ class ControlPlaneSettings:
                 raise ValueError("weex-live requires FLEET_STORAGE=sqlite")
         if self.live_campaign_worker_count < 1:
             raise ValueError("FLEET_LIVE_CAMPAIGN_WORKERS must be at least 1")
+        if self.execution_phase_gap_seconds < 0 or self.execution_phase_jitter_seconds < 0:
+            raise ValueError("execution phase pacing intervals cannot be negative")
         if self.mock_tick_interval_seconds < 0.25:
             raise ValueError("FLEET_MOCK_TICK_SECONDS must be at least 0.25")
         if self.weex_poll_interval_seconds < 5:
@@ -144,6 +148,8 @@ class ControlPlaneSettings:
             live_campaigns_enabled=_as_bool(os.environ.get("FLEET_LIVE_CAMPAIGNS_ENABLED", "false")),
             live_trading_enabled=_as_bool(os.environ.get("WEEX_LIVE_TRADING_ENABLED", "false")),
             live_campaign_worker_count=int(os.environ.get("FLEET_LIVE_CAMPAIGN_WORKERS", "1")),
+            execution_phase_gap_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_GAP_SECONDS", "5")),
+            execution_phase_jitter_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_JITTER_SECONDS", "15")),
             campaign_data_directory=Path(
                 os.environ.get("FLEET_CAMPAIGN_DATA_DIR", "server/data/beta-campaigns")
             ).expanduser(),

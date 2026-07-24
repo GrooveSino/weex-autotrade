@@ -10,16 +10,19 @@ from fleet_api.models import (
     InstanceStatus,
     ProxySnapshot,
     ProxyType,
+    StrategyDirection,
     StrategyProgress,
     TradingMode,
     VolumeSnapshot,
     VolumeStrategy,
 )
 from fleet_api.strategy import (
+    StrategyRunBlocked,
     StrategyTargetReached,
     estimate_rounds,
     plan_strategy_cycle,
     random_seconds,
+    resolve_strategy_run_plan,
     target_progress_quote,
     target_tolerance_quote,
 )
@@ -101,6 +104,8 @@ def test_completed_target_never_plans_another_cycle() -> None:
 
 def test_strategy_rejects_inverted_amount_and_duration_ranges() -> None:
     with pytest.raises(ValidationError):
+        strategy(targetVolumeQuoteMin="20001", targetVolumeQuoteMax="20000")
+    with pytest.raises(ValidationError):
         strategy(roundTurnoverQuoteMin="1601")
     with pytest.raises(ValidationError):
         strategy(positionHoldMinSeconds=16)
@@ -169,3 +174,61 @@ def test_target_tolerance_is_deterministic_and_capped_for_large_targets() -> Non
     assert target_tolerance_quote(Decimal("200")) == Decimal("1")
     assert target_tolerance_quote(Decimal("10000")) == Decimal("25.0000")
     assert target_tolerance_quote(Decimal("50000")) == Decimal("50")
+
+
+def test_incremental_run_samples_one_cent_target_and_persists_direction_in_plan() -> None:
+    selected = strategy(targetVolumeQuoteMin="100.00", targetVolumeQuoteMax="101.00")
+    instance = AccountInstance(
+        id="sample-incremental",
+        name="sample",
+        account_tag="test",
+        api_key_tail="ABCD",
+        mode=TradingMode.LIVE,
+        status=InstanceStatus.STOPPED,
+        phase="idle",
+        proxy=ProxySnapshot(type=ProxyType.HTTPS, host="proxy.example.com:9000"),
+        strategy_id=selected.id,
+        strategy=selected,
+    )
+
+    plan = resolve_strategy_run_plan(
+        instance,
+        None,
+        StrategyDirection.BTC_SHORT_ETH_LONG,
+        randbelow=lambda size: size - 1,
+    )
+
+    assert plan.direction is StrategyDirection.BTC_SHORT_ETH_LONG
+    assert plan.strategy_target_quote_volume == Decimal("101")
+    assert plan.execution_target_quote_volume == Decimal("101")
+
+
+def test_lifetime_run_samples_only_unreached_range_and_blocks_at_maximum() -> None:
+    selected = strategy(
+        targetMode="lifetime",
+        targetVolumeQuoteMin="100.00",
+        targetVolumeQuoteMax="105.00",
+    )
+    instance = AccountInstance(
+        id="sample-lifetime",
+        name="sample",
+        account_tag="test",
+        api_key_tail="ABCD",
+        mode=TradingMode.LIVE,
+        status=InstanceStatus.STOPPED,
+        phase="idle",
+        proxy=ProxySnapshot(type=ProxyType.HTTPS, host="proxy.example.com:9000"),
+        volume=VolumeSnapshot(lifetime=100.25, complete=True),
+        strategy_id=selected.id,
+        strategy=selected,
+    )
+
+    plan = resolve_strategy_run_plan(instance, None, randbelow=lambda _size: 0)
+    assert plan.strategy_target_quote_volume == Decimal("100.26")
+    assert plan.execution_target_quote_volume == Decimal("0.01")
+
+    reached = instance.model_copy(update={"volume": VolumeSnapshot(lifetime=105, complete=True)})
+    with pytest.raises(StrategyTargetReached):
+        resolve_strategy_run_plan(reached, None)
+    with pytest.raises(StrategyRunBlocked):
+        resolve_strategy_run_plan(instance, {"status": "active"})

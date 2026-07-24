@@ -2,7 +2,7 @@ import type { AccountInstance, StrategyDraft, VolumeStrategy } from '../types'
 
 type StrategySizing = Pick<
   VolumeStrategy,
-  'targetVolumeQuote' | 'roundTurnoverQuoteMin' | 'roundTurnoverQuoteMax'
+  'targetVolumeQuoteMax' | 'roundTurnoverQuoteMin' | 'roundTurnoverQuoteMax'
 >
 
 export interface RoundEstimate {
@@ -13,7 +13,7 @@ export interface RoundEstimate {
 }
 
 export function estimateRounds(strategy: StrategySizing, generatedVolumeQuote = 0): RoundEstimate | null {
-  const target = Number(strategy.targetVolumeQuote)
+  const target = Number(strategy.targetVolumeQuoteMax)
   const minimumTurnover = Number(strategy.roundTurnoverQuoteMin)
   const maximumTurnover = Number(strategy.roundTurnoverQuoteMax)
   if (![target, minimumTurnover, maximumTurnover].every(Number.isFinite)) return null
@@ -74,7 +74,7 @@ export function calculateFundingPreflight(
 
 export function draftStrategy(draft: StrategyDraft): StrategySizing {
   return {
-    targetVolumeQuote: draft.targetVolumeQuote,
+    targetVolumeQuoteMax: draft.targetVolumeQuoteMax,
     roundTurnoverQuoteMin: draft.roundTurnoverQuoteMin,
     roundTurnoverQuoteMax: draft.roundTurnoverQuoteMax,
   }
