@@ -85,7 +85,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
             <th>账号实例</th>
             <th>运行状态</th>
             <th>代理</th>
-            <th className="numeric">合约钱包</th>
+            <th className="numeric">合约钱包 / 启动参数</th>
             <th className="numeric">累计交易量</th>
             <th>BTC 多 / ETH 空</th>
             <th>策略进度</th>
@@ -114,9 +114,14 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
               account.wallet.available,
               account.wallet.equity > 0 || account.wallet.available > 0,
             )
-            const fundingLabel = funding.status === 'ready'
-              ? `自动 ${funding.plannedLeverage}x`
-              : funding.status === 'insufficient' ? `资金不足 · 需 ${funding.requiredLeverage ?? '>99'}x` : '资金待同步'
+            const fundingLabel = account.mode === 'live'
+              ? '下次启动 400x · 全仓'
+              : funding.status === 'ready'
+                ? `自动 ${funding.plannedLeverage}x`
+                : funding.status === 'insufficient' ? `资金不足 · 需 ${funding.requiredLeverage ?? '>99'}x` : '资金待同步'
+            const fundingTitle = account.mode === 'live'
+              ? '新实盘任务会在首笔订单前逐一设置并读回 BTC、ETH 的 400x 全仓；停机账号不会在后台修改交易所配置。'
+              : undefined
             const targetReached = Boolean(account.volume.strategyTargetReached)
             const demoStartBlocked = account.status !== 'running' && (
               funding.status !== 'ready'
@@ -186,7 +191,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                 <td className="numeric wallet-info-cell">
                   <strong className="money">${currency.format(account.wallet.equity)}</strong>
                   <span className={account.wallet.unrealizedPnl < 0 ? 'negative' : account.wallet.unrealizedPnl > 0 ? 'positive' : ''}>
-                    可用 ${currency.format(account.wallet.available)} · <span className={`funding-state ${funding.status}`}>{fundingLabel}</span>
+                    可用 ${currency.format(account.wallet.available)} · <span className={`funding-state ${account.mode === 'live' ? 'ready' : funding.status}`} title={fundingTitle}>{fundingLabel}</span>
                   </span>
                 </td>
                 <td className="numeric volume-info-cell">
