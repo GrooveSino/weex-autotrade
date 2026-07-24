@@ -21,6 +21,13 @@ export function quote(value: string): string {
     : value
 }
 
+export function formatExecutionDurations(message: string): string {
+  return message.replace(/(\d+\.\d{2,})s\b/g, (raw, seconds: string) => {
+    const parsed = Number(seconds)
+    return Number.isFinite(parsed) ? `${parsed.toFixed(1)}s` : raw
+  })
+}
+
 export function countdown(valueMs: number | null): string {
   if (valueMs === null) return '--:--.-'
   const remaining = Math.max(0, valueMs)

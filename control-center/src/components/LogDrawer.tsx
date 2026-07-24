@@ -7,7 +7,7 @@ import {
 } from '../services/controlCenter'
 import type { AccountInstance, LogLine, StrategyMonitorSnapshot } from '../types'
 import { LogDrawerView } from './LogDrawerView'
-import { levelLabel, mergeMonitor } from './logDrawerFormat'
+import { formatExecutionDurations, levelLabel, mergeMonitor } from './logDrawerFormat'
 
 interface LogDrawerProps {
   account: AccountInstance | null
@@ -182,10 +182,12 @@ export function LogDrawer({ account, sessionId = null, onClose }: LogDrawerProps
   }, [monitor?.timeline.length, systemLines.length, tab])
 
   const monitorText = useMemo(() => monitor?.timeline.map((entry) => (
-    `[${new Date(entry.atMs).toISOString()}] ${levelLabel[entry.level]} ${entry.title}${entry.detail ? `；${entry.detail}` : ''}`
+    formatExecutionDurations(
+      `[${new Date(entry.atMs).toISOString()}] ${levelLabel[entry.level]} ${entry.title}${entry.detail ? `；${entry.detail}` : ''}`,
+    )
   )).join('\n') ?? '', [monitor])
   const systemText = useMemo(() => systemLines.map((line) => (
-    `[${line.timestamp}] ${levelLabel[line.level]} ${line.message}`
+    formatExecutionDurations(`[${line.timestamp}] ${levelLabel[line.level]} ${line.message}`)
   )).join('\n'), [systemLines])
   const plainText = tab === 'monitor' ? monitorText : systemText
 
