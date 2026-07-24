@@ -3,11 +3,22 @@ from __future__ import annotations
 import asyncio
 from uuid import uuid4
 from fastapi import Query
-from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignView, BoundStrategyExecutionExecuteRequest, BoundStrategyExecutionPreviewRequest, BoundStrategyExecutionStopRequest, StrategyMonitorSnapshot, StrategyRunCleanupRequest, StrategyRunPage, StrategyRunPrepareResponse, StrategyRunSummary, TradingMode
+from .models import BetaCampaignEvent, BetaCampaignPreview, BetaCampaignView, BoundStrategyExecutionExecuteRequest, BoundStrategyExecutionPreviewRequest, BoundStrategyExecutionStopRequest, StrategyMonitorSnapshot, StrategyRunCapacity, StrategyRunCleanupRequest, StrategyRunConfirmRequest, StrategyRunConfirmResponse, StrategyRunPage, StrategyRunPhaseQueue, StrategyRunPrepareResponse, StrategyRunSummary, TradingMode
 from .service import BetaSourceUnavailable, InstanceNotFound, UnsafeOperation
 
 from fastapi import FastAPI
 from .main_context import FleetAppContext
+
+
+def _strategy_run_capacity(snapshot) -> StrategyRunCapacity:  # type: ignore[no-untyped-def]
+    return StrategyRunCapacity(
+        active_executions=snapshot.active_executions,
+        max_active_executions=snapshot.max_active_executions,
+        active_normal_phases=snapshot.active_normal_phases,
+        max_normal_phases=snapshot.max_normal_phases,
+        queued_normal_phases=snapshot.queued_normal_phases,
+        revision=snapshot.revision,
+    )
 
 
 def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
@@ -136,6 +147,54 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         )
         await publish_snapshot()
         return await prepare_strategy_run(instance_id, payload.direction)
+
+    @app.post(
+        "/api/v1/instances/{instance_id}/strategy-run/confirm",
+        response_model=StrategyRunConfirmResponse,
+    )
+    async def confirm_strategy_run(
+        instance_id: str,
+        payload: StrategyRunConfirmRequest,
+    ) -> StrategyRunConfirmResponse:
+        instance = service.get_instance(instance_id)
+        try:
+            execution = await asyncio.to_thread(
+                strategy_run_lifecycle.start_run,
+                instance,
+                payload.execution_id,
+                payload.confirmation,
+                payload.risk_acknowledged,
+                vault.get(instance_id),
+            )
+        except UnsafeOperation as exc:
+            if "execution capacity is full" not in str(exc):
+                raise
+            capacity = campaign_manager.capacity_snapshot()
+            return StrategyRunConfirmResponse(
+                admission_state="capacity_full",
+                execution_id=payload.execution_id,
+                execution=campaign_manager.get(instance_id, payload.execution_id),
+                capacity=_strategy_run_capacity(capacity),
+            )
+        finally:
+            await publish_snapshot()
+        capacity = campaign_manager.capacity_snapshot()
+        actor = campaign_manager.actor_state(payload.execution_id)
+        phase_queue = None
+        if actor is not None and actor.phase_queue is not None:
+            queue = actor.phase_queue
+            phase_queue = StrategyRunPhaseQueue(
+                position=queue.queue_position,
+                estimated_start_at_ms=queue.estimated_start_at_ms,
+                proxy_limited=queue.constraint in {"proxy_active", "proxy_cooldown"},
+            )
+        return StrategyRunConfirmResponse(
+            admission_state="admitted",
+            execution_id=execution.campaign_id,
+            execution=execution,
+            capacity=_strategy_run_capacity(capacity),
+            phase_queue=phase_queue,
+        )
 
     @app.post(
         "/api/v1/instances/{instance_id}/strategy-executions/{execution_id}/execute",

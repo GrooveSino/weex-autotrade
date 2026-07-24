@@ -15,6 +15,7 @@ from weex_cli.execution_progress import (
 from .campaigns import CampaignJournal, CampaignRecord, ExecutionMonitorProjection
 from .models import ActiveExecutionWait, ExecutionTimelineEntry, LogLevel, StrategyMonitorSnapshot
 from .ownership import LEGACY_OWNER_USER_ID
+from .strategy_monitor_actor import actor_timeline_entry, latest_actor_lifecycle, merge_actor_waits
 from .volume_history import TradeVolumeLedger
 
 
@@ -99,6 +100,7 @@ class StrategyMonitorService:
         journal_btc = _decimal(state, "btc_quote_volume")
         journal_eth = _decimal(state, "eth_quote_volume")
         rows = event_rows if event_rows is not None else stored_rows
+        actor = latest_actor_lifecycle(rows)
         timeline = _timeline(record.campaign_id, rows)[-limit:]
         first_sequence = int(rows[0].get("sequence") or 0) if rows else 0
         cursor = self.cursor(record.campaign_id, projected_sequence) if projected_sequence else None
@@ -126,6 +128,17 @@ class StrategyMonitorService:
         else:
             verified_quote = ledger_verified
             remaining_quote = max(target_quote - verified_quote, Decimal(0))
+        active_waits = [ActiveExecutionWait.model_validate(wait) for wait in state.get("active_waits", [])]
+        active_waits = merge_actor_waits(
+            active_waits,
+            actor,
+            updated_at_ms=projection.updated_at_ms if projection is not None else server_time_ms,
+        )
+        display_phase = (
+            actor.phase
+            if actor is not None and actor.execution_state in {"admitted", "preparing", "phase_queued", "stopping", "recovering"}
+            else str(state.get("phase") or record.metadata.get("phase") or "启动")
+        )
 
         return StrategyMonitorSnapshot(
             instance_id=instance_id,
@@ -137,7 +150,11 @@ class StrategyMonitorService:
                 if record.status in {"planned", "executing", "stopping"}
                 else str(session.get("status") or record.status) if session else record.status
             ),
-            phase=str(state.get("phase") or record.metadata.get("phase") or "启动"),
+            phase=display_phase,
+            execution_state=None if actor is None else actor.execution_state,
+            phase_queue_position=None if actor is None else actor.queue_position,
+            phase_queue_estimated_start_at_ms=None if actor is None else actor.estimated_start_at_ms,
+            phase_queue_proxy_limited=False if actor is None else actor.proxy_limited,
             current_run=int(state.get("current_run") or record.metadata.get("current_run") or 0),
             current_round=int(state.get("current_round") or 0),
             target_quote_volume=target_quote,
@@ -156,7 +173,7 @@ class StrategyMonitorService:
             submissions=int(state.get("submissions") or 0),
             cancels=int(state.get("cancels") or 0),
             requotes=int(state.get("requotes") or 0),
-            active_waits=[ActiveExecutionWait.model_validate(wait) for wait in state.get("active_waits", [])],
+            active_waits=active_waits,
             timeline=timeline,
             projection_sequence=projected_sequence,
             projection_version=projection_version,
@@ -270,6 +287,10 @@ def _timeline(campaign_id: str, rows: list[dict[str, Any]]) -> list[ExecutionTim
     projector = ExecutionProgressProjector()
     timeline: list[ExecutionTimelineEntry] = []
     for event in rows:
+        actor_entry = actor_timeline_entry(campaign_id, event)
+        if actor_entry is not None:
+            timeline.append(actor_entry)
+            continue
         presentation = projector.apply(event, at_ms=int(event.get("at_ms") or 0))
         if presentation is None:
             continue

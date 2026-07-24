@@ -1,7 +1,7 @@
 import type {
   AccountInstance, BetaCampaign, BetaCampaignEvent, BetaCampaignPreview,
   BetaCampaignPreviewRequest, BetaMarketSnapshot, BetaSourceSettings,
-  StrategyDirection, StrategyRunPrepareResponse, VolumeStrategy,
+  StrategyDirection, StrategyRunConfirmResponse, StrategyRunPrepareResponse, VolumeStrategy,
 } from '../types'
 import { mockStrategies } from '../data/mockAccounts'
 import { apiRequest, controlPlaneEnabled } from './controlCenterCore'
@@ -64,6 +64,20 @@ export async function executeBoundStrategyExecution(
   return apiRequest<BetaCampaign>(`/instances/${account.id}/strategy-executions/${executionId}/execute`, {
     method: 'POST',
     body: JSON.stringify({ confirmation, riskAcknowledged }),
+    headers: commandId ? { 'X-Fleet-Command-Id': commandId } : undefined,
+  })
+}
+
+export async function confirmBoundStrategyRun(
+  account: AccountInstance,
+  executionId: string,
+  confirmation: string,
+  riskAcknowledged: boolean,
+  commandId?: string,
+): Promise<StrategyRunConfirmResponse> {
+  return apiRequest<StrategyRunConfirmResponse>(`/instances/${account.id}/strategy-run/confirm`, {
+    method: 'POST',
+    body: JSON.stringify({ executionId, confirmation, riskAcknowledged }),
     headers: commandId ? { 'X-Fleet-Command-Id': commandId } : undefined,
   })
 }

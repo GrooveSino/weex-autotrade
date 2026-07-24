@@ -145,6 +145,8 @@ for label, target in targets.items():
         "KeepAlive": True,
         "ThrottleInterval": 5,
         "ProcessType": "Background",
+        "SoftResourceLimits": {"NumberOfFiles": 8192},
+        "HardResourceLimits": {"NumberOfFiles": 8192},
         "EnvironmentVariables": service_environments[label],
         "StandardOutPath": str(logs_dir / f"{label}.out.log"),
         "StandardErrorPath": str(logs_dir / f"{label}.err.log"),

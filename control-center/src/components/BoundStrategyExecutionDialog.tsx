@@ -6,7 +6,7 @@ import type {
 import {
   ControlPlaneRequestError,
   cleanupBoundStrategyRun,
-  executeBoundStrategyExecution,
+  confirmBoundStrategyRun,
   listBoundStrategyExecutions,
   prepareBoundStrategyRun,
   stopBoundStrategyExecution,
@@ -160,13 +160,19 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setBusy(true)
     setError(null)
     try {
-      const started = await executeBoundStrategyExecution(
+      const confirmed = await confirmBoundStrategyRun(
         accountRef.current,
         execution.campaignId,
         confirmation,
         riskAcknowledged,
         commandId,
       )
+      if (confirmed.admissionState === 'capacity_full') {
+        update(confirmed.execution)
+        setError(`执行容量已满（${confirmed.capacity.activeExecutions}/${confirmed.capacity.maxActiveExecutions}）；当前预览仍有效，稍后直接再次确认即可。`)
+        return
+      }
+      const started = confirmed.execution
       update(started)
       onToastRef.current(`${accountRef.current.name} 的已绑定策略已提交执行；不会自动重试任何订单命令`)
       if (started.status === 'executing') onStartedRef.current(started)

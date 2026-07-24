@@ -67,4 +67,65 @@ export interface ControlPlaneHealth {
   apiReleaseId?: string | null
   executorConnected?: boolean
   executorGeneration?: string | null
+  activeExecutionCapacity: number
+  maxExecutionCapacity: number
+  activeNormalPhaseCapacity: number
+  maxNormalPhaseCapacity: number
+  queuedNormalPhaseCount: number
+  capacityRevision: number
+  activeNormalIo: number
+  maxNormalIo: number
+  activeEmergencyIo: number
+  maxEmergencyIo: number
+  activeProxyPhasePartitions: number
+  queuedProxyLimitedPhaseCount: number
+  normalPhaseQueueP50Ms: number
+  normalPhaseQueueP95Ms: number
+  sqliteWriteQueueCritical: number
+  sqliteWriteQueueLowPriority: number
+  sqliteWriteP95Ms: number
+  actorCount: number
+  eventLoopDelayP99Ms: number
+  openFileDescriptors: number
+  rssBytes: number
+  marketDataActiveLeases: number
+  marketDataSharedConnections: number
+  marketDataIdleConnections: number
+  privateOrderStreamActiveLeases: number
+  privateOrderStreams: number
+  historySyncQueued: number
+  historySyncRunning: number
+}
+
+export interface ExecutionCapacity {
+  activeExecutions: number
+  maxActiveExecutions: number
+  activeNormalPhases: number
+  maxNormalPhases: number
+  queuedNormalPhases: number
+  phaseStartRatePerSecond: number
+  perProxyGapSeconds: number
+  revision: number
+  activeNormalIo: number
+  maxNormalIo: number
+  activeEmergencyIo: number
+  maxEmergencyIo: number
+  activeProxyPhasePartitions: number
+  queuedProxyLimitedPhases: number
+  phaseQueueP50Ms: number
+  phaseQueueP95Ms: number
+  sqliteWriteQueueCritical: number
+  sqliteWriteQueueLowPriority: number
+  sqliteWriteP95Ms: number
+  actorCount: number
+  eventLoopDelayP99Ms: number
+  openFileDescriptors: number
+  rssBytes: number
+  marketDataActiveLeases: number
+  marketDataSharedConnections: number
+  marketDataIdleConnections: number
+  privateOrderStreamActiveLeases: number
+  privateOrderStreams: number
+  historySyncQueued: number
+  historySyncRunning: number
 }

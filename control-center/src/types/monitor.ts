@@ -38,6 +38,10 @@ export interface StrategyMonitorSnapshot {
   executorGeneration: string
   status: string
   phase: string
+  executionState: string | null
+  phaseQueuePosition: number | null
+  phaseQueueEstimatedStartAtMs: number | null
+  phaseQueueProxyLimited: boolean
   currentRun: number
   currentRound: number
   targetQuoteVolume: string

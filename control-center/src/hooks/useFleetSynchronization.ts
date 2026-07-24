@@ -3,6 +3,7 @@ import {
   controlPlaneEnabled,
   fetchBetaMarketSnapshot,
   fetchControlPlaneHealth,
+  fetchExecutionCapacity,
   fetchLocalUserSession,
   listAccountInstances,
   listVolumeStrategies,
@@ -20,6 +21,7 @@ export function useFleetSynchronization(state: FleetState) {
     localUser, setLocalUser, setLocalUserError, setLocalUserLoading,
     setControlPlaneConnected, setControlPlaneAdapter, setControlPlaneExecutionEnabled,
     setBoundStrategyExecutionEnabled, setInitialControlPlaneError,
+    setExecutionCapacity,
     setInitialControlPlaneSnapshotLoaded, setSchedulerMetrics, setLastGlobalSync,
     setBetaLoading, setBetaAvailable, setBetaSnapshot, setBetaReceivedAtMs,
     setPendingWebReleaseId, searchInputRef, betaSnapshotRef, betaReceivedAtRef,
@@ -141,6 +143,38 @@ export function useFleetSynchronization(state: FleetState) {
         setControlPlaneAdapter(health.adapter)
         setControlPlaneExecutionEnabled(health.executionEnabled)
         setBoundStrategyExecutionEnabled(health.boundStrategyExecutionEnabled)
+        setExecutionCapacity({
+          activeExecutions: health.activeExecutionCapacity,
+          maxActiveExecutions: health.maxExecutionCapacity,
+          activeNormalPhases: health.activeNormalPhaseCapacity,
+          maxNormalPhases: health.maxNormalPhaseCapacity,
+          queuedNormalPhases: health.queuedNormalPhaseCount,
+          phaseStartRatePerSecond: 0,
+          perProxyGapSeconds: 0,
+          revision: health.capacityRevision,
+          activeNormalIo: health.activeNormalIo,
+          maxNormalIo: health.maxNormalIo,
+          activeEmergencyIo: health.activeEmergencyIo,
+          maxEmergencyIo: health.maxEmergencyIo,
+          activeProxyPhasePartitions: health.activeProxyPhasePartitions,
+          queuedProxyLimitedPhases: health.queuedProxyLimitedPhaseCount,
+          phaseQueueP50Ms: health.normalPhaseQueueP50Ms,
+          phaseQueueP95Ms: health.normalPhaseQueueP95Ms,
+          sqliteWriteQueueCritical: health.sqliteWriteQueueCritical,
+          sqliteWriteQueueLowPriority: health.sqliteWriteQueueLowPriority,
+          sqliteWriteP95Ms: health.sqliteWriteP95Ms,
+          actorCount: health.actorCount,
+          eventLoopDelayP99Ms: health.eventLoopDelayP99Ms,
+          openFileDescriptors: health.openFileDescriptors,
+          rssBytes: health.rssBytes,
+          marketDataActiveLeases: health.marketDataActiveLeases,
+          marketDataSharedConnections: health.marketDataSharedConnections,
+          marketDataIdleConnections: health.marketDataIdleConnections,
+          privateOrderStreamActiveLeases: health.privateOrderStreamActiveLeases,
+          privateOrderStreams: health.privateOrderStreams,
+          historySyncQueued: health.historySyncQueued,
+          historySyncRunning: health.historySyncRunning,
+        })
         setInitialControlPlaneError(null)
         setInitialControlPlaneSnapshotLoaded(true)
       } catch (error: unknown) {
@@ -160,7 +194,21 @@ export function useFleetSynchronization(state: FleetState) {
     }
   }, [localUser, setAccounts, setBoundStrategyExecutionEnabled, setControlPlaneAdapter,
     setControlPlaneConnected, setControlPlaneExecutionEnabled, setInitialControlPlaneError,
-    setInitialControlPlaneSnapshotLoaded, setStrategies, setToast])
+    setExecutionCapacity, setInitialControlPlaneSnapshotLoaded, setStrategies, setToast])
+
+  useEffect(() => {
+    if (!controlPlaneEnabled || !localUser) return
+    let active = true
+    const loadCapacity = () => void fetchExecutionCapacity().then((capacity) => {
+      if (active) setExecutionCapacity(capacity)
+    }).catch(() => undefined)
+    loadCapacity()
+    const timer = window.setInterval(loadCapacity, 1_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [localUser, setExecutionCapacity])
 
   useEffect(() => {
     if (!controlPlaneEnabled || !localUser) return

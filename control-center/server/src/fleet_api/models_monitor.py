@@ -50,13 +50,17 @@ class ExecutionTimelineEntry(CamelModel):
 
 
 class StrategyMonitorSnapshot(CamelModel):
-    schema_version: int = 3
+    schema_version: int = 4
     instance_id: str
     session_id: str | None = None
     execution_id: str | None = None
     executor_generation: str
     status: str
     phase: str
+    execution_state: str | None = None
+    phase_queue_position: int | None = Field(default=None, ge=1)
+    phase_queue_estimated_start_at_ms: int | None = Field(default=None, gt=0)
+    phase_queue_proxy_limited: bool = False
     current_run: int = 0
     current_round: int = 0
     target_quote_volume: Decimal = Decimal(0)

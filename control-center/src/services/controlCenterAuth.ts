@@ -1,4 +1,4 @@
-import type { AccountInstance, ControlPlaneHealth, VolumeSessionProjection } from '../types'
+import type { AccountInstance, ControlPlaneHealth, ExecutionCapacity, VolumeSessionProjection } from '../types'
 import { apiRequest, type LocalUserSession } from './controlCenterCore'
 
 export async function fetchLocalUserSession(): Promise<LocalUserSession> {
@@ -30,4 +30,8 @@ export async function syncVolumeSession(sessionId: string): Promise<VolumeSessio
 
 export async function fetchControlPlaneHealth(): Promise<ControlPlaneHealth> {
   return apiRequest<ControlPlaneHealth>('/health')
+}
+
+export async function fetchExecutionCapacity(): Promise<ExecutionCapacity> {
+  return apiRequest<ExecutionCapacity>('/executor/capacity')
 }

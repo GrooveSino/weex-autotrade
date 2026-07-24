@@ -29,6 +29,7 @@ import { BetaSourceDialog } from './components/BetaSourceDialog'
 import { ExecutionDrawer } from './components/ExecutionDrawer'
 import { LogDrawer } from './components/LogDrawer'
 import { LocalLogin } from './components/LocalLogin'
+import { FleetCapacityBadge } from './components/FleetCapacityBadge'
 import { StrategyAssignmentDialog } from './components/StrategyAssignmentDialog'
 import { StrategyDialog } from './components/StrategyDialog'
 import { useFleetApp } from './hooks/useFleetApp'
@@ -95,8 +96,10 @@ function BetaStatus({ snapshot, available, loading, receivedAtMs }: BetaStatusPr
       </em>
     </span>
   )
-}function App() {
-  const { accounts, setAccounts, strategies, search, setSearch, filter, setFilter, selectedIds, refreshingIds, actioningIds, logAccount, setLogAccount, logSessionId, setLogSessionId, executionAccount, setExecutionAccount, accountDialogOpen, setAccountDialogOpen, editingAccount, setEditingAccount, strategyDialogOpen, setStrategyDialogOpen, betaSourceDialogOpen, setBetaSourceDialogOpen, strategyDialogInitialId, setStrategyDialogInitialId, assignmentAccounts, setAssignmentAccounts, closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen, stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, controlPlaneConnected, controlPlaneAdapter, boundStrategyExecutionEnabled, boundExecutionQueue, setBoundExecutionQueue, initialControlPlaneError, schedulerMetrics, betaSnapshot, betaAvailable, setBetaAvailable, betaLoading, setBetaLoading, betaReceivedAtMs, pendingWebReleaseId, localUser, localUserLoading, localUserError, loginRequired, login, searchInputRef, controlPlaneHydrating, executionDisabled, refreshBlockedByWorkflow, filteredAccounts, stats, canStartSelected, canPauseSelected, canStopSelected, selectOne, selectAllVisible, updateStatuses, toggleRunning, refreshOne, refreshAll, confirmClosePositions, saveAccount, deleteEditingAccount, closeAccountDialog, createStrategy, updateStrategy, deleteStrategy, assignStrategy, emergencyStop, logout } = useFleetApp()
+}
+
+function App() {
+  const { accounts, setAccounts, strategies, search, setSearch, filter, setFilter, selectedIds, refreshingIds, actioningIds, logAccount, setLogAccount, logSessionId, setLogSessionId, executionAccount, setExecutionAccount, accountDialogOpen, setAccountDialogOpen, editingAccount, setEditingAccount, strategyDialogOpen, setStrategyDialogOpen, betaSourceDialogOpen, setBetaSourceDialogOpen, strategyDialogInitialId, setStrategyDialogInitialId, assignmentAccounts, setAssignmentAccounts, closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen, stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, controlPlaneConnected, controlPlaneAdapter, boundStrategyExecutionEnabled, executionCapacity, boundExecutionQueue, setBoundExecutionQueue, initialControlPlaneError, schedulerMetrics, betaSnapshot, betaAvailable, setBetaAvailable, betaLoading, setBetaLoading, betaReceivedAtMs, pendingWebReleaseId, localUser, localUserLoading, localUserError, loginRequired, login, searchInputRef, controlPlaneHydrating, executionDisabled, refreshBlockedByWorkflow, filteredAccounts, stats, canStartSelected, canPauseSelected, canStopSelected, selectOne, selectAllVisible, updateStatuses, toggleRunning, refreshOne, refreshAll, confirmClosePositions, saveAccount, deleteEditingAccount, closeAccountDialog, createStrategy, updateStrategy, deleteStrategy, assignStrategy, emergencyStop, logout } = useFleetApp()
 
   if (loginRequired) return <LocalLogin loading={localUserLoading} error={localUserError} onSubmit={login} />
 
@@ -128,6 +131,7 @@ function BetaStatus({ snapshot, available, loading, receivedAtMs }: BetaStatusPr
           <span className={`scheduler-state ${schedulerMetrics.lastRoundFailed ? 'degraded' : ''}`} title="最近一轮账号调度状态">
             <TimerReset size={13} />{controlPlaneHydrating ? '等待调度快照' : `${schedulerMetrics.lastRoundDurationMs ?? '-'} ms · 峰值 ${schedulerMetrics.maxObservedParallelism}/${schedulerMetrics.maxParallelPolls}`}
           </span>
+          <FleetCapacityBadge capacity={executionCapacity} loading={controlPlaneHydrating} />
           <span className="clock-state">同步 {lastGlobalSync}</span>
           {controlPlaneEnabled && <button className="local-user" type="button" title="退出本机用户" onClick={() => void logout()}>{localUser}</button>}
           <button className="button emergency" type="button" onClick={() => setStopDialogOpen(true)}><Square size={13} fill="currentColor" />全部停止</button>

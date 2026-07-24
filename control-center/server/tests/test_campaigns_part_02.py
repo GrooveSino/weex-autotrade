@@ -102,6 +102,37 @@ def test_sqlite_projection_restores_wait_deadline_after_reopen(tmp_path) -> None
     assert snapshot.active_waits[0].deadline_at_ms == expected_deadline
     reopened.close()
 
+
+def test_monitor_projects_actor_phase_queue_without_raw_event_names() -> None:
+    journal = InMemoryCampaignJournal()
+    campaign = sample_campaign()
+    journal.create("ins-1", campaign, metadata(campaign))
+    journal.add_event(
+        campaign.campaign_id,
+        _sanitize_event(
+            {
+                "event": "actor_lifecycle",
+                "phase": "phase_queued",
+                "queue_phase": "open",
+                "queue_position": 3,
+                "estimated_start_at_ms": 12_000,
+                "queue_constraint": "proxy_cooldown",
+            }
+        ),
+    )
+
+    snapshot = StrategyMonitorService(journal, InMemoryTradeVolumeLedger(), "generation-1").snapshot("ins-1")
+
+    assert snapshot.execution_state == "phase_queued"
+    assert snapshot.phase == "正常阶段排队"
+    assert snapshot.phase_queue_position == 3
+    assert snapshot.phase_queue_estimated_start_at_ms == 12_000
+    assert snapshot.phase_queue_proxy_limited is True
+    assert snapshot.active_waits[-1].label == "正常开仓阶段排队"
+    assert "同代理阶段释放" in snapshot.active_waits[-1].detail
+    assert snapshot.timeline[-1].title == "正常阶段排队"
+    assert snapshot.timeline[-1].detail.startswith("等待正常开仓槽位")
+
 def test_monitor_complete_ledger_wins_over_execution_journal_projection() -> None:
     journal = InMemoryCampaignJournal()
     campaign = sample_campaign()

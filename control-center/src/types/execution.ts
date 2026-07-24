@@ -129,3 +129,26 @@ export interface StrategyRunPrepareResponse {
   triggerOrderCount: number
   cleanupConfirmation: string | null
 }
+
+export interface StrategyRunCapacity {
+  activeExecutions: number
+  maxActiveExecutions: number
+  activeNormalPhases: number
+  maxNormalPhases: number
+  queuedNormalPhases: number
+  revision: number
+}
+
+export interface StrategyRunPhaseQueue {
+  position: number | null
+  estimatedStartAtMs: number | null
+  proxyLimited: boolean
+}
+
+export interface StrategyRunConfirmResponse {
+  admissionState: 'admitted' | 'capacity_full'
+  executionId: string
+  execution: BetaCampaign
+  capacity: StrategyRunCapacity
+  phaseQueue: StrategyRunPhaseQueue | null
+}

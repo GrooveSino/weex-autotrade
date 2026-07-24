@@ -41,6 +41,8 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "child_status",
         "btc",
         "eth",
+        "queue_phase",
+        "queue_constraint",
     }
     decimal_fields = {
         "remaining_quote",
@@ -70,11 +72,13 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "next_check_ms",
         "started_at_ms",
         "deadline_at_ms",
+        "estimated_start_at_ms",
         "leverage",
         "fill_count",
         "submissions",
         "cancels",
         "requotes",
+        "queue_position",
     }
     boolean_fields = {
         "completed",

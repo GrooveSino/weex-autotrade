@@ -4,6 +4,7 @@ import { controlPlaneEnabled } from '../services/controlCenter'
 import type {
   AccountInstance,
   BetaMarketSnapshot,
+  ExecutionCapacity,
   SchedulerMetrics,
   StatusFilter,
   VolumeStrategy,
@@ -63,6 +64,7 @@ export function useFleetState() {
   const [controlPlaneAdapter, setControlPlaneAdapter] = useState(controlPlaneEnabled ? 'connecting' : 'browser-mock')
   const [controlPlaneExecutionEnabled, setControlPlaneExecutionEnabled] = useState(!controlPlaneEnabled)
   const [boundStrategyExecutionEnabled, setBoundStrategyExecutionEnabled] = useState(!controlPlaneEnabled)
+  const [executionCapacity, setExecutionCapacity] = useState<ExecutionCapacity | null>(null)
   const [boundExecutionQueue, setBoundExecutionQueue] = useState<AccountInstance[] | null>(null)
   const [initialControlPlaneSnapshotLoaded, setInitialControlPlaneSnapshotLoaded] = useState(!controlPlaneEnabled)
   const [initialControlPlaneError, setInitialControlPlaneError] = useState<string | null>(null)
@@ -93,6 +95,7 @@ export function useFleetState() {
     controlPlaneConnected, setControlPlaneConnected, controlPlaneAdapter, setControlPlaneAdapter,
     controlPlaneExecutionEnabled, setControlPlaneExecutionEnabled,
     boundStrategyExecutionEnabled, setBoundStrategyExecutionEnabled,
+    executionCapacity, setExecutionCapacity,
     boundExecutionQueue, setBoundExecutionQueue,
     initialControlPlaneSnapshotLoaded, setInitialControlPlaneSnapshotLoaded,
     initialControlPlaneError, setInitialControlPlaneError,

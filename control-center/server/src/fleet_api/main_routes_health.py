@@ -3,8 +3,16 @@ from __future__ import annotations
 from fastapi import HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from .executor_process_metrics import process_snapshot
 from .execution import AllocationUnavailable
-from .models import BetaMarketSnapshot, BetaSourceSettings, BetaSourceSettingsUpdate, HealthResponse, SchedulerMetrics
+from .models import (
+    BetaMarketSnapshot,
+    BetaSourceSettings,
+    BetaSourceSettingsUpdate,
+    ExecutionCapacityResponse,
+    HealthResponse,
+    SchedulerMetrics,
+)
 from .service import FleetError, TelemetryUnavailable
 
 from fastapi import FastAPI
@@ -43,6 +51,16 @@ def register_health_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     strategy_run_plan = ctx.strategy_run_plan
     require_command_id = ctx.require_command_id
 
+    def capacity_details():  # type: ignore[no-untyped-def]
+        capacity = campaign_manager.capacity_snapshot()
+        io = campaign_manager.io_snapshot()
+        writes = campaign_manager.write_coordinator.snapshot()
+        actors = campaign_manager.actor_runtime_snapshot()
+        market_data, private_orders = campaign_manager.connection_snapshots()
+        history = ctx.trade_history_scheduler.metrics()
+        process = process_snapshot()
+        return capacity, io, writes, actors, market_data, private_orders, history, process
+
     @app.exception_handler(FleetError)
     async def fleet_error_handler(_request: Request, exc: FleetError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
@@ -56,6 +74,7 @@ def register_health_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     def health() -> HealthResponse:
         journal_metrics = campaign_journal.monitor_metrics()
         stream_metrics = strategy_monitor.metrics()
+        capacity, io, writes, actors, market_data, private_orders, history, process = capacity_details()
         ledger_lag = 0
         for record in campaign_journal.list_all():
             session_id = record.metadata.get("session_id")
@@ -92,11 +111,75 @@ def register_health_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 if journal_metrics.get("last_event_at_ms") is None
                 else int(journal_metrics["last_event_at_ms"])
             ),
+            active_execution_capacity=capacity.active_executions,
+            max_execution_capacity=capacity.max_active_executions,
+            active_normal_phase_capacity=capacity.active_normal_phases,
+            max_normal_phase_capacity=capacity.max_normal_phases,
+            queued_normal_phase_count=capacity.queued_normal_phases,
+            capacity_revision=capacity.revision,
+            active_normal_io=io.active_normal,
+            max_normal_io=io.max_normal,
+            active_emergency_io=io.active_emergency,
+            max_emergency_io=io.max_emergency,
+            active_proxy_phase_partitions=capacity.active_proxy_partitions,
+            queued_proxy_limited_phase_count=capacity.queued_proxy_limited_phases,
+            normal_phase_queue_p50_ms=capacity.phase_queue_p50_ms,
+            normal_phase_queue_p95_ms=capacity.phase_queue_p95_ms,
+            sqlite_write_queue_critical=writes.queued_critical,
+            sqlite_write_queue_low_priority=writes.queued_low_priority,
+            sqlite_write_p95_ms=writes.p95_latency_ms,
+            actor_count=actors.actor_count,
+            event_loop_delay_p99_ms=actors.event_loop_delay_p99_ms,
+            open_file_descriptors=process.open_file_descriptors,
+            rss_bytes=process.rss_bytes,
+            market_data_active_leases=market_data.active_leases,
+            market_data_shared_connections=market_data.shared_connections,
+            market_data_idle_connections=market_data.idle_connections,
+            private_order_stream_active_leases=private_orders.active_leases,
+            private_order_streams=private_orders.open_streams,
+            history_sync_queued=history.queued,
+            history_sync_running=history.running,
         )
 
     @app.get("/_internal/executor-health", response_model=HealthResponse, include_in_schema=False)
     def executor_health() -> HealthResponse:
         return health()
+
+    @app.get("/api/v1/executor/capacity", response_model=ExecutionCapacityResponse)
+    def execution_capacity() -> ExecutionCapacityResponse:
+        capacity, io, writes, actors, market_data, private_orders, history, process = capacity_details()
+        return ExecutionCapacityResponse(
+            active_executions=capacity.active_executions,
+            max_active_executions=capacity.max_active_executions,
+            active_normal_phases=capacity.active_normal_phases,
+            max_normal_phases=capacity.max_normal_phases,
+            queued_normal_phases=capacity.queued_normal_phases,
+            phase_start_rate_per_second=capacity.phase_start_rate_per_second,
+            per_proxy_gap_seconds=capacity.per_proxy_gap_seconds,
+            revision=capacity.revision,
+            active_normal_io=io.active_normal,
+            max_normal_io=io.max_normal,
+            active_emergency_io=io.active_emergency,
+            max_emergency_io=io.max_emergency,
+            active_proxy_phase_partitions=capacity.active_proxy_partitions,
+            queued_proxy_limited_phases=capacity.queued_proxy_limited_phases,
+            phase_queue_p50_ms=capacity.phase_queue_p50_ms,
+            phase_queue_p95_ms=capacity.phase_queue_p95_ms,
+            sqlite_write_queue_critical=writes.queued_critical,
+            sqlite_write_queue_low_priority=writes.queued_low_priority,
+            sqlite_write_p95_ms=writes.p95_latency_ms,
+            actor_count=actors.actor_count,
+            event_loop_delay_p99_ms=actors.event_loop_delay_p99_ms,
+            open_file_descriptors=process.open_file_descriptors,
+            rss_bytes=process.rss_bytes,
+            market_data_active_leases=market_data.active_leases,
+            market_data_shared_connections=market_data.shared_connections,
+            market_data_idle_connections=market_data.idle_connections,
+            private_order_stream_active_leases=private_orders.active_leases,
+            private_order_streams=private_orders.open_streams,
+            history_sync_queued=history.queued,
+            history_sync_running=history.running,
+        )
 
     @app.get("/api/v1/commands/{command_id}", response_model=dict[str, str])
     def command_status(command_id: str, request: Request) -> dict[str, str]:

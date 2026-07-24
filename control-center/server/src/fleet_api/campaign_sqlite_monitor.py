@@ -14,11 +14,7 @@ class SQLiteCampaignJournalMonitorMixin:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._connection.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
-                    (campaign_id.lower(),),
-                ).fetchone()
-                sequence = int(row[0]) + 1
+                sequence = self._reserve_sequence(campaign_id.lower())
                 stored_event = {**event, "sequence": sequence}
                 self._connection.execute(
                     "INSERT INTO beta_campaign_events(campaign_id, sequence, payload, created_at_ms) "
@@ -67,11 +63,7 @@ class SQLiteCampaignJournalMonitorMixin:
                 ).fetchone()
                 if existing is not None and str(existing[0]) != owner_user_id:
                     raise UnsafeOperation("execution monitor owner mismatch")
-                sequence_row = self._connection.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
-                    (normalized_campaign_id,),
-                ).fetchone()
-                sequence = int(sequence_row[0]) + 1
+                sequence = self._reserve_sequence(normalized_campaign_id)
                 stored_event = {**event, "sequence": sequence}
                 event_json = json.dumps(stored_event, separators=(",", ":"))
                 projected_state = state
@@ -142,6 +134,19 @@ class SQLiteCampaignJournalMonitorMixin:
             ).fetchone()
         return self._projection(row) if row else None
 
+    def _reserve_sequence(self, campaign_id: str) -> int:
+        self._connection.execute(
+            "UPDATE campaign_event_sequences SET next_sequence = next_sequence + 1 WHERE campaign_id = ?",
+            (campaign_id,),
+        )
+        row = self._connection.execute(
+            "SELECT next_sequence FROM campaign_event_sequences WHERE campaign_id = ?",
+            (campaign_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(campaign_id)
+        return int(row[0]) - 1
+
     def replace_monitor_projection(self, projection: ExecutionMonitorProjection) -> None:
         with self._lock, self._connection:
             existing = self._connection.execute(
@@ -197,7 +202,7 @@ class SQLiteCampaignJournalMonitorMixin:
                     (normalized_campaign_id,),
                 ).fetchone()
                 latest_row = self._connection.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM beta_campaign_events WHERE campaign_id = ?",
+                    "SELECT COALESCE(next_sequence - 1, 0) FROM campaign_event_sequences WHERE campaign_id = ?",
                     (normalized_campaign_id,),
                 ).fetchone()
                 query = "SELECT payload FROM beta_campaign_events WHERE campaign_id = ?"

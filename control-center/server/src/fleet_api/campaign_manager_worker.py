@@ -8,57 +8,71 @@ from typing import Any
 
 from weex_cli.beta_campaign import BetaVolumeCampaignStore, inspect_live_account, live_profile_fingerprint
 from weex_cli.beta_volume import BetaVolumePlanStore
-from weex_cli.execution_progress import EXECUTION_PROGRESS_PROJECTION_VERSION
 from weex_cli.gateway import WeexGateway
 from weex_cli.live_profile import LiveProfile
 from weex_cli.live_websocket import WeexCampaignWebSocketRuntime
 
 from .campaign_contracts import CampaignRecord
-from .campaign_events import _publishes_fleet_snapshot, _sanitize_event, submission_attempted
+from .campaign_events import _sanitize_event, submission_attempted
 from .campaign_helpers import (
+    _account_boundary_is_flat,
     _available_quote,
     _available_quote_from_readiness,
-    _account_boundary_is_flat,
     _campaign_result_metrics,
     _reconciliation_required,
     _worker_exception_reason,
 )
+from .campaign_monitor_publish import append_monitor_event_direct, publish_monitor_event
 from .campaign_profile import build_live_profile_gateway
 from .campaign_recovery import acknowledge_recovered_uncertain, recover_uncertain_before_preview
+from .execution_io import BoundedGateway
 from .models import BetaCampaignStatus
-from .ownership import LEGACY_OWNER_USER_ID
 from .service import UnsafeOperation, ValidationFailed
 from .vault import CredentialMaterial
+
 
 class CampaignWorkerRuntimeMixin:
     def _run(self, record: CampaignRecord, material: CredentialMaterial, stop: threading.Event) -> None:
         campaign_id = record.campaign_id
         profile: LiveProfile | None = None
-        gateway: WeexGateway | None = None
-        snapshot_gateway: WeexGateway | None = None
-        lanes: dict[str, WeexGateway] = {}
+        gateway: BoundedGateway | None = None
+        snapshot_gateway: BoundedGateway | None = None
+        lanes: dict[str, BoundedGateway] = {}
         websocket_runtime: WeexCampaignWebSocketRuntime | None = None
+        phase_keys: dict[tuple[int, str], str] = {}
+        emergency_io = threading.Event()
 
         def event_sink(payload: dict[str, Any]) -> None:
-            event = _sanitize_event(payload)
-            sequence = self._append_monitor_event(record, event)
-            event["sequence"] = sequence
-            self._notify_progress(record.instance_id, event)
-            if _publishes_fleet_snapshot(str(event["name"])):
-                self._notify(record.instance_id)
+            name = str(payload.get("event") or payload.get("name") or "")
+            if name.startswith("safe_stop"):
+                emergency_io.set()
+            round_number = payload.get("round")
+            if isinstance(round_number, int):
+                if name == "hold_started":
+                    self.phase_pacer.finish(phase_keys.get((round_number, "open"), ""))
+                elif name in {"cycle_completed", "cycle_stopped"}:
+                    self.phase_pacer.finish(phase_keys.get((round_number, "close"), ""))
+            try:
+                event = _sanitize_event(payload)
+                publish_monitor_event(self, record, event)
+            except Exception:
+                return
 
         def phase_waiter(plan_id: str, phase: str, round_number: int) -> bool:
             key = f"{record.campaign_id}:{plan_id}:{round_number}:{phase}"
+            phase_keys[(round_number, phase)] = key
             return self.phase_pacer.wait(
                 key,
                 phase=phase,
                 round_number=round_number,
+                proxy_key=(profile.proxy_url if profile is not None and profile.proxy_url else "direct"),
                 stop_event=stop,
                 event_sink=event_sink,
             )
 
         try:
-            profile, gateway = self._profile_and_gateway(material)
+            profile, raw_gateway = self._profile_and_gateway(material)
+            gateway = BoundedGateway(raw_gateway, self.io_budget, emergency_io)
             provider = self.beta_provider_factory()
             snapshot_gateway = gateway.fork()
             lanes = {"BTC": gateway.fork(), "ETH": gateway.fork()}
@@ -67,12 +81,13 @@ class CampaignWorkerRuntimeMixin:
             # isolated from the facade for every other dependency.
             from . import campaigns as campaign_api
 
-            websocket_runtime = campaign_api.WeexCampaignWebSocketRuntime(
-                snapshot_gateway,
-                profile.settings.require_credentials(),
-                proxy_url=profile.proxy_url,
-            )
-            websocket_runtime.start()
+            if self.settings.live_campaign_websockets_enabled:
+                websocket_runtime = campaign_api.WeexCampaignWebSocketRuntime(
+                    snapshot_gateway,
+                    profile.settings.require_credentials(),
+                    proxy_url=profile.proxy_url,
+                )
+                websocket_runtime.start()
             result = campaign_api.LiveBetaVolumeCampaignService(
                 gateway,
                 provider,
@@ -159,6 +174,7 @@ class CampaignWorkerRuntimeMixin:
                 self._stops.pop(campaign_id, None)
                 self._futures.pop(campaign_id, None)
                 lease = self._leases.pop(campaign_id, None)
+            self.phase_pacer.release_execution(campaign_id)
             if lease is not None:
                 lease.release()
             self._notify(record.instance_id)
@@ -178,15 +194,7 @@ class CampaignWorkerRuntimeMixin:
         record: CampaignRecord,
         event: dict[str, Any],
     ) -> int:
-        return self.journal.append_and_project(
-            record.campaign_id,
-            event,
-            owner_user_id=str(record.metadata.get("owner_user_id") or LEGACY_OWNER_USER_ID),
-            account_id=record.instance_id,
-            session_id=str(record.metadata["session_id"]) if record.metadata.get("session_id") else None,
-            executor_generation=self.executor_generation,
-            projection_version=EXECUTION_PROGRESS_PROJECTION_VERSION,
-        )
+        return self.write_coordinator.critical(lambda: append_monitor_event_direct(self, record, event))
 
     def _require_record(self, instance_id: str, campaign_id: str) -> CampaignRecord:
         record = self.journal.get(campaign_id)

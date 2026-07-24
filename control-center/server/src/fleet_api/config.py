@@ -43,7 +43,21 @@ class ControlPlaneSettings:
     beta_background_refresh_enabled: bool = False
     live_campaigns_enabled: bool = False
     live_trading_enabled: bool = False
-    live_campaign_worker_count: int = 1
+    # Legacy blocking worker count. New admission is governed by the explicit
+    # active-execution and normal-phase budgets below.
+    live_campaign_worker_count: int = 200
+    max_active_executions: int = 200
+    normal_phase_max_concurrency: int = 20
+    normal_phase_starts_per_second: float = 4
+    normal_phase_proxy_gap_seconds: float = 5
+    execution_io_normal_capacity: int = 64
+    execution_io_emergency_capacity: int = 32
+    # The async actor runtime owns new production Campaign lifecycles.  Tests
+    # can keep the legacy facade selected while exercising historical fixtures.
+    async_actor_runtime_enabled: bool = False
+    # The REST fallback is the Fleet-scale default. A public/private socket
+    # pair per task would turn 200 logical executions into 400 idle streams.
+    live_campaign_websockets_enabled: bool = False
     execution_phase_gap_seconds: float = 5
     execution_phase_jitter_seconds: float = 15
     campaign_data_directory: Path = Path("server/data/beta-campaigns")
@@ -70,6 +84,16 @@ class ControlPlaneSettings:
                 raise ValueError("weex-live requires FLEET_STORAGE=sqlite")
         if self.live_campaign_worker_count < 1:
             raise ValueError("FLEET_LIVE_CAMPAIGN_WORKERS must be at least 1")
+        if self.max_active_executions < 1:
+            raise ValueError("FLEET_MAX_ACTIVE_EXECUTIONS must be at least 1")
+        if self.normal_phase_max_concurrency < 1:
+            raise ValueError("FLEET_NORMAL_PHASE_MAX_CONCURRENCY must be at least 1")
+        if self.normal_phase_starts_per_second <= 0:
+            raise ValueError("FLEET_NORMAL_PHASE_STARTS_PER_SECOND must be greater than 0")
+        if self.normal_phase_proxy_gap_seconds < 0:
+            raise ValueError("FLEET_NORMAL_PHASE_PROXY_GAP_SECONDS cannot be negative")
+        if self.execution_io_normal_capacity < 1 or self.execution_io_emergency_capacity < 1:
+            raise ValueError("Fleet execution I/O capacities must be at least 1")
         if self.execution_phase_gap_seconds < 0 or self.execution_phase_jitter_seconds < 0:
             raise ValueError("execution phase pacing intervals cannot be negative")
         if self.mock_tick_interval_seconds < 0.25:
@@ -147,15 +171,23 @@ class ControlPlaneSettings:
             beta_background_refresh_enabled=_as_bool(os.environ.get("FLEET_BETA_BACKGROUND_REFRESH_ENABLED", "true")),
             live_campaigns_enabled=_as_bool(os.environ.get("FLEET_LIVE_CAMPAIGNS_ENABLED", "false")),
             live_trading_enabled=_as_bool(os.environ.get("WEEX_LIVE_TRADING_ENABLED", "false")),
-            live_campaign_worker_count=int(os.environ.get("FLEET_LIVE_CAMPAIGN_WORKERS", "1")),
+            live_campaign_worker_count=int(os.environ.get("FLEET_LIVE_CAMPAIGN_WORKERS", "200")),
+            max_active_executions=int(os.environ.get("FLEET_MAX_ACTIVE_EXECUTIONS", "200")),
+            normal_phase_max_concurrency=int(os.environ.get("FLEET_NORMAL_PHASE_MAX_CONCURRENCY", "20")),
+            normal_phase_starts_per_second=float(os.environ.get("FLEET_NORMAL_PHASE_STARTS_PER_SECOND", "4")),
+            normal_phase_proxy_gap_seconds=float(os.environ.get("FLEET_NORMAL_PHASE_PROXY_GAP_SECONDS", "5")),
+            execution_io_normal_capacity=int(os.environ.get("FLEET_EXECUTION_IO_NORMAL_CAPACITY", "64")),
+            execution_io_emergency_capacity=int(os.environ.get("FLEET_EXECUTION_IO_EMERGENCY_CAPACITY", "32")),
+            async_actor_runtime_enabled=_as_bool(os.environ.get("FLEET_ASYNC_ACTOR_RUNTIME_ENABLED", "true")),
+            live_campaign_websockets_enabled=_as_bool(
+                os.environ.get("FLEET_LIVE_CAMPAIGN_WEBSOCKETS_ENABLED", "false")
+            ),
             execution_phase_gap_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_GAP_SECONDS", "5")),
             execution_phase_jitter_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_JITTER_SECONDS", "15")),
             campaign_data_directory=Path(
                 os.environ.get("FLEET_CAMPAIGN_DATA_DIR", "server/data/beta-campaigns")
             ).expanduser(),
-            executor_socket=Path(
-                os.environ.get("FLEET_EXECUTOR_SOCKET", "run/weex-fleet-executor.sock")
-            ).expanduser(),
+            executor_socket=Path(os.environ.get("FLEET_EXECUTOR_SOCKET", "run/weex-fleet-executor.sock")).expanduser(),
             local_user_auth_required=_as_bool(os.environ.get("FLEET_LOCAL_USER_AUTH_REQUIRED", "true")),
             users_toml_path=Path(
                 os.environ.get("FLEET_USERS_TOML", "~/Library/Application Support/WEEXFleet/users.toml")

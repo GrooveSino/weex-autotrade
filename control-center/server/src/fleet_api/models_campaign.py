@@ -49,6 +49,33 @@ class BoundStrategyExecutionExecuteRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=200)
 
 
+class StrategyRunConfirmRequest(BoundStrategyExecutionExecuteRequest):
+    execution_id: str = Field(min_length=1, max_length=128)
+
+
+class StrategyRunCapacity(CamelModel):
+    active_executions: int = Field(ge=0)
+    max_active_executions: int = Field(ge=1)
+    active_normal_phases: int = Field(ge=0)
+    max_normal_phases: int = Field(ge=1)
+    queued_normal_phases: int = Field(ge=0)
+    revision: int = Field(ge=0)
+
+
+class StrategyRunPhaseQueue(CamelModel):
+    position: int | None = Field(default=None, ge=1)
+    estimated_start_at_ms: int | None = Field(default=None, gt=0)
+    proxy_limited: bool = False
+
+
+class StrategyRunConfirmResponse(CamelModel):
+    admission_state: Literal["admitted", "capacity_full"]
+    execution_id: str
+    execution: BetaCampaignView
+    capacity: StrategyRunCapacity
+    phase_queue: StrategyRunPhaseQueue | None = None
+
+
 class BoundStrategyExecutionStopRequest(CamelModel):
     confirmation: str = Field(min_length=1, max_length=200)
 

@@ -42,6 +42,11 @@ class SQLiteCampaignJournalBase:
                 PRIMARY KEY(campaign_id, sequence),
                 FOREIGN KEY(campaign_id) REFERENCES beta_campaigns(campaign_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS campaign_event_sequences (
+                campaign_id TEXT PRIMARY KEY,
+                next_sequence INTEGER NOT NULL,
+                FOREIGN KEY(campaign_id) REFERENCES beta_campaigns(campaign_id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS execution_monitor_projections (
                 owner_user_id TEXT NOT NULL,
                 account_id TEXT NOT NULL,
@@ -57,6 +62,13 @@ class SQLiteCampaignJournalBase:
             CREATE INDEX IF NOT EXISTS idx_execution_monitor_owner_account
                 ON execution_monitor_projections(owner_user_id, account_id, updated_at_ms DESC);
             """
+        )
+        self._connection.execute(
+            """INSERT OR IGNORE INTO campaign_event_sequences(campaign_id, next_sequence)
+            SELECT campaigns.campaign_id, COALESCE(MAX(events.sequence), 0) + 1
+            FROM beta_campaigns AS campaigns
+            LEFT JOIN beta_campaign_events AS events ON events.campaign_id = campaigns.campaign_id
+            GROUP BY campaigns.campaign_id"""
         )
         self._connection.commit()
         self._monitor_transaction_failures = 0
@@ -82,6 +94,10 @@ class SQLiteCampaignJournalBase:
                             now_ms,
                             now_ms,
                         ),
+                    )
+                    self._connection.execute(
+                        "INSERT INTO campaign_event_sequences(campaign_id, next_sequence) VALUES (?, 1)",
+                        (campaign.campaign_id,),
                     )
             except sqlite3.IntegrityError as exc:
                 raise UnsafeOperation("campaign ID already exists") from exc
