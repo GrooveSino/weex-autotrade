@@ -36,5 +36,10 @@ else
 fi
 [[ -f "${target}/index.html" && -f "${target}/release.json" ]] || { print -u2 "invalid web release: ${target}"; exit 1; }
 ln -sfn "${target}" "${current_link}.next"
-mv -f -h "${current_link}.next" "${current_link}"
+python3 - "${current_link}.next" "${current_link}" <<'PY'
+import os
+import sys
+
+os.replace(sys.argv[1], sys.argv[2])
+PY
 print "web release rollback active: ${target:t}"

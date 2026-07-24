@@ -120,7 +120,12 @@ PY
 
 mv "${stage_dir}" "${release_dir}"
 ln -sfn "${release_dir}" "${current_link}.next"
-mv -f -h "${current_link}.next" "${current_link}"
+"${python_bin}" - "${current_link}.next" "${current_link}" <<'PY'
+import os
+import sys
+
+os.replace(sys.argv[1], sys.argv[2])
+PY
 
 "${python_bin}" - "${web_releases}" "${current_link}" <<'PY'
 from __future__ import annotations
