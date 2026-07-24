@@ -27,6 +27,7 @@ def register_account_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     publish_snapshot = ctx.publish_snapshot
     projected_instances = ctx.projected_instances
     trade_history_scheduler = ctx.trade_history_scheduler
+    strategy_run_lifecycle = ctx.strategy_run_lifecycle
 
     @app.get("/api/v1/instances", response_model=list[AccountInstance])
     def list_instances() -> list[AccountInstance]:
@@ -93,4 +94,9 @@ def register_account_routes(app: FastAPI, ctx: FleetAppContext) -> None:
 
     @app.get("/api/v1/instances/{instance_id}", response_model=AccountInstance)
     def get_instance(instance_id: str) -> AccountInstance:
-        return project_instance_session(service.get_instance(instance_id), volume_ledger, strategy_monitor)
+        return project_instance_session(
+            service.get_instance(instance_id),
+            volume_ledger,
+            strategy_monitor,
+            strategy_run_lifecycle,
+        )

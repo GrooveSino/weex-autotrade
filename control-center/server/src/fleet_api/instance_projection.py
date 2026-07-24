@@ -51,23 +51,25 @@ def project_instance_session(
         strategy_verified = Decimal(str(instance.volume.lifetime))
         strategy_remaining = max(strategy_target - strategy_verified, Decimal(0))
         target_reached = instance.volume.complete and strategy_remaining <= 0
-    elif active is not None:
-        strategy_verified = Decimal(str(active["verified_quote_volume"]))
-        strategy_remaining = Decimal(str(active["remaining_quote_volume"]))
-        target_reached = False
-        strategy_verified, strategy_remaining, progress_source, progress_updated_at_ms, strategy_progress = (
-            _apply_monitor_progress(
-                instance,
-                active,
-                strategy_monitor,
-                strategy_target,
-                strategy_verified,
-                strategy_remaining,
-                progress_source,
-                progress_updated_at_ms,
-                strategy_progress,
+    elif (current_run := active or _matching_terminal_run(instance, last_run)) is not None:
+        strategy_verified = Decimal(str(current_run["verified_quote_volume"]))
+        strategy_remaining = max(strategy_target - strategy_verified, Decimal(0))
+        target_reached = str(current_run.get("status")) == "completed" and strategy_remaining <= 0
+        progress_source = "ledger" if strategy_verified > 0 else "pending"
+        if active is not None:
+            strategy_verified, strategy_remaining, progress_source, progress_updated_at_ms, strategy_progress = (
+                _apply_monitor_progress(
+                    instance,
+                    active,
+                    strategy_monitor,
+                    strategy_target,
+                    strategy_verified,
+                    strategy_remaining,
+                    progress_source,
+                    progress_updated_at_ms,
+                    strategy_progress,
+                )
             )
-        )
     else:
         strategy_verified = Decimal(0)
         strategy_remaining = strategy_target
@@ -106,6 +108,16 @@ def project_instance_session(
             "execution_lifecycle": lifecycle_projection,
         }
     )
+
+
+def _matching_terminal_run(instance: AccountInstance, last_run: dict[str, Any] | None) -> dict[str, Any] | None:
+    if last_run is None or last_run.get("strategy_id") != instance.strategy.id:
+        return None
+    try:
+        version = int(last_run.get("strategy_version"))
+    except (TypeError, ValueError):
+        return None
+    return last_run if version == instance.strategy.version else None
 
 
 def _lifecycle_account_state(instance: AccountInstance, lifecycle: Any) -> tuple[InstanceStatus, str]:

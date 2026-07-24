@@ -43,6 +43,10 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     projected_instances = ctx.projected_instances
     combined_log_updates = ctx.combined_log_updates
     strategy_run_plan = ctx.strategy_run_plan
+    strategy_run_lifecycle = ctx.strategy_run_lifecycle
+
+    def projected(instance: AccountInstance) -> AccountInstance:
+        return project_instance_session(instance, volume_ledger, strategy_monitor, strategy_run_lifecycle)
 
     @app.patch("/api/v1/instances/{instance_id}", response_model=AccountInstance)
     async def update_instance(instance_id: str, payload: UpdateInstanceRequest) -> AccountInstance:
@@ -90,7 +94,7 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                     finished_at_ms=time.time_ns() // 1_000_000,
                     final_lifetime_quote_volume=aggregate.lifetime,
                 )
-            return project_instance_session(updated, volume_ledger, strategy_monitor)
+            return projected(updated)
         finally:
             await publish_snapshot()
 
@@ -186,7 +190,7 @@ def register_instance_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     async def refresh_instance(instance_id: str) -> AccountInstance:
         updated = await runtime.refresh_instance(instance_id)
         await publish_snapshot()
-        return updated
+        return projected(updated)
 
     @app.get("/api/v1/instances/{instance_id}/logs", response_model=list[LogLine])
     def instance_logs(instance_id: str, limit: int = Query(default=200, ge=1, le=500)) -> list[LogLine]:
