@@ -119,7 +119,6 @@ def test_initial_prepare_reuses_lifecycle_boundary_for_preview(tmp_path, monkeyp
 
         app.state.campaign_manager.inspect_bound_strategy_boundary = boundary
         prepared = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
-
         assert prepared.status_code == 200
         assert prepared.json()["disposition"] == "ready"
         assert reads == 1
@@ -190,6 +189,8 @@ def test_lifetime_prepare_uses_verified_ledger_while_baseline_audit_resumes(tmp_
                 "targetMode": "lifetime",
                 "targetVolumeQuoteMin": "12000.00",
                 "targetVolumeQuoteMax": "19000.00",
+                "roundIntervalMinSeconds": 3600,
+                "roundIntervalMaxSeconds": 10800,
             }
         )
         strategy = api.post("/api/v1/strategies", json=request).json()

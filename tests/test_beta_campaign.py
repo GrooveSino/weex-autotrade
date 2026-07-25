@@ -164,6 +164,7 @@ def service(
     fingerprint: str = "profile-1234567890",
     delays: list[float] | None = None,
     gateway: Gateway | None = None,
+    now_ms=lambda: 1000,
 ) -> LiveBetaVolumeCampaignService:
     return LiveBetaVolumeCampaignService(
         gateway or Gateway(),  # type: ignore[arg-type]
@@ -172,7 +173,7 @@ def service(
         BetaVolumePlanStore(tmp_path / "children"),
         profile_fingerprint=fingerprint,
         child_executor=executor,
-        now_ms=lambda: 1000,
+        now_ms=now_ms,
         sleep=(delays if delays is not None else []).append,
     )
 
@@ -210,11 +211,11 @@ def test_campaign_normalizes_round_and_binds_the_authorized_ceiling(allocation: 
     [
         ({"hold_min": 3, "hold_max": 2}, "hold range"),
         ({"hold_min": -1}, "hold range"),
-        ({"hold_max": 3601}, "hold range"),
+        ({"hold_max": 2_592_001}, "hold range"),
         ({"hold_min": float("nan")}, "hold range"),
         ({"round_gap_min": 3, "round_gap_max": 2}, "round_gap range"),
         ({"round_gap_min": -1}, "round_gap range"),
-        ({"round_gap_max": 3601}, "round_gap range"),
+        ({"round_gap_max": 2_592_001}, "round_gap range"),
         ({"round_gap_max": float("inf")}, "round_gap range"),
     ],
 )
@@ -344,6 +345,29 @@ def test_campaign_retries_only_read_failures_before_child_claim(tmp_path: Path, 
     assert result["status"] == "completed"
     assert calls == 3
     assert delays == [1, 2]
+
+
+def test_confirmed_campaign_does_not_expire_mid_run(tmp_path: Path, allocation: BetaAllocation) -> None:
+    campaign = make_campaign(allocation, target="400", round_quote="200", max_runs=2)
+    clock = [1000]
+    calls = 0
+
+    def execute_child(_plan) -> dict:
+        nonlocal calls
+        calls += 1
+        clock[0] = campaign.expires_at_ms + 1
+        if calls == 1:
+            return authoritative_result("0", status="stopped", reason="round_limit_exhausted")
+        return authoritative_result("400")
+
+    campaign_store = BetaVolumeCampaignStore(tmp_path / "campaigns")
+    campaign_store.create(campaign)
+    runner = service(tmp_path, allocation, execute_child, now_ms=lambda: clock[0])
+
+    result = runner.execute(campaign)
+
+    assert result["status"] == "completed"
+    assert result["executed_quote_volume"] == "400"
 
 
 def test_campaign_child_planning_recovers_from_transient_market_reads(

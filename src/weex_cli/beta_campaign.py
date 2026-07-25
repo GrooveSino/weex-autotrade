@@ -37,8 +37,9 @@ DEFAULT_CAMPAIGN_DIRECTORY = Path("data/beta-volume-campaigns")
 DEFAULT_CHILD_PLAN_DIRECTORY = Path("data/beta-volume-campaign-plans")
 DEFAULT_AUTHORIZATION_MINUTES = 360
 MAX_CAMPAIGN_RUNS = 20
-MAX_HOLD_SECONDS = 3600.0
-MAX_ROUND_GAP_SECONDS = 3600.0
+MAX_STRATEGY_WAIT_SECONDS = 2_592_000.0
+MAX_HOLD_SECONDS = MAX_STRATEGY_WAIT_SECONDS
+MAX_ROUND_GAP_SECONDS = MAX_STRATEGY_WAIT_SECONDS
 DEFAULT_MAX_POSITION_QUOTE = "1200"
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_RECOVERY_ATTEMPTS = 3
@@ -488,9 +489,6 @@ class LiveBetaVolumeCampaignService:
                 return self._finish(campaign, "stopped", "stop_requested", total_quote, child_results, started_ms)
             if total_quote >= campaign.target_turnover_quote:
                 break
-            if self.now_ms() >= campaign.expires_at_ms:
-                return self._finish(campaign, "stopped", "campaign_expired", total_quote, child_results, started_ms)
-
             remaining = campaign.target_turnover_quote - total_quote
             self._emit(
                 "campaign_child_planning_started",
