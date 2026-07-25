@@ -29,6 +29,7 @@ from fleet_api.execution import (
 from fleet_api.market.beta_allocation import HttpBetaAllocationProvider
 from fleet_api.market.beta_source import BetaSourceRuntime, InMemoryBetaSourceStore, SQLiteBetaSourceStore
 from fleet_api.market.campaign_beta_provider import CachedCampaignBetaProvider
+from fleet_api.market.weex_readonly import build_readonly_gateway
 from fleet_api.market.weex_readonly_adapter import WeexReadonlyAccountTelemetryAdapterFactory
 from fleet_api.models import BetaSourceSettings
 from fleet_api.monitoring.events import InstanceEventBroker, StrategyMonitorEventBroker
@@ -44,6 +45,7 @@ from fleet_api.volume.core.volume_history import (
     SessionVolumeService,
     SQLiteTradeVolumeLedger,
 )
+from fleet_api.volume.reports import AccountTradeVolumeReportService
 
 
 def _beta_provider(source: BetaSourceSettings) -> HttpBetaAllocationProvider:
@@ -180,6 +182,11 @@ def finish_context(
         is_active=lambda instance: _needs_history_sync(ctx, instance),
         active_fallback_seconds=settings.weex_history_active_fallback_seconds,
         max_concurrent_requests=settings.weex_history_max_concurrency,
+    )
+    ctx.account_trade_volume_report_service = AccountTradeVolumeReportService(
+        build_readonly_gateway,
+        request_timeout_ms=settings.weex_request_timeout_ms,
+        max_concurrent_reports=1,
     )
     ctx.strategy_monitor = StrategyMonitorService(ctx.campaign_journal, ctx.volume_ledger, ctx.executor_generation)
     ctx.strategy_monitor.rebuild_all()

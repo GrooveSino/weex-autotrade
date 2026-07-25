@@ -115,6 +115,18 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
             f"实盘执行：第 {value('round')} 轮 {core('status')}；"
             f"本轮 {value('quote_volume')} USDT，累计 {value('total_quote')} USDT",
         )
+    if name == "next_cycle_preflight_rejected":
+        if "beta_changed_since_preview" in value("reason"):
+            return (
+                LogLevel.WARN,
+                "实盘执行：下一轮启动条件已变化，未提交新的订单；"
+                "已在空仓状态安全结束本次任务。下一步：重新确认新的策略预览后再启动。",
+            )
+        return (
+            LogLevel.WARN,
+            "实盘执行：下一轮执行前检查未通过，未提交新的订单；"
+            "已在空仓状态安全结束本次任务。下一步：重新获取策略确认后再启动。",
+        )
     if name in {"final_acceptance_started", "final_acceptance_completed"}:
         if name.endswith("started"):
             return LogLevel.INFO, f"实盘执行：正在最终验收；当前累计 {value('total_quote')} USDT"

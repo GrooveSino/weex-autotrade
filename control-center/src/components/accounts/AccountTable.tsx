@@ -3,6 +3,7 @@ import { FileTerminal, ListX, Play, RefreshCw, Search, ShieldAlert, Square } fro
 import type { AccountInstance } from '../../types'
 import { calculateFundingPreflight, countdown, estimateRounds, targetModeLabel, targetProgress } from '../../utils/strategy'
 import { AccountActionsMenu } from './AccountActionsMenu'
+import { AccountTradeVolumeDialog } from './AccountTradeVolumeDialog'
 
 interface AccountTableProps {
   accounts: AccountInstance[]
@@ -62,6 +63,7 @@ function historySyncLabel(account: AccountInstance): string {
 
 export function AccountTable({ accounts, selectedIds, refreshingIds, actioningIds, executionDisabled, boundStrategyExecutionEnabled, onSelect, onSelectAll, onToggleRunning, onOpenLogs, onOpenExecutions, onRefresh, onClosePositions, onEdit, onAssignStrategy }: AccountTableProps) {
   const [, setClockTick] = useState(0)
+  const [tradeVolumeAccount, setTradeVolumeAccount] = useState<AccountInstance | null>(null)
   const allSelected = accounts.length > 0 && accounts.every((account) => selectedIds.has(account.id))
 
   useEffect(() => {
@@ -273,6 +275,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
                       executionDisabled={executionDisabled}
                       onClosePositions={onClosePositions}
                       onOpenExecutions={onOpenExecutions}
+                      onOpenTradeVolume={setTradeVolumeAccount}
                       onAssignStrategy={onAssignStrategy}
                       onEdit={onEdit}
                     />
@@ -284,6 +287,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
         </tbody>
       </table>
       {accounts.length === 0 && <div className="empty-state"><RefreshCw size={20} /><span>当前筛选没有账号实例</span></div>}
+      {tradeVolumeAccount && <AccountTradeVolumeDialog account={tradeVolumeAccount} onClose={() => setTradeVolumeAccount(null)} />}
     </div>
   )
 }

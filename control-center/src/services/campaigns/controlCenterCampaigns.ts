@@ -49,7 +49,7 @@ export async function cleanupBoundStrategyRun(
   })
 }
 
-export async function listBoundStrategyExecutions(account: AccountInstance): Promise<BetaCampaign[]> {
+export async function listBoundStrategyExecutions(account: Pick<AccountInstance, 'id'>): Promise<BetaCampaign[]> {
   return apiRequest<BetaCampaign[]>(`/instances/${account.id}/strategy-executions`)
 }
 

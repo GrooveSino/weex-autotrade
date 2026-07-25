@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from fleet_api.execution.resources.market_data_hub import PublicMarketSnapshotService, SharedMarketUnavailable
+from fleet_api.execution.resources.market_data_hub import PublicMarketSnapshotService
 from fleet_api.execution.resources.private_order_stream_pool import PrivateOrderStreamPool
 
 
@@ -95,28 +95,30 @@ def test_public_market_has_one_direct_stream_for_many_actor_views() -> None:
     assert streams[0].closed == gateways[0].closed == 1
 
 
-def test_public_market_waiting_does_not_trigger_account_rest_fallback() -> None:
+def test_public_market_uses_one_rest_fallback_without_account_fanout() -> None:
     stream = _FakePublicStream()
     stream.connected = False
+    gateways: list[_FakeGateway] = []
+
+    def gateway_factory(_proxy: str | None) -> _FakeGateway:
+        gateway = _FakeGateway()
+        gateways.append(gateway)
+        return gateway
+
     service = PublicMarketSnapshotService(
         enabled=True,
         request_timeout_ms=5_000,
-        gateway_factory=lambda _proxy: _FakeGateway(),  # type: ignore[arg-type]
+        gateway_factory=gateway_factory,  # type: ignore[arg-type]
         stream_factory=lambda _gateway, _proxy: stream,
     )
     service.start()
-    stop = threading.Event()
     service.set_waiting("execution-1", True)
     try:
-        _wait(lambda: service.snapshot().source_state == "disconnected")
-        assert not service.fresh()
-        stop.set()
-        try:
-            service.actor_view(stop).order_book("BTC")
-        except SharedMarketUnavailable:
-            pass
-        else:
-            raise AssertionError("stopped shared-market wait must not return a stale book")
+        _wait(lambda: service.snapshot().source_state == "rest_fallback")
+        views = [service.actor_view(threading.Event()) for _ in range(200)]
+        assert all(view.order_book("BTC")["source"] == "shared_rest_fallback" for view in views)
+        assert len(gateways) == 1
+        assert gateways[0].rest_calls >= 2
         assert service.snapshot().waiting_phase_count == 1
     finally:
         service.set_waiting("execution-1", False)

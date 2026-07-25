@@ -16,6 +16,8 @@ from fleet_api.models.models_account import (  # noqa: F401
     WalletSnapshot,
 )
 from fleet_api.models.models_beta import (  # noqa: F401
+    AccountTradeVolumePeriod,
+    AccountTradeVolumeReportResponse,
     BetaMarketSnapshot,
     BetaSourceSettings,
     BetaSourceSettingsUpdate,

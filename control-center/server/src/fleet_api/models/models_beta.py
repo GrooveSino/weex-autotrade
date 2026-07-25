@@ -75,6 +75,26 @@ class VolumeSessionCreateRequest(CamelModel):
     maker_only_required: bool = False
 
 
+class AccountTradeVolumePeriod(CamelModel):
+    """A bounded, account-scoped summary of actual filled quote volume."""
+
+    lookback_days: Literal[1, 7, 30]
+    start_at_ms: int = Field(ge=0)
+    end_at_ms: int = Field(gt=0)
+    total_quote_volume: Decimal = Field(ge=0)
+    maker_quote_volume: Decimal = Field(ge=0)
+    taker_quote_volume: Decimal = Field(ge=0)
+    unknown_liquidity_quote_volume: Decimal = Field(ge=0)
+    trade_count: int = Field(ge=0)
+    complete: bool
+    warnings: list[str] = Field(default_factory=list)
+
+
+class AccountTradeVolumeReportResponse(CamelModel):
+    periods: tuple[AccountTradeVolumePeriod, ...]
+    generated_at_ms: int = Field(gt=0)
+
+
 class VolumeSessionResponse(CamelModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, serialize_by_alias=True, extra="ignore")
     session_id: str

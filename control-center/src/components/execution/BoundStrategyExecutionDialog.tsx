@@ -12,6 +12,7 @@ import { BoundStrategyPreparation, type PreparationStage } from './BoundStrategy
 import { BoundStrategyOverview } from './BoundStrategyOverview'
 import { BoundStrategyBoundary } from './BoundStrategyBoundary'
 import { BoundStrategyPanelIssueView } from './BoundStrategyPanelIssue'
+import { useBoundStrategyRecovery } from '../../hooks/useBoundStrategyRecovery'
 import {
   strategyPanelError,
   strategyPanelNotice,
@@ -117,7 +118,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     return () => { cancelled = true }
   }, [applyPreparation, dialogKey, enabled])
 
-  const preview = async () => {
+  const preview = useCallback(async () => {
     const requestId = ++preparationRequestRef.current
     const targetAccount = accountRef.current
     setPreparationStage('preflight')
@@ -133,7 +134,9 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     } finally {
       if (preparationRequestRef.current === requestId) setPreparationStage(null)
     }
-  }
+  }, [applyPreparation])
+
+  useBoundStrategyRecovery(account.id, enabled, execution, preview)
 
   const cleanup = async () => {
     if (preparation?.disposition !== 'orders_cleanup_required') return

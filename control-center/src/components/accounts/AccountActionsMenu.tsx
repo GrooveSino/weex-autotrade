@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CircleX, MoreHorizontal, ScrollText, Settings2, SlidersHorizontal } from 'lucide-react'
+import { BarChart3, CircleX, MoreHorizontal, ScrollText, Settings2, SlidersHorizontal } from 'lucide-react'
 import type { AccountInstance } from '../../types'
 
 interface AccountActionsMenuProps {
@@ -8,6 +8,7 @@ interface AccountActionsMenuProps {
   executionDisabled: boolean
   onClosePositions: (account: AccountInstance) => void
   onOpenExecutions: (account: AccountInstance) => void
+  onOpenTradeVolume: (account: AccountInstance) => void
   onAssignStrategy: (account: AccountInstance) => void
   onEdit: (account: AccountInstance) => void
 }
@@ -21,6 +22,7 @@ export function AccountActionsMenu({
   executionDisabled,
   onClosePositions,
   onOpenExecutions,
+  onOpenTradeVolume,
   onAssignStrategy,
   onEdit,
 }: AccountActionsMenuProps) {
@@ -63,7 +65,7 @@ export function AccountActionsMenu({
     }
     const rect = triggerRef.current?.getBoundingClientRect()
     if (!rect) return
-    const itemCount = canShowClose ? 4 : 3
+    const itemCount = canShowClose ? 5 : 4
     const estimatedHeight = itemCount * menuItemHeight + (canShowClose ? 17 : 8)
     const left = Math.min(
       window.innerWidth - menuWidth - viewportGap,
@@ -122,6 +124,9 @@ export function AccountActionsMenu({
           )}
           <button className="action-menu-item" type="button" role="menuitem" onClick={() => run(onOpenExecutions)}>
             <ScrollText size={15} /><span>策略运行记录</span>
+          </button>
+          <button className="action-menu-item" type="button" role="menuitem" onClick={() => run(onOpenTradeVolume)}>
+            <BarChart3 size={15} /><span>统计近期交易量</span>
           </button>
           <button className="action-menu-item" type="button" role="menuitem" onClick={() => run(onAssignStrategy)}>
             <SlidersHorizontal size={15} /><span>切换绑定策略</span>

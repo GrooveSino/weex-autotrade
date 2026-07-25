@@ -227,6 +227,24 @@
 .input-with-action input { padding-right: 34px; }
 .input-with-action button { width: 30px; height: 30px; position: absolute; right: 1px; top: 1px; display: grid; place-items: center; border: 0; background: transparent; color: #75818b; cursor: pointer; }
 .input-with-action button[data-tooltip] { position: absolute; }
+.trade-volume-dialog { width: min(600px, 100%); }
+.trade-volume-report-body { padding: 13px 15px 16px; display: grid; gap: 10px; }
+.trade-volume-intro { min-height: 40px; padding: 8px 9px; display: flex; align-items: flex-start; gap: 8px; color: #2f5b49; background: #f1f8f4; border: 1px solid #c9dfd1; border-radius: 4px; font-size: 11px; line-height: 1.45; }
+.trade-volume-intro svg { flex: 0 0 auto; margin-top: 1px; }
+.trade-volume-actions { display: flex; gap: 8px; }
+.trade-volume-actions .button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.trade-volume-empty { padding: 18px 10px; color: var(--muted); background: #fafbfb; border: 1px dashed #cbd3d9; border-radius: 4px; font-size: 11px; line-height: 1.5; }
+.trade-volume-period { display: grid; grid-template-columns: minmax(116px, 1fr) auto; gap: 5px 12px; padding: 10px; border: 1px solid var(--soft-line); border-radius: 4px; background: #fbfcfc; }
+.trade-volume-period > div { display: grid; gap: 2px; }
+.trade-volume-period > div strong { color: #36434e; font-size: 12px; }
+.trade-volume-period > div span, .trade-volume-period > span { color: var(--muted); font-size: 10px; }
+.trade-volume-period > strong { align-self: center; color: #176f50; font-size: 15px; white-space: nowrap; }
+.trade-volume-period > strong small { color: #6e7d85; font-size: 10px; font-weight: 600; }
+.trade-volume-period > em { justify-self: end; padding: 2px 5px; border-radius: 3px; font-size: 10px; font-style: normal; font-weight: 600; }
+.trade-volume-period > em.complete { color: #176f50; background: #e7f5eb; }
+.trade-volume-period > em.pending { color: #9c6817; background: #fff5df; }
+.trade-volume-period > p { grid-column: 1 / -1; margin: 1px 0 0; color: #9c6817; font-size: 10px; line-height: 1.35; }
+.trade-volume-generated { color: var(--muted); font-size: 10px; text-align: right; }
 .credential-preservation-note { min-height: 42px; margin: 10px 0; padding: 8px 9px; display: flex; align-items: flex-start; gap: 8px; color: #2f5b49; background: #f1f8f4; border: 1px solid #c9dfd1; border-radius: 4px; }
 .credential-preservation-note.updating { color: #74500f; background: var(--amber-soft); border-color: #ecd6ad; }
 .credential-preservation-note svg { flex: 0 0 auto; margin-top: 1px; }

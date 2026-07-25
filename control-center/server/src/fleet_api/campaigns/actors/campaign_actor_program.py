@@ -10,6 +10,7 @@ from weex_cli.beta_campaign import BetaVolumeCampaign
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, CloseCycle, OpenCycle
 from fleet_api.campaigns.actors.campaign_actor_phases import CampaignActorPhases
+from fleet_api.campaigns.core.campaign_helpers import _worker_exception_reason
 from fleet_api.execution.resources.market_data_hub import PublicMarketSnapshotService
 from fleet_api.execution.runtime.async_execution_orchestrator import ExecutionActor
 
@@ -130,6 +131,13 @@ class CampaignActorProgram:
                     exc = cleanup_error
                 else:
                     return
+            if context is not None:
+                try:
+                    await self._finish_flat_phase_exception(actor, context, exc)
+                except Exception as finalization_error:
+                    exc = finalization_error
+                else:
+                    return
             await actor.run_blocking(self._on_failure, exc)
             actor.transition("recovering", reason=f"phase_exception:{type(exc).__name__.lower()}")
 
@@ -232,6 +240,31 @@ class CampaignActorProgram:
                 reason=fallback_reason,
             )
         await self._deliver(actor, result, _actor_terminal_phase(result))
+
+    async def _finish_flat_phase_exception(
+        self,
+        actor: ExecutionActor,
+        context: CampaignActorContext,
+        error: Exception,
+    ) -> None:
+        """End a post-cycle failure without promoting old fills to uncertainty.
+
+        ``opened`` is cleared only after ``close`` has verified the paired
+        cycle's flat boundary.  A later preflight failure cannot belong to an
+        ambiguous order submission, even though earlier completed rounds wrote
+        submission intents.  Keeping the task in ``recovering`` here made the
+        next launch look blocked forever.
+        """
+        reason = _worker_exception_reason(error)
+        await self._emit_event(
+            actor,
+            {
+                "event": "next_cycle_preflight_rejected",
+                "round": context.round_number,
+                "reason": reason,
+            },
+        )
+        await self._finish_stopped(actor, context, None, fallback_reason=reason)
 
     async def _deliver(self, actor: ExecutionActor, result: dict[str, Any], phase: str) -> None:
         await actor.run_blocking(self._on_result, result)

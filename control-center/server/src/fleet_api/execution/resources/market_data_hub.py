@@ -12,6 +12,8 @@ from weex_cli.config import Credentials, Settings
 from weex_cli.gateway import WeexGateway
 from weex_cli.live_websocket import WeexPublicOrderBookStream
 
+_REST_FALLBACK_INTERVAL_SECONDS = 0.5
+
 
 class PublicOrderBook(Protocol):
     @property
@@ -183,7 +185,11 @@ class PublicMarketSnapshotService:
             with self._lock:
                 item = self._books.get(target)
                 if self._fresh_locked() and item is not None:
-                    return _limit_book(item[0], limit)
+                    return _limit_book(
+                        item[0],
+                        limit,
+                        source="shared_websocket" if self._connected else "shared_rest_fallback",
+                    )
                 if deadline is not None and self._monotonic() >= deadline:
                     break
                 self._lock.wait(timeout=0.1)
@@ -205,6 +211,7 @@ class PublicMarketSnapshotService:
 
     def _observe(self) -> None:
         previously_connected = False
+        last_rest_fallback_at = float("-inf")
         while not self._stop.wait(0.1):
             stream = self._stream
             connected = bool(stream is not None and stream.connected)
@@ -223,12 +230,31 @@ class PublicMarketSnapshotService:
                         continue
                     with self._lock:
                         self._books[symbol] = (book, self._monotonic())
+            elif self._monotonic() - last_rest_fallback_at >= _REST_FALLBACK_INTERVAL_SECONDS:
+                last_rest_fallback_at = self._monotonic()
+                self._refresh_rest_fallback()
             with self._lock:
                 self._source_state = _source_state(self._fresh_locked(), connected)
                 self._lock.notify_all()
 
+    def _refresh_rest_fallback(self) -> None:
+        """Refresh one shared public REST snapshot while the stream reconnects."""
+        gateway = self._gateway
+        if gateway is None:
+            return
+        try:
+            books = {symbol: gateway.order_book(symbol, 15) for symbol in ("BTC", "ETH")}
+            if not all(_book_has_spread(book) for book in books.values()):
+                return
+        except Exception:
+            return
+        received_at = self._monotonic()
+        with self._lock:
+            for symbol, book in books.items():
+                self._books[symbol] = (book, received_at)
+
     def _fresh_locked(self) -> bool:
-        if not self._enabled or not self._connected:
+        if not self._enabled:
             return False
         return all(_snapshot_is_fresh(self._age_ms_locked(symbol)) for symbol in ("BTC", "ETH"))
 
@@ -258,18 +284,26 @@ class PublicMarketSnapshotService:
         return WeexPublicOrderBookStream(gateway, proxy_url=proxy_url, max_age_seconds=1.0)
 
 
-def _limit_book(book: dict[str, Any], limit: int) -> dict[str, Any]:
+def _limit_book(book: dict[str, Any], limit: int, *, source: str) -> dict[str, Any]:
     return {
         **book,
         "bids": list(book.get("bids") or [])[:limit],
         "asks": list(book.get("asks") or [])[:limit],
-        "source": "shared_websocket",
+        "source": source,
     }
 
 
 def _source_state(fresh: bool, connected: bool) -> str:
-    return "realtime" if fresh else "recovering" if connected else "disconnected"
+    if fresh:
+        return "realtime" if connected else "rest_fallback"
+    return "recovering" if connected else "disconnected"
 
 
 def _snapshot_is_fresh(age_ms: int | None) -> bool:
     return age_ms is not None and age_ms <= 1_000
+
+
+def _book_has_spread(book: dict[str, Any]) -> bool:
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    return bool(bids and asks)

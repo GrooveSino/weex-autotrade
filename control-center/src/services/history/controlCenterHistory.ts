@@ -1,4 +1,4 @@
-import type { AccountInstance, ExecutionCycle, StrategyRunPage } from '../../types'
+import type { AccountInstance, AccountTradeVolumeReport, ExecutionCycle, StrategyRunPage } from '../../types'
 import { apiRequest, controlPlaneEnabled, sleep } from '../core/controlCenterCore'
 import { appendMockLog, mockLogStream } from '../monitoring/controlCenterStreams'
 
@@ -97,5 +97,37 @@ export async function refreshAccountSnapshot(account: AccountInstance): Promise<
       lastStopVerifiedAtMs: null,
     },
     updatedAt: '刚刚',
+  }
+}
+
+export async function fetchAccountTradeVolumeReport(
+  account: AccountInstance,
+  lookbackDays: Array<1 | 7 | 30>,
+): Promise<AccountTradeVolumeReport> {
+  if (controlPlaneEnabled) {
+    const query = new URLSearchParams()
+    lookbackDays.forEach((days) => query.append('lookback_days', String(days)))
+    return apiRequest<AccountTradeVolumeReport>(`/instances/${account.id}/trade-volume-report?${query}`)
+  }
+  await sleep(320)
+  const today = Math.max(account.volume.today, 0)
+  const now = Date.now()
+  return {
+    generatedAtMs: now,
+    periods: lookbackDays.map((days) => {
+      const totalQuoteVolume = today * (days === 1 ? 1 : days === 7 ? 4.3 : 12.1)
+      return {
+        lookbackDays: days,
+        startAtMs: now - days * 24 * 60 * 60 * 1000,
+        endAtMs: now,
+        totalQuoteVolume: totalQuoteVolume.toFixed(2),
+        makerQuoteVolume: (totalQuoteVolume * 0.82).toFixed(2),
+        takerQuoteVolume: (totalQuoteVolume * 0.18).toFixed(2),
+        unknownLiquidityQuoteVolume: '0.00',
+        tradeCount: Math.round(totalQuoteVolume / 50),
+        complete: true,
+        warnings: [],
+      }
+    }),
   }
 }

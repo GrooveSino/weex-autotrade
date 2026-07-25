@@ -21,6 +21,7 @@ from fleet_api.transport.routes.main_routes_campaign import register_campaign_ro
 from fleet_api.transport.routes.main_routes_health import register_health_routes
 from fleet_api.transport.routes.main_routes_instances import register_instance_routes
 from fleet_api.transport.routes.main_routes_monitor import register_strategy_monitor_routes
+from fleet_api.transport.routes.main_routes_volume import register_trade_volume_report_routes
 
 
 def create_app(
@@ -60,6 +61,7 @@ def create_app(
     register_strategy_monitor_routes(app, ctx)
     register_campaign_routes(app, ctx)
     register_instance_routes(app, ctx)
+    register_trade_volume_report_routes(app, ctx)
     return app
 
 

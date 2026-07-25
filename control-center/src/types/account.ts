@@ -86,6 +86,24 @@ export interface AccountInstance {
   unreadLogs: number
 }
 
+export interface AccountTradeVolumePeriod {
+  lookbackDays: 1 | 7 | 30
+  startAtMs: number
+  endAtMs: number
+  totalQuoteVolume: string
+  makerQuoteVolume: string
+  takerQuoteVolume: string
+  unknownLiquidityQuoteVolume: string
+  tradeCount: number
+  complete: boolean
+  warnings: string[]
+}
+
+export interface AccountTradeVolumeReport {
+  periods: AccountTradeVolumePeriod[]
+  generatedAtMs: number
+}
+
 export interface AccountDraft {
   name: string
   accountTag: string
