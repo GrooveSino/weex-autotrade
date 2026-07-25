@@ -99,7 +99,7 @@ function BetaStatus({ snapshot, available, loading, receivedAtMs }: BetaStatusPr
 }
 
 function App() {
-  const { accounts, setAccounts, strategies, search, setSearch, filter, setFilter, selectedIds, refreshingIds, actioningIds, logAccount, setLogAccount, logSessionId, setLogSessionId, executionAccount, setExecutionAccount, accountDialogOpen, setAccountDialogOpen, editingAccount, setEditingAccount, strategyDialogOpen, setStrategyDialogOpen, betaSourceDialogOpen, setBetaSourceDialogOpen, strategyDialogInitialId, setStrategyDialogInitialId, assignmentAccounts, setAssignmentAccounts, closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen, stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, controlPlaneConnected, controlPlaneAdapter, boundStrategyExecutionEnabled, executionCapacity, boundExecutionQueue, setBoundExecutionQueue, initialControlPlaneError, schedulerMetrics, betaSnapshot, betaAvailable, setBetaAvailable, betaLoading, setBetaLoading, betaReceivedAtMs, pendingWebReleaseId, localUser, localUserLoading, localUserError, loginRequired, login, searchInputRef, controlPlaneHydrating, executionDisabled, refreshBlockedByWorkflow, filteredAccounts, stats, canStartSelected, canPauseSelected, canStopSelected, selectOne, selectAllVisible, updateStatuses, toggleRunning, refreshOne, refreshAll, confirmClosePositions, saveAccount, deleteEditingAccount, closeAccountDialog, createStrategy, updateStrategy, deleteStrategy, assignStrategy, emergencyStop, logout } = useFleetApp()
+  const { accounts, setAccounts, strategies, search, setSearch, filter, setFilter, selectedIds, refreshingIds, actioningIds, logAccount, setLogAccount, logSessionId, setLogSessionId, executionAccount, setExecutionAccount, accountDialogOpen, setAccountDialogOpen, editingAccount, setEditingAccount, strategyDialogOpen, setStrategyDialogOpen, betaSourceDialogOpen, setBetaSourceDialogOpen, strategyDialogInitialId, setStrategyDialogInitialId, assignmentAccounts, setAssignmentAccounts, closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen, stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, controlPlaneConnected, controlPlaneAdapter, boundStrategyExecutionEnabled, executionCapacity, boundExecutionQueue, setBoundExecutionQueue, initialControlPlaneError, schedulerMetrics, betaSnapshot, betaAvailable, setBetaAvailable, betaLoading, setBetaLoading, betaReceivedAtMs, pendingWebReleaseId, localUser, localUserLoading, localUserError, loginRequired, login, searchInputRef, controlPlaneHydrating, executionDisabled, refreshBlockedByWorkflow, filteredAccounts, stats, canStartSelected, canPauseSelected, canStopSelected, selectOne, selectAllVisible, updateStatuses, toggleRunning, refreshOne, refreshAll, confirmClosePositions, saveAccount, deleteEditingAccount, closeAccountDialog, createStrategy, updateStrategy, duplicateStrategy, deleteStrategy, assignStrategy, emergencyStop, logout } = useFleetApp()
 
   if (loginRequired) return <LocalLogin loading={localUserLoading} error={localUserError} onSubmit={login} />
 
@@ -251,6 +251,7 @@ function App() {
           onClose={() => setStrategyDialogOpen(false)}
           onCreate={createStrategy}
           onUpdate={updateStrategy}
+          onDuplicate={duplicateStrategy}
           onDelete={deleteStrategy}
         />
       )}

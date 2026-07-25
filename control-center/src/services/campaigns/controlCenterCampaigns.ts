@@ -1,7 +1,7 @@
 import type {
   AccountInstance, BetaCampaign, BetaCampaignEvent, BetaCampaignPreview,
   BetaCampaignPreviewRequest, BetaMarketSnapshot, BetaSourceSettings,
-  StrategyDirection, StrategyRunConfirmResponse, StrategyRunPrepareResponse, VolumeStrategy,
+  StrategyRunConfirmResponse, StrategyRunPrepareResponse, VolumeStrategy,
 } from '../../types'
 import { mockStrategies } from '../../data/mockAccounts'
 import { apiRequest, controlPlaneEnabled } from '../core/controlCenterCore'
@@ -19,35 +19,32 @@ export async function previewBetaCampaign(
 
 export async function previewBoundStrategyExecution(
   account: AccountInstance,
-  direction: StrategyDirection = 'btc_long_eth_short',
 ): Promise<BetaCampaignPreview> {
   if (!controlPlaneEnabled) throw new Error('已绑定策略实盘执行需要控制平面 API')
   return apiRequest<BetaCampaignPreview>(`/instances/${account.id}/strategy-executions/preview`, {
     method: 'POST',
-    body: JSON.stringify({ direction }),
+    body: JSON.stringify({}),
   })
 }
 
 export async function prepareBoundStrategyRun(
   account: AccountInstance,
-  direction: StrategyDirection = 'btc_long_eth_short',
 ): Promise<StrategyRunPrepareResponse> {
   if (!controlPlaneEnabled) throw new Error('已绑定策略实盘执行需要控制平面 API')
   return apiRequest<StrategyRunPrepareResponse>(`/instances/${account.id}/strategy-run/prepare`, {
     method: 'POST',
-    body: JSON.stringify({ direction }),
+    body: JSON.stringify({}),
   })
 }
 
 export async function cleanupBoundStrategyRun(
   account: AccountInstance,
   confirmation: string,
-  direction: StrategyDirection = 'btc_long_eth_short',
 ): Promise<StrategyRunPrepareResponse> {
   const commandId = crypto.randomUUID()
   return apiRequest<StrategyRunPrepareResponse>(`/instances/${account.id}/strategy-run/cleanup`, {
     method: 'POST',
-    body: JSON.stringify({ confirmation, direction, commandId }),
+    body: JSON.stringify({ confirmation, commandId }),
     headers: { 'X-Fleet-Command-Id': commandId },
   })
 }

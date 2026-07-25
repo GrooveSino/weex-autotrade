@@ -35,7 +35,6 @@ class StrategyRunPlan:
 def resolve_strategy_run_plan(
     instance: AccountInstance,
     active_session: dict[str, object] | None,
-    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
     randbelow: Callable[[int], int] = secrets.randbelow,
 ) -> StrategyRunPlan:
     if active_session is not None:
@@ -57,7 +56,7 @@ def resolve_strategy_run_plan(
         if execution_target <= 0:
             raise StrategyTargetReached("the lifetime strategy target is already verified complete")
         return StrategyRunPlan(
-            direction=direction,
+            direction=instance.strategy.direction,
             target_mode=StrategyTargetMode.LIFETIME,
             run_disposition="lifetime_residual",
             strategy_target_quote_volume=strategy_target,
@@ -71,7 +70,7 @@ def resolve_strategy_run_plan(
         randbelow,
     )
     return StrategyRunPlan(
-        direction=direction,
+        direction=instance.strategy.direction,
         target_mode=StrategyTargetMode.INCREMENTAL,
         run_disposition="new_incremental",
         strategy_target_quote_volume=strategy_target,

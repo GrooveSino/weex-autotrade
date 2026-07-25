@@ -177,7 +177,11 @@ def test_target_tolerance_is_deterministic_and_capped_for_large_targets() -> Non
 
 
 def test_incremental_run_samples_one_cent_target_and_persists_direction_in_plan() -> None:
-    selected = strategy(targetVolumeQuoteMin="100.00", targetVolumeQuoteMax="101.00")
+    selected = strategy(
+        direction="btc_short_eth_long",
+        targetVolumeQuoteMin="100.00",
+        targetVolumeQuoteMax="101.00",
+    )
     instance = AccountInstance(
         id="sample-incremental",
         name="sample",
@@ -194,7 +198,6 @@ def test_incremental_run_samples_one_cent_target_and_persists_direction_in_plan(
     plan = resolve_strategy_run_plan(
         instance,
         None,
-        StrategyDirection.BTC_SHORT_ETH_LONG,
         randbelow=lambda size: size - 1,
     )
 

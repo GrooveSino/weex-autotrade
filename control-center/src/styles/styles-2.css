@@ -76,12 +76,6 @@
 .bound-strategy-execution-dialog .dialog-header h2 { margin-bottom: 5px; font-size: 18px; }
 .bound-strategy-execution-dialog .dialog-header div > span { font-size: 12px; }
 .beta-campaign-body { min-height: 0; padding: 16px 18px 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
-.bound-direction-control { margin-bottom: 10px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; }
-.bound-direction-control > span { color: #63717c; font-size: 10px; font-weight: 700; }
-.bound-direction-control > div { min-width: 0; padding: 2px; display: grid; grid-template-columns: 1fr 1fr; background: #edf1f2; border-radius: 5px; }
-.bound-direction-control button { min-width: 0; height: 30px; border: 0; border-radius: 3px; color: #65727d; background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; }
-.bound-direction-control button.active { color: #155f44; background: #fff; box-shadow: 0 1px 3px rgba(18, 31, 40, .14); }
-.bound-direction-control button:disabled { cursor: default; opacity: .62; }
 .beta-campaign-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; background: #fbfcfc; border: 1px solid #dce4e7; border-radius: 6px; }
 .beta-campaign-summary > div { min-width: 0; min-height: 66px; padding: 10px 11px; display: grid; align-content: center; gap: 5px; border-right: 1px solid #e4eaec; }
 .beta-campaign-summary > div:last-child { border-right: 0; }

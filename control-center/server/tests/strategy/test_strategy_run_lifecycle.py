@@ -124,7 +124,7 @@ def test_initial_prepare_reuses_lifecycle_boundary_for_preview(tmp_path, monkeyp
         assert reads == 1
 
 
-def test_prepare_reuses_sampled_target_until_direction_or_run_changes(tmp_path, monkeypatch) -> None:
+def test_prepare_uses_strategy_direction_and_reuses_sampled_target_until_run_changes(tmp_path, monkeypatch) -> None:
     profile = _profile(tmp_path)
     monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
     monkeypatch.setattr(
@@ -139,6 +139,7 @@ def test_prepare_reuses_sampled_target_until_direction_or_run_changes(tmp_path, 
             {
                 "targetVolumeQuoteMin": "1000.00",
                 "targetVolumeQuoteMax": "1500.00",
+                "direction": "btc_short_eth_long",
             }
         )
         strategy = api.post("/api/v1/strategies", json=strategy_request).json()
@@ -147,29 +148,24 @@ def test_prepare_reuses_sampled_target_until_direction_or_run_changes(tmp_path, 
         instance = api.post("/api/v1/instances", json=payload).json()
         path = f"/api/v1/instances/{instance['id']}/strategy-run/prepare"
 
-        first = api.post(path, json={}).json()["preview"]
+        first = api.post(path, json={"direction": "btc_long_eth_short"}).json()["preview"]
         repeated = api.post(path, json={}).json()["preview"]
 
         assert repeated["campaignId"] == first["campaignId"]
         assert repeated["selectedTargetQuoteVolume"] == first["selectedTargetQuoteVolume"]
         assert repeated["confirmation"] == first["confirmation"]
-
-        reverse = api.post(path, json={"direction": "btc_short_eth_long"}).json()["preview"]
-        assert reverse["campaignId"] != first["campaignId"]
-        assert reverse["direction"] == "btc_short_eth_long"
-        assert "DIRECTION_BTC_SHORT_ETH_LONG" in reverse["confirmation"]
-        archived = app.state.campaign_journal.get(first["campaignId"])
-        assert archived is not None
-        assert archived.status == BetaCampaignStatus.STOPPED.value
+        assert first["direction"] == "btc_short_eth_long"
+        assert "DIRECTION_BTC_SHORT_ETH_LONG" in first["confirmation"]
 
         app.state.campaign_journal.update(
-            reverse["campaignId"],
+            first["campaignId"],
             status=BetaCampaignStatus.STOPPED.value,
             finished_at_ms=int(time.time() * 1000),
             reason="test_run_finished",
         )
-        next_run = api.post(path, json={"direction": "btc_short_eth_long"}).json()["preview"]
-        assert next_run["campaignId"] != reverse["campaignId"]
+        next_run = api.post(path, json={"direction": "btc_long_eth_short"}).json()["preview"]
+        assert next_run["campaignId"] != first["campaignId"]
+        assert next_run["direction"] == "btc_short_eth_long"
         assert 1000 <= float(next_run["selectedTargetQuoteVolume"]) <= 1500
 
 

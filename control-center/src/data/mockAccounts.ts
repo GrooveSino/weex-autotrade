@@ -4,6 +4,7 @@ const standardStrategy: VolumeStrategy = {
     id: 'strategy-standard-20k',
     version: 1,
     name: '标准 20K 双币策略',
+    direction: 'btc_long_eth_short',
     targetMode: 'incremental',
     targetVolumeQuote: '20000',
     targetVolumeQuoteMin: '18000',

@@ -37,6 +37,19 @@ class ServiceStrategyMixin:
         )
         return self.repository.create_strategy(strategy)
 
+    def duplicate_strategy(self, strategy_id: str) -> VolumeStrategy:
+        source = self.get_strategy(strategy_id)
+        names = {strategy.name.casefold() for strategy in self.list_strategies()}
+        duplicate = source.model_copy(
+            update={
+                "id": f"strategy-{uuid4().hex[:10]}",
+                "name": _duplicate_name(source.name, names),
+                "version": 1,
+            },
+            deep=True,
+        )
+        return self.repository.create_strategy(duplicate)
+
     def update_strategy(self, strategy_id: str, request: VolumeStrategyInput) -> VolumeStrategy:
         current = self.get_strategy(strategy_id)
         updated_strategy = VolumeStrategy(
@@ -46,11 +59,14 @@ class ServiceStrategyMixin:
             **request.model_dump(),
         )
         target_mode_changed = updated_strategy.target_mode is not current.target_mode
+        direction_changed = updated_strategy.direction is not current.direction
         assigned = [instance for instance in self.repository.list() if instance.strategy_id == strategy_id]
         for instance in assigned:
             self._ensure_configurable(instance, "changing a shared strategy")
             projected_progress = (
-                Decimal(0) if target_mode_changed else target_progress_quote(instance, updated_strategy)
+                Decimal(0)
+                if target_mode_changed or direction_changed
+                else target_progress_quote(instance, updated_strategy)
             )
             if request.target_volume_quote < projected_progress:
                 raise ValidationFailed(
@@ -58,7 +74,11 @@ class ServiceStrategyMixin:
                 )
 
         projected = [
-            self._strategy_projection(instance, updated_strategy, reset_progress=target_mode_changed)
+            self._strategy_projection(
+                instance,
+                updated_strategy,
+                reset_progress=target_mode_changed or direction_changed,
+            )
             for instance in assigned
         ]
         self.repository.replace_strategy_and_instances(updated_strategy, projected)
@@ -83,3 +103,13 @@ class ServiceStrategyMixin:
         for instance in updated:
             self._append_log(instance.id, LogLevel.INFO, f"已绑定共享策略：{strategy.name}；策略进度已重置")
         return updated
+
+
+def _duplicate_name(source: str, existing: set[str]) -> str:
+    index = 1
+    while True:
+        suffix = " 复制" if index == 1 else f" 复制 {index}"
+        candidate = f"{source[: 64 - len(suffix)].rstrip()}{suffix}"
+        if candidate.casefold() not in existing:
+            return candidate
+        index += 1

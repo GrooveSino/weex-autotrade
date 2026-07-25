@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Copy, LoaderCircle, Play, RefreshCw, ShieldCheck, Square, X } from 'lucide-react'
-import type { AccountInstance, BetaCampaign, BetaCampaignPreview, StrategyDirection, StrategyRunPrepareResponse } from '../../types'
+import type { AccountInstance, BetaCampaign, BetaCampaignPreview, StrategyRunPrepareResponse } from '../../types'
 import {
   cleanupBoundStrategyRun,
   confirmBoundStrategyRun,
@@ -55,7 +55,6 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
   const [preparationStage, setPreparationStage] = useState<PreparationStage>('checking')
   const [busy, setBusy] = useState(false)
   const [riskAcknowledged, setRiskAcknowledged] = useState(false)
-  const [direction, setDirection] = useState<StrategyDirection>('btc_long_eth_short')
   const [confirmation, setConfirmation] = useState('')
   const [panelIssue, setPanelIssue] = useState<StrategyPanelIssue | null>(null)
   const accountRef = useRef(account)
@@ -80,7 +79,6 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setPreparation(next)
     const current = next.preview ?? next.current
     setExecution(current)
-    if (current?.direction) setDirection(current.direction)
     setConfirmation('')
     setRiskAcknowledged(false)
     if (current) onChangedRef.current(current)
@@ -106,7 +104,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
         // The server owns active-task detection and historical recovery, so a
         // normal launch needs one read-only preparation request rather than a
         // slow client-side list-then-preview race.
-        const prepared = await prepareBoundStrategyRun(targetAccount, direction)
+        const prepared = await prepareBoundStrategyRun(targetAccount)
         if (!current()) return
         applyPreparation(prepared)
       } catch (reason) {
@@ -117,7 +115,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     }
     void load()
     return () => { cancelled = true }
-  }, [applyPreparation, dialogKey, direction, enabled])
+  }, [applyPreparation, dialogKey, enabled])
 
   const preview = async () => {
     const requestId = ++preparationRequestRef.current
@@ -128,7 +126,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setConfirmation('')
     setPanelIssue(null)
     try {
-      const next = await prepareBoundStrategyRun(targetAccount, direction)
+      const next = await prepareBoundStrategyRun(targetAccount)
       if (preparationRequestRef.current === requestId) applyPreparation(next)
     } catch (reason) {
       if (preparationRequestRef.current === requestId) setPanelIssue(strategyPanelError(reason, 'prepare'))
@@ -142,7 +140,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
     setBusy(true)
     setPanelIssue(null)
     try {
-      const next = await cleanupBoundStrategyRun(accountRef.current, confirmation, direction)
+      const next = await cleanupBoundStrategyRun(accountRef.current, confirmation)
       applyPreparation(next)
       onToastRef.current(`${accountRef.current.name} 的普通挂单与条件单已撤销并核验`)
     } catch (reason) {
@@ -193,7 +191,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
             onStartedRef.current(resolved)
             onToastRef.current(`${accountRef.current.name} 的启动命令已确认，策略正在执行`)
           } else if (resolved.status === 'stopped') {
-            const prepared = await prepareBoundStrategyRun(accountRef.current, direction)
+            const prepared = await prepareBoundStrategyRun(accountRef.current)
             applyPreparation(prepared)
             setPanelIssue(strategyPanelError('启动条件已变化，请重新确认', 'confirm'))
           } else if (resolved.status === 'uncertain') {
@@ -248,9 +246,6 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
           <BoundStrategyOverview
             account={account}
             execution={execution}
-            direction={direction}
-            directionDisabled={busy || Boolean(preparationStage) || Boolean(execution && execution.status !== 'planned')}
-            onDirectionChange={setDirection}
           />
 
           {!enabled && <BoundStrategyPanelIssueView
@@ -310,7 +305,7 @@ export function BoundStrategyExecutionDialog({ account, queuePosition, queueLeng
                 </div>
                 <label className="bound-risk-check">
                   <input type="checkbox" checked={riskAcknowledged} onChange={(event) => setRiskAcknowledged(event.target.checked)} />
-                  <span>我理解这会在实盘提交 {direction === 'btc_long_eth_short' ? 'BTC 多、ETH 空' : 'BTC 空、ETH 多'}的 POST_ONLY 订单。<small>固定 400x 全仓；正常订单保持 Maker。仅当前任务产生且不超过 {execution.dustClosePolicy.maxQuote} USDT 的小额尾仓，可能按仓位 ID 市价收尾一次。</small></span>
+                  <span>我理解这会在实盘提交 {execution.direction === 'btc_long_eth_short' ? 'BTC 多、ETH 空' : 'BTC 空、ETH 多'}的 POST_ONLY 订单。<small>方向由绑定策略固定；400x 全仓，正常订单保持 Maker。仅当前任务产生且不超过 {execution.dustClosePolicy.maxQuote} USDT 的小额尾仓，可能按仓位 ID 市价收尾一次。</small></span>
                 </label>
                 <div className="bound-phrase-panel">
                   <div className="bound-phrase-heading">

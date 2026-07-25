@@ -119,7 +119,13 @@ def test_shared_strategy_is_created_once_and_updates_every_assigned_account_proj
         }
         second = api.post("/api/v1/instances", json=second_payload)
         changed = strategy_payload(name="25k shared", target="25000")
-        changed.update({"roundTurnoverQuoteMin": "800", "roundTurnoverQuoteMax": "1200"})
+        changed.update(
+            {
+                "direction": "btc_short_eth_long",
+                "roundTurnoverQuoteMin": "800",
+                "roundTurnoverQuoteMax": "1200",
+            }
+        )
         updated = api.patch(f"/api/v1/strategies/{strategy_id}", json=changed)
         instances = api.get("/api/v1/instances").json()
 
@@ -132,10 +138,29 @@ def test_shared_strategy_is_created_once_and_updates_every_assigned_account_proj
     assert updated.status_code == 200
     assert updated.json()["id"] == strategy_id
     assert updated.json()["version"] == 2
+    assert updated.json()["direction"] == "btc_short_eth_long"
     assert updated.json()["targetVolumeQuote"] == "25000"
     assert updated.json()["roundTurnoverQuoteMin"] == "800"
     assert {instance["strategy"]["name"] for instance in instances} == {"25k shared"}
+    assert {instance["strategy"]["direction"] for instance in instances} == {"btc_short_eth_long"}
     assert {instance["strategyId"] for instance in instances} == {strategy_id}
+
+
+def test_strategy_duplicate_creates_independent_direction_preserving_names() -> None:
+    with TestClient(create_app(ControlPlaneSettings(seed_demo_data=False))) as api:
+        payload = strategy_payload(name="反向策略")
+        payload["direction"] = "btc_short_eth_long"
+        source = api.post("/api/v1/strategies", json=payload).json()
+
+        first = api.post(f"/api/v1/strategies/{source['id']}/duplicate")
+        second = api.post(f"/api/v1/strategies/{source['id']}/duplicate")
+
+    assert first.status_code == 201
+    assert first.json()["id"] != source["id"]
+    assert first.json()["name"] == "反向策略 复制"
+    assert second.json()["name"] == "反向策略 复制 2"
+    assert first.json()["direction"] == "btc_short_eth_long"
+    assert first.json()["version"] == 1
 
 
 def test_bulk_strategy_assignment_resets_strategy_progress_but_preserves_execution_sequence_and_audit() -> None:

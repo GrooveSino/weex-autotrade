@@ -41,6 +41,14 @@ def register_account_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     def create_strategy(payload: VolumeStrategyInput) -> VolumeStrategy:
         return service.create_strategy(payload)
 
+    @app.post(
+        "/api/v1/strategies/{strategy_id}/duplicate",
+        response_model=VolumeStrategy,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def duplicate_strategy(strategy_id: str) -> VolumeStrategy:
+        return service.duplicate_strategy(strategy_id)
+
     @app.patch("/api/v1/strategies/{strategy_id}", response_model=VolumeStrategy)
     async def update_strategy(strategy_id: str, payload: VolumeStrategyInput) -> VolumeStrategy:
         affected = [instance.id for instance in service.list_instances() if instance.strategy_id == strategy_id]

@@ -1,11 +1,8 @@
-import type { AccountInstance, BetaCampaign, StrategyDirection } from '../../types'
+import type { AccountInstance, BetaCampaign } from '../../types'
 
 interface BoundStrategyOverviewProps {
   account: AccountInstance
   execution: BetaCampaign | null
-  direction: StrategyDirection
-  directionDisabled: boolean
-  onDirectionChange: (direction: StrategyDirection) => void
 }
 
 const quote = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -13,27 +10,22 @@ const quote = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximum
 export function BoundStrategyOverview({
   account,
   execution,
-  direction,
-  directionDisabled,
-  onDirectionChange,
 }: BoundStrategyOverviewProps) {
   const targetMinimum = Number(account.strategy.targetVolumeQuoteMin)
   const targetMaximum = Number(account.strategy.targetVolumeQuoteMax)
   const hasTargetRange = targetMinimum !== targetMaximum
   const selectedTarget = execution?.selectedTargetQuoteVolume ?? execution?.strategyTargetQuoteVolume
   const executionTarget = execution?.executionTargetQuoteVolume ?? execution?.targetQuote
+  const direction = execution?.direction ?? account.strategy.direction
   return <>
-    <div className="bound-direction-control" role="radiogroup" aria-label="BTC 与 ETH 交易方向">
-      <span>交易方向</span>
-      <div>
-        <button type="button" role="radio" aria-checked={direction === 'btc_long_eth_short'} className={direction === 'btc_long_eth_short' ? 'active' : ''} disabled={directionDisabled} onClick={() => onDirectionChange('btc_long_eth_short')}>BTC 多 · ETH 空</button>
-        <button type="button" role="radio" aria-checked={direction === 'btc_short_eth_long'} className={direction === 'btc_short_eth_long' ? 'active' : ''} disabled={directionDisabled} onClick={() => onDirectionChange('btc_short_eth_long')}>BTC 空 · ETH 多</button>
-      </div>
-    </div>
     <div className="beta-campaign-summary">
       <div className="beta-campaign-summary-primary">
         <span>已绑定共享策略</span>
         <strong>{execution?.strategyName ?? account.strategy.name}<small>v{execution?.strategyVersion ?? account.strategy.version}</small></strong>
+      </div>
+      <div>
+        <span>策略方向</span>
+        <strong>{direction === 'btc_long_eth_short' ? 'BTC 多 · ETH 空' : 'BTC 空 · ETH 多'}</strong>
       </div>
       <div>
         <span>{hasTargetRange ? '策略目标范围' : '策略目标'}</span>

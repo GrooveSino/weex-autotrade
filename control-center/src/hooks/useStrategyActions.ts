@@ -2,6 +2,7 @@ import {
   assignVolumeStrategy,
   createVolumeStrategy,
   deleteVolumeStrategy,
+  duplicateVolumeStrategy,
   updateVolumeStrategy,
 } from '../services'
 import type { StrategyDraft, VolumeStrategy } from '../types'
@@ -34,8 +35,9 @@ export function useStrategyActions(state: FleetState) {
       setStrategies((current) => current.map((item) => item.id === updated.id ? updated : item))
       setAccounts((current) => current.map((account) => {
         if (account.strategyId !== updated.id) return account
-        const modeChanged = account.strategy.targetMode !== updated.targetMode
-        const strategyProgress = modeChanged ? {
+        const executionShapeChanged = account.strategy.targetMode !== updated.targetMode
+          || account.strategy.direction !== updated.direction
+        const strategyProgress = executionShapeChanged ? {
           ...account.strategyProgress,
           generatedVolumeQuote: '0',
           startedAtMs: null,
@@ -71,6 +73,18 @@ export function useStrategyActions(state: FleetState) {
     }
   }
 
+  const duplicateStrategy = async (strategy: VolumeStrategy): Promise<VolumeStrategy | null> => {
+    try {
+      const duplicated = await duplicateVolumeStrategy(strategy)
+      setStrategies((current) => [...current, duplicated])
+      setToast(`已复制策略：${duplicated.name}`)
+      return duplicated
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '复制策略失败')
+      return null
+    }
+  }
+
   const deleteStrategy = async (strategy: VolumeStrategy): Promise<boolean> => {
     try {
       await deleteVolumeStrategy(strategy.id)
@@ -97,5 +111,5 @@ export function useStrategyActions(state: FleetState) {
     }
   }
 
-  return { createStrategy, updateStrategy, deleteStrategy, assignStrategy }
+  return { createStrategy, updateStrategy, duplicateStrategy, deleteStrategy, assignStrategy }
 }

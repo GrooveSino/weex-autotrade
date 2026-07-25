@@ -7,6 +7,7 @@ import { apiRequest, controlPlaneEnabled } from '../core/controlCenterCore'
 function strategyPayload(draft: StrategyDraft) {
   return {
     name: draft.name,
+    direction: draft.direction,
     targetMode: draft.targetMode,
     targetVolumeQuote: draft.targetVolumeQuoteMax,
     targetVolumeQuoteMin: draft.targetVolumeQuoteMin,
@@ -28,6 +29,18 @@ export async function createVolumeStrategy(draft: StrategyDraft): Promise<Volume
     method: 'POST',
     body: JSON.stringify(strategyPayload(draft)),
   })
+}
+
+export async function duplicateVolumeStrategy(strategy: VolumeStrategy): Promise<VolumeStrategy> {
+  if (!controlPlaneEnabled) {
+    return {
+      ...strategy,
+      id: `strategy-${crypto.randomUUID().slice(0, 8)}`,
+      name: `${strategy.name} 复制`.slice(0, 64),
+      version: 1,
+    }
+  }
+  return apiRequest<VolumeStrategy>(`/strategies/${strategy.id}/duplicate`, { method: 'POST' })
 }
 
 export async function updateVolumeStrategy(

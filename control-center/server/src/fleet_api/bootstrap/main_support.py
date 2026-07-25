@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from fleet_api.accounts.instance_projection import project_instance_session
 from fleet_api.bootstrap.main_context import FleetAppContext
 from fleet_api.campaigns.core.campaign_log import campaign_event_log
-from fleet_api.models import AccountInstance, LogBatch, LogLine, StrategyDirection
+from fleet_api.models import AccountInstance, LogBatch, LogLine
 from fleet_api.services.control.service import UnsafeOperation
 from fleet_api.strategy.strategy import StrategyRunBlocked, StrategyTargetReached, resolve_strategy_run_plan
 
@@ -80,15 +80,11 @@ def install_projection_support(ctx: FleetAppContext) -> None:
         cursor = lines[-1].id if lines else (None if reset else after)
         return LogBatch(lines=lines, cursor=cursor, reset=reset)
 
-    def strategy_run_plan(
-        instance: AccountInstance,
-        direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
-    ):
+    def strategy_run_plan(instance: AccountInstance):
         try:
             return resolve_strategy_run_plan(
                 instance,
                 ctx.volume_ledger.active_session(instance.id, instance.mode.value),
-                direction,
             )
         except (StrategyRunBlocked, StrategyTargetReached) as exc:
             raise UnsafeOperation(str(exc)) from None

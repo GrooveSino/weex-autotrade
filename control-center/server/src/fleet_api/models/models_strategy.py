@@ -6,7 +6,7 @@ from typing import Any, Self
 from pydantic import Field, SecretStr
 from pydantic.functional_validators import model_validator
 
-from fleet_api.models.models_shared import CamelModel, ProxyType, StrategyStage, StrategyTargetMode
+from fleet_api.models.models_shared import CamelModel, ProxyType, StrategyDirection, StrategyStage, StrategyTargetMode
 
 
 class CredentialInput(CamelModel):
@@ -33,6 +33,7 @@ class ProxyInput(CamelModel):
 
 class VolumeStrategyInput(CamelModel):
     name: str = Field(default="成交量策略", min_length=1, max_length=64)
+    direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT
     target_mode: StrategyTargetMode = StrategyTargetMode.INCREMENTAL
     target_volume_quote: Decimal = Field(gt=0, le=1_000_000_000_000, multiple_of=Decimal("0.01"))
     target_volume_quote_min: Decimal = Field(gt=0, le=1_000_000_000_000, multiple_of=Decimal("0.01"))

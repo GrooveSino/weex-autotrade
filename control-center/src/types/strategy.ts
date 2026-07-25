@@ -39,6 +39,7 @@ export interface VolumeStrategy {
   id: string
   version: number
   name: string
+  direction: StrategyDirection
   targetMode: StrategyTargetMode
   targetVolumeQuote: string
   targetVolumeQuoteMin: string
@@ -53,6 +54,7 @@ export interface VolumeStrategy {
 
 export interface StrategyDraft {
   name: string
+  direction: StrategyDirection
   targetMode: StrategyTargetMode
   targetVolumeQuoteMin: string
   targetVolumeQuoteMax: string

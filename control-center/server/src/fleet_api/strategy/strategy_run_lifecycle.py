@@ -8,7 +8,7 @@ from decimal import Decimal
 from fleet_api.accounts.instance_projection import optional_available_balance
 from fleet_api.auth.vault import CredentialMaterial, CredentialVault
 from fleet_api.campaigns.core.campaign_contracts import CampaignJournal, CampaignRecord
-from fleet_api.models import AccountInstance, ExecutionLifecycleSnapshot, StrategyDirection
+from fleet_api.models import AccountInstance, ExecutionLifecycleSnapshot
 from fleet_api.strategy.strategy_run_commands import StrategyRunCommandMixin
 from fleet_api.strategy.strategy_run_helpers import (
     active_preparation,
@@ -59,7 +59,6 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin, StrategyRunRecoveryMi
         self,
         instance: AccountInstance,
         material: CredentialMaterial | None,
-        direction: StrategyDirection = StrategyDirection.BTC_LONG_ETH_SHORT,
     ) -> LifecyclePreparation:
         if material is None:
             return LifecyclePreparation("unavailable", reason_code="credentials_unavailable", message="账号凭据不可用")
@@ -73,7 +72,7 @@ class StrategyRunLifecycleService(StrategyRunCommandMixin, StrategyRunRecoveryMi
                 or record.metadata.get("strategy_id") != instance.strategy_id
                 or record.metadata.get("strategy_version") != instance.strategy.version
                 or record.campaign.schema_version < 5
-                or record.campaign.direction != direction.value
+                or record.campaign.direction != instance.strategy.direction.value
                 or record.campaign.leverage != 400
                 or record.campaign.margin_mode != "cross"
             )

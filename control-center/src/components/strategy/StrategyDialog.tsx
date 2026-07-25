@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { ChartNoAxesCombined, Clock3, History, Plus, ShieldCheck, TimerReset, Trash2, X } from 'lucide-react'
+import { ChartNoAxesCombined, Clock3, Copy, History, Plus, ShieldCheck, TimerReset, Trash2, X } from 'lucide-react'
 import type { AccountInstance, StrategyDraft, VolumeStrategy } from '../../types'
 import { draftStrategy, durationParts, estimateRounds, secondsFromParts, targetTolerance } from '../../utils/strategy'
 
@@ -10,11 +10,13 @@ interface StrategyDialogProps {
   onClose: () => void
   onCreate: (draft: StrategyDraft) => Promise<VolumeStrategy | null>
   onUpdate: (strategy: VolumeStrategy, draft: StrategyDraft) => Promise<VolumeStrategy | null>
+  onDuplicate: (strategy: VolumeStrategy) => Promise<VolumeStrategy | null>
   onDelete: (strategy: VolumeStrategy) => Promise<boolean>
 }
 
 const initialDraft: StrategyDraft = {
   name: '新成交量策略',
+  direction: 'btc_long_eth_short',
   targetMode: 'incremental',
   targetVolumeQuoteMin: '10000',
   targetVolumeQuoteMax: '15000',
@@ -26,12 +28,11 @@ const initialDraft: StrategyDraft = {
   roundIntervalMaxSeconds: 1800,
 }
 
-const quote = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 })
-
 function draftFor(strategy: VolumeStrategy | null): StrategyDraft {
   if (!strategy) return initialDraft
   return {
     name: strategy.name,
+    direction: strategy.direction,
     targetMode: strategy.targetMode,
     targetVolumeQuoteMin: strategy.targetVolumeQuoteMin ?? strategy.targetVolumeQuote,
     targetVolumeQuoteMax: strategy.targetVolumeQuoteMax ?? strategy.targetVolumeQuote,
@@ -88,7 +89,7 @@ function DurationRange({ title, subtitle, minimum, maximum, disabled, onMinimumC
   )
 }
 
-export function StrategyDialog({ strategies, accounts, initialStrategyId, onClose, onCreate, onUpdate, onDelete }: StrategyDialogProps) {
+export function StrategyDialog({ strategies, accounts, initialStrategyId, onClose, onCreate, onUpdate, onDuplicate, onDelete }: StrategyDialogProps) {
   const initial = strategies.find((strategy) => strategy.id === initialStrategyId) ?? strategies[0] ?? null
   const [selectedId, setSelectedId] = useState<string | null>(initial?.id ?? null)
   const [creating, setCreating] = useState(!initial)
@@ -171,6 +172,15 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
     setDraft(draftFor(fallback))
   }
 
+  const duplicate = async () => {
+    if (!selected || busy) return
+    setBusy(true)
+    setError(null)
+    const saved = await onDuplicate(selected)
+    setBusy(false)
+    if (saved) choose(saved)
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="dialog strategy-library-dialog" role="dialog" aria-modal="true" aria-labelledby="strategy-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -187,7 +197,7 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
                 return (
                   <button key={strategy.id} type="button" className={!creating && selectedId === strategy.id ? 'active' : ''} onClick={() => choose(strategy)}>
                     <strong>{strategy.name}</strong>
-                    <span>{strategy.targetMode === 'lifetime' ? '历史累计' : '启动后新增'} · 目标 {quote.format(Number(strategy.targetVolumeQuoteMin))}-{quote.format(Number(strategy.targetVolumeQuoteMax))}</span>
+                    <span>{strategy.direction === 'btc_long_eth_short' ? 'BTC 多 · ETH 空' : 'BTC 空 · ETH 多'} · {strategy.targetMode === 'lifetime' ? '历史累计' : '启动后新增'}</span>
                     <small>{usage} 个账号</small>
                   </button>
                 )
@@ -199,6 +209,15 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
             <div className="strategy-target-row">
               <div className="strategy-target-mark"><ChartNoAxesCombined size={18} /></div>
               <label><span>策略名称</span><input required disabled={blocked || busy} value={draft.name} onChange={(event) => update('name', event.target.value)} autoFocus /></label>
+            </div>
+
+            <div className="target-mode-control strategy-direction-control" role="radiogroup" aria-label="策略交易方向">
+              <button type="button" role="radio" aria-checked={draft.direction === 'btc_long_eth_short'} className={draft.direction === 'btc_long_eth_short' ? 'active' : ''} disabled={blocked || busy} onClick={() => update('direction', 'btc_long_eth_short')}>
+                <span><strong>BTC 多 · ETH 空</strong><small>所有绑定账号统一使用</small></span>
+              </button>
+              <button type="button" role="radio" aria-checked={draft.direction === 'btc_short_eth_long'} className={draft.direction === 'btc_short_eth_long' ? 'active' : ''} disabled={blocked || busy} onClick={() => update('direction', 'btc_short_eth_long')}>
+                <span><strong>BTC 空 · ETH 多</strong><small>建议复制策略后换向</small></span>
+              </button>
             </div>
 
             <div className="target-mode-control" role="radiogroup" aria-label="目标交易量统计口径">
@@ -247,6 +266,7 @@ export function StrategyDialog({ strategies, accounts, initialStrategyId, onClos
             {error && <div className="form-error">{error}</div>}
 
             <footer className="dialog-actions">
+              {!creating && selected && <button className="button secondary" type="button" disabled={busy} onClick={() => void duplicate()}><Copy size={14} />复制策略</button>}
               {!creating && selected && <button className="button danger dialog-delete-button" type="button" disabled={Boolean(assigned.length) || busy} onClick={() => void remove()}><Trash2 size={14} />{confirmDelete ? '确认删除' : assigned.length ? '使用中' : '删除策略'}</button>}
               <button className="button secondary" type="button" onClick={onClose}>关闭</button>
               <button className="button primary" type="submit" disabled={blocked || busy}>{busy ? '处理中...' : creating ? '创建策略' : '保存策略'}</button>
