@@ -21,6 +21,7 @@ class ActorLifecycleProjection:
 _PHASE_TEXT = {
     "admitted": "已接纳，等待准备",
     "preparing": "正在准备执行条件",
+    "market_waiting": "等待共享行情恢复",
     "phase_queued": "正常阶段排队",
     "opening": "正在执行开仓阶段",
     "holding": "正在持仓等待",
@@ -54,6 +55,16 @@ def latest_actor_lifecycle(rows: list[dict[str, Any]]) -> ActorLifecycleProjecti
 
 
 def actor_active_wait(actor: ActorLifecycleProjection | None, *, updated_at_ms: int) -> ActiveExecutionWait | None:
+    if actor is not None and actor.execution_state == "market_waiting":
+        return ActiveExecutionWait(
+            key="shared-market-recovery",
+            label="等待共享行情恢复",
+            updated_at_ms=updated_at_ms,
+            elapsed_ms=0,
+            remaining_ms=None,
+            detail="BTC / ETH 共享盘口尚未同时达到新鲜度要求",
+            deadline_at_ms=None,
+        )
     if actor is None or actor.execution_state != "phase_queued":
         return None
     phase = "平仓" if actor.queue_phase == "close" else "开仓"
@@ -132,6 +143,8 @@ def _integer_or_none(value: object) -> int | None:
 
 def _actor_detail(event: dict[str, Any]) -> str:
     state = str(_field(event, "phase") or "")
+    if state == "market_waiting":
+        return "等待 BTC / ETH 共享盘口恢复，不会提交订单或回退到账号代理 REST"
     if state != "phase_queued":
         return _reason_text(str(_field(event, "reason") or ""))
     position = _integer_or_none(_field(event, "queue_position"))

@@ -8,6 +8,7 @@ from typing import Literal
 ActorPhase = Literal[
     "admitted",
     "preparing",
+    "market_waiting",
     "phase_queued",
     "opening",
     "holding",

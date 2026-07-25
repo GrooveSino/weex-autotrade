@@ -191,6 +191,15 @@ class HealthResponse(CamelModel):
     market_data_active_leases: int = Field(default=0, ge=0)
     market_data_shared_connections: int = Field(default=0, ge=0)
     market_data_idle_connections: int = Field(default=0, ge=0)
+    shared_market_enabled: bool = False
+    shared_market_connected: bool = False
+    shared_market_generation: int = Field(default=0, ge=0)
+    shared_market_btc_snapshot_age_ms: int | None = Field(default=None, ge=0)
+    shared_market_eth_snapshot_age_ms: int | None = Field(default=None, ge=0)
+    shared_market_rest_fallback_count: int = Field(default=0, ge=0)
+    shared_market_reconnect_count: int = Field(default=0, ge=0)
+    shared_market_waiting_phase_count: int = Field(default=0, ge=0)
+    shared_market_source_state: str = "disabled"
     private_order_stream_active_leases: int = Field(default=0, ge=0)
     private_order_streams: int = Field(default=0, ge=0)
     history_sync_queued: int = Field(default=0, ge=0)
@@ -224,6 +233,15 @@ class ExecutionCapacityResponse(CamelModel):
     market_data_active_leases: int = Field(ge=0)
     market_data_shared_connections: int = Field(ge=0)
     market_data_idle_connections: int = Field(ge=0)
+    shared_market_enabled: bool = False
+    shared_market_connected: bool = False
+    shared_market_generation: int = Field(default=0, ge=0)
+    shared_market_btc_snapshot_age_ms: int | None = Field(default=None, ge=0)
+    shared_market_eth_snapshot_age_ms: int | None = Field(default=None, ge=0)
+    shared_market_rest_fallback_count: int = Field(default=0, ge=0)
+    shared_market_reconnect_count: int = Field(default=0, ge=0)
+    shared_market_waiting_phase_count: int = Field(default=0, ge=0)
+    shared_market_source_state: str = "disabled"
     private_order_stream_active_leases: int = Field(ge=0)
     private_order_streams: int = Field(ge=0)
     history_sync_queued: int = Field(ge=0)

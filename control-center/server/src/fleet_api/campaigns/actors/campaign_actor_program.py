@@ -10,6 +10,7 @@ from weex_cli.beta_campaign import BetaVolumeCampaign
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, CloseCycle, OpenCycle
 from fleet_api.campaigns.actors.campaign_actor_phases import CampaignActorPhases
+from fleet_api.execution.resources.market_data_hub import PublicMarketSnapshotService
 from fleet_api.execution.runtime.async_execution_orchestrator import ExecutionActor
 
 ResultSink = Callable[[dict[str, Any]], None]
@@ -26,6 +27,7 @@ class CampaignActorProgram:
         phases: CampaignActorPhases,
         *,
         proxy_key: str,
+        shared_market: PublicMarketSnapshotService,
         on_result: ResultSink,
         on_failure: FailureSink,
         on_event: EventSink,
@@ -33,6 +35,7 @@ class CampaignActorProgram:
         self._campaign = campaign
         self._phases = phases
         self._proxy_key = proxy_key
+        self._shared_market = shared_market
         self._on_result = on_result
         self._on_failure = on_failure
         self._on_event = on_event
@@ -56,6 +59,9 @@ class CampaignActorProgram:
                         reason="maximum_rounds_exceeded",
                     )
                     await self._deliver(actor, result, "stopped")
+                    return
+                if not await self._wait_for_market(actor):
+                    await self._finish_stopped(actor, context, opened)
                     return
                 reservation = await actor.wait_for_normal_phase(
                     "open",
@@ -128,6 +134,8 @@ class CampaignActorProgram:
             actor.transition("recovering", reason=f"phase_exception:{type(exc).__name__.lower()}")
 
     async def _close(self, actor: ExecutionActor, opened: OpenCycle) -> CloseCycle | None:
+        if not await self._wait_for_market(actor):
+            return None
         reservation = await actor.wait_for_normal_phase(
             "close",
             proxy_key=self._proxy_key,
@@ -139,6 +147,22 @@ class CampaignActorProgram:
             return await actor.run_blocking(self._phases.close, self._campaign, opened)
         finally:
             actor.finish_normal_phase(reservation)
+
+    async def _wait_for_market(self, actor: ExecutionActor) -> bool:
+        """Wait before phase admission so stale public data cannot occupy a slot."""
+        if not self._shared_market.enabled:
+            return not actor.stop_event.is_set()
+        self._shared_market.set_waiting(actor.execution_id, True)
+        try:
+            while not actor.stop_event.is_set():
+                if self._shared_market.fresh():
+                    actor.transition("preparing", reason="shared_market_ready")
+                    return True
+                actor.transition("market_waiting", reason="shared_market_recovering")
+                await _sleep_shortly()
+            return False
+        finally:
+            self._shared_market.set_waiting(actor.execution_id, False)
 
     async def _finish_outcome(
         self,
@@ -228,6 +252,13 @@ class CampaignActorProgram:
 
 def _now_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+async def _sleep_shortly() -> None:
+    # Keep the event-loop responsive while the one shared stream recovers.
+    import asyncio
+
+    await asyncio.sleep(0.1)
 
 
 def _actor_terminal_phase(result: dict[str, Any]) -> str:

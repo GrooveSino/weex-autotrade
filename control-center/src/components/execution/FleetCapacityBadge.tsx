@@ -21,7 +21,10 @@ export function FleetCapacityBadge({ capacity, loading }: FleetCapacityBadgeProp
     `安全 I/O ${capacity.activeEmergencyIo}/${capacity.maxEmergencyIo}`,
     `活动代理分片 ${capacity.activeProxyPhasePartitions} · Actor ${capacity.actorCount}`,
     `SQLite 队列 ${capacity.sqliteWriteQueueCritical}/${capacity.sqliteWriteQueueLowPriority} · p95 ${capacity.sqliteWriteP95Ms}ms`,
-    `行情/私有流租赁 ${capacity.marketDataActiveLeases}/${capacity.privateOrderStreamActiveLeases}`,
+    capacity.sharedMarketEnabled
+      ? `共享行情 ${capacity.sharedMarketConnected ? '实时' : '恢复中'} · BTC/ETH ${formatAge(capacity.sharedMarketBtcSnapshotAgeMs)}/${formatAge(capacity.sharedMarketEthSnapshotAgeMs)} · 等待 ${capacity.sharedMarketWaitingPhaseCount}`
+      : '共享行情未启用',
+    `私有订单流租赁 ${capacity.privateOrderStreamActiveLeases}`,
     `成交同步 排队 ${capacity.historySyncQueued} · 运行 ${capacity.historySyncRunning}`,
   ].join(' · ')
 
@@ -31,4 +34,8 @@ export function FleetCapacityBadge({ capacity, loading }: FleetCapacityBadgeProp
       <small>阶段 {capacity.activeNormalPhases}/{capacity.maxNormalPhases} · 排队 {capacity.queuedNormalPhases} · 代理限速 {capacity.queuedProxyLimitedPhases}</small>
     </span>
   )
+}
+
+function formatAge(value: number | null): string {
+  return value === null ? '--' : `${value}ms`
 }

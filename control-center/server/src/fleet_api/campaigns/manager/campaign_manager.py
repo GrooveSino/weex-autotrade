@@ -18,7 +18,7 @@ from fleet_api.campaigns.manager.campaign_manager_commands import CampaignComman
 from fleet_api.campaigns.manager.campaign_manager_worker import CampaignWorkerRuntimeMixin
 from fleet_api.config.config import ControlPlaneSettings
 from fleet_api.execution.resources.fleet_write_coordinator import FleetWriteCoordinator
-from fleet_api.execution.resources.market_data_hub import MarketDataHub
+from fleet_api.execution.resources.market_data_hub import PublicMarketSnapshotService
 from fleet_api.execution.resources.private_order_stream_pool import PrivateOrderStreamPool
 from fleet_api.execution.runtime.execution_capacity import ExecutionCapacity, ExecutionCapacitySnapshot
 from fleet_api.execution.runtime.execution_io import ExecutionIoBudget, ExecutionIoSnapshot
@@ -69,7 +69,12 @@ class CampaignWorkerManager(
             max_emergency=settings.execution_io_emergency_capacity,
         )
         self.write_coordinator = FleetWriteCoordinator()
-        self.market_data_hub = MarketDataHub()
+        self.public_market_snapshot_service = PublicMarketSnapshotService(
+            enabled=settings.adapter == "weex-live" and settings.live_campaign_websockets_enabled,
+            request_timeout_ms=settings.weex_request_timeout_ms,
+            proxy_url=settings.shared_market_data_proxy_url,
+        )
+        self.public_market_snapshot_service.start()
         self.private_order_stream_pool = PrivateOrderStreamPool()
         legacy_workers = 1 if settings.async_actor_runtime_enabled else settings.live_campaign_worker_count
         self._executor = ThreadPoolExecutor(max_workers=legacy_workers, thread_name_prefix="weex-campaign")
@@ -139,6 +144,6 @@ class CampaignWorkerManager(
         self._executor.shutdown(wait=True, cancel_futures=False)
         self.close_boundary_reader()
         self.private_order_stream_pool.close()
-        self.market_data_hub.close()
+        self.public_market_snapshot_service.close()
         self.write_coordinator.close()
         self.journal.close()

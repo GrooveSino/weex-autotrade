@@ -91,6 +91,15 @@ export interface ControlPlaneHealth {
   marketDataActiveLeases: number
   marketDataSharedConnections: number
   marketDataIdleConnections: number
+  sharedMarketEnabled: boolean
+  sharedMarketConnected: boolean
+  sharedMarketGeneration: number
+  sharedMarketBtcSnapshotAgeMs: number | null
+  sharedMarketEthSnapshotAgeMs: number | null
+  sharedMarketRestFallbackCount: number
+  sharedMarketReconnectCount: number
+  sharedMarketWaitingPhaseCount: number
+  sharedMarketSourceState: string
   privateOrderStreamActiveLeases: number
   privateOrderStreams: number
   historySyncQueued: number
@@ -124,6 +133,15 @@ export interface ExecutionCapacity {
   marketDataActiveLeases: number
   marketDataSharedConnections: number
   marketDataIdleConnections: number
+  sharedMarketEnabled: boolean
+  sharedMarketConnected: boolean
+  sharedMarketGeneration: number
+  sharedMarketBtcSnapshotAgeMs: number | null
+  sharedMarketEthSnapshotAgeMs: number | null
+  sharedMarketRestFallbackCount: number
+  sharedMarketReconnectCount: number
+  sharedMarketWaitingPhaseCount: number
+  sharedMarketSourceState: string
   privateOrderStreamActiveLeases: number
   privateOrderStreams: number
   historySyncQueued: number

@@ -12,6 +12,16 @@ from fleet_api.execution.runtime.async_execution_orchestrator import AsyncExecut
 from fleet_api.execution.runtime.execution_capacity import ExecutionCapacity
 
 
+class _SharedMarket:
+    enabled = False
+
+    def fresh(self) -> bool:
+        return True
+
+    def set_waiting(self, _execution_id: str, _waiting: bool) -> None:
+        return
+
+
 def _context() -> CampaignActorContext:
     child = SimpleNamespace(estimated_rounds=1, max_empty_rounds=1)
     return CampaignActorContext(child=child, run_number=1, execution_started_at_ms=1_000)
@@ -90,11 +100,13 @@ def _program(
     proxy_key: str = "proxy-a",
     failures: list[Exception] | None = None,
     events: list[dict[str, Any]] | None = None,
+    shared_market: _SharedMarket | None = None,
 ) -> CampaignActorProgram:
     return CampaignActorProgram(
         SimpleNamespace(),  # type: ignore[arg-type]
         phases,  # type: ignore[arg-type]
         proxy_key=proxy_key,
+        shared_market=shared_market or _SharedMarket(),  # type: ignore[arg-type]
         on_result=result.append,
         on_failure=(failures.append if failures is not None else lambda _error: None),
         on_event=(events.append if events is not None else lambda _event: None),
@@ -270,7 +282,6 @@ def test_orchestrator_shutdown_waits_for_safe_stop_instead_of_cancelling_actor()
             time.sleep(0.01)
 
         runtime.close()
-
         assert phases.safe_calls == 1
         assert result == [{"status": "stopped", "reason": "finished"}]
     finally:

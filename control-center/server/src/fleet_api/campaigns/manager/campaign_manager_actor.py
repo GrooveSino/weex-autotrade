@@ -57,6 +57,7 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
             record.campaign,
             phase_factory,
             proxy_key=proxy_key,
+            shared_market=self.public_market_snapshot_service,
             on_result=lambda result: self._actor_completed(record, material, result),
             on_failure=lambda error: self._actor_failed(record, error),
             on_event=self._actor_event_sink(record),
@@ -278,11 +279,10 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
         return self._actor_runtime.snapshot()
 
     def connection_snapshots(self):  # type: ignore[no-untyped-def]
-        return self.market_data_hub.snapshot(), self.private_order_stream_pool.snapshot()
+        return self.public_market_snapshot_service.snapshot(), self.private_order_stream_pool.snapshot()
 
     def collect_connections(self) -> None:
         """Close released streams once their bounded idle period has elapsed."""
-        self.market_data_hub.collect()
         self.private_order_stream_pool.collect()
 
     def _read_ending_available(self, material: CredentialMaterial) -> str | None:

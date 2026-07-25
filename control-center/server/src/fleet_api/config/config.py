@@ -58,6 +58,9 @@ class ControlPlaneSettings:
     # The REST fallback is the Fleet-scale default. A public/private socket
     # pair per task would turn 200 logical executions into 400 idle streams.
     live_campaign_websockets_enabled: bool = False
+    # Empty intentionally means the executor host itself is the sole public
+    # market-data egress. Account proxies never apply to this connection.
+    shared_market_data_proxy_url: str | None = None
     execution_phase_gap_seconds: float = 5
     execution_phase_jitter_seconds: float = 15
     taker_dust_max_quote: Decimal = Decimal("10.00")
@@ -185,6 +188,7 @@ class ControlPlaneSettings:
             live_campaign_websockets_enabled=_as_bool(
                 os.environ.get("FLEET_LIVE_CAMPAIGN_WEBSOCKETS_ENABLED", "false")
             ),
+            shared_market_data_proxy_url=(os.environ.get("FLEET_SHARED_MARKET_DATA_PROXY_URL", "").strip() or None),
             execution_phase_gap_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_GAP_SECONDS", "5")),
             execution_phase_jitter_seconds=float(os.environ.get("FLEET_EXECUTION_PHASE_JITTER_SECONDS", "15")),
             taker_dust_max_quote=Decimal(os.environ.get("FLEET_TAKER_DUST_MAX_QUOTE", "10.00")),
