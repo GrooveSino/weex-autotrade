@@ -63,6 +63,19 @@ set +a
 [[ "${FLEET_LIVE_CAMPAIGNS_ENABLED:-}" == "true" ]] || { print -u2 "FLEET_LIVE_CAMPAIGNS_ENABLED=true is required"; exit 65; }
 [[ "${WEEX_LIVE_TRADING_ENABLED:-}" == "true" ]] || { print -u2 "WEEX_LIVE_TRADING_ENABLED=true is required"; exit 65; }
 
+# Shared public depth has exactly one direct egress by default.  Reject a
+# release before any service switch when that route cannot reach WEEX: a
+# healthy-looking API with no shared market would otherwise hold every normal
+# Maker phase in the recovery queue.
+if [[ "${FLEET_LIVE_CAMPAIGN_WEBSOCKETS_ENABLED:-false}" == "true" \
+  && -z "${FLEET_SHARED_MARKET_DATA_PROXY_URL:-}" ]]; then
+  if ! nc -G 5 -z ws-contract.weex.com 443 >/dev/null 2>&1; then
+    print -u2 "refusing deployment: Mac mini cannot directly reach WEEX public market data (ws-contract.weex.com:443)"
+    print -u2 "restore direct egress or configure a dedicated non-account shared market proxy before retrying"
+    exit 70
+  fi
+fi
+
 script_dir="${0:A:h}"
 control_center_dir="${script_dir:h:h:h}"
 release_root="${FLEET_RELEASE_ROOT:-${HOME}/Library/Application Support/WEEXFleet}"
