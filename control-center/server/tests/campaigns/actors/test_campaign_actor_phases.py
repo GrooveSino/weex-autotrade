@@ -276,7 +276,10 @@ def test_close_stage_rebuilds_lanes_from_the_persisted_child_plan(monkeypatch) -
     )
     monkeypatch.setattr("fleet_api.campaigns.actors.campaign_actor_phases.positions_are_flat", lambda *_args: True)
     volume._refresh_pending_accounting = lambda *_args: None  # type: ignore[attr-defined]
-    volume._final_acceptance = lambda *_args: {"status": "completed", "reason": "target_verified_complete"}  # type: ignore[attr-defined]
+    volume._final_acceptance = lambda *_args, **_kwargs: {  # type: ignore[attr-defined]
+        "status": "completed",
+        "reason": "target_verified_complete",
+    }
     context.child_total_quote = Decimal("200")
 
     outcome = _phases(volume).close(_campaign(), opened)

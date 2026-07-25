@@ -2236,6 +2236,8 @@ class LiveBetaVolumeService:
         lanes: Mapping[str, _Lane],
         preflight: Mapping[str, Any],
         execution_started_ms: int,
+        *,
+        minimum_accepted_quote: Decimal | None = None,
     ) -> dict[str, Any]:
         self._emit("final_acceptance_started", total_quote=decimal_text(total_quote))
         positions = {
@@ -2281,8 +2283,9 @@ class LiveBetaVolumeService:
             if observation is not None
         )
         accounting = _accounting_summary(summaries)
+        required_quote = plan.target_turnover_quote if minimum_accepted_quote is None else minimum_accepted_quote
         completed = (
-            total_quote >= plan.target_turnover_quote
+            total_quote >= required_quote
             and flat
             and no_orders
             and accounting["verified"]
@@ -2300,7 +2303,13 @@ class LiveBetaVolumeService:
         return self._finish(
             plan,
             "completed" if completed else "uncertain",
-            "paired_target_completed" if completed else "final_acceptance_invariant_failed",
+            (
+                "paired_target_completed_with_tolerance"
+                if completed and total_quote < plan.target_turnover_quote
+                else "paired_target_completed"
+            )
+            if completed
+            else "final_acceptance_invariant_failed",
             summaries,
             cycles,
             total_quote,
@@ -2924,6 +2933,7 @@ def _result_payload(
     accounting = _accounting_summary(legs)
     achievement = total_quote / plan.target_turnover_quote * Decimal(100)
     excess = max(Decimal(0), total_quote - plan.target_turnover_quote)
+    shortfall = max(Decimal(0), plan.target_turnover_quote - total_quote)
     return {
         "schema_version": plan.schema_version,
         "kind": "beta_volume_execution",
@@ -2937,6 +2947,8 @@ def _result_payload(
         "executed_quote_volume": decimal_text(total_quote),
         "target_turnover_quote": decimal_text(plan.target_turnover_quote),
         "round_turnover_quote": decimal_text(plan.round_turnover_quote),
+        "remaining_quote": "0" if status == "completed" else decimal_text(shortfall),
+        "target_shortfall_quote": decimal_text(shortfall),
         "excess_quote": decimal_text(excess),
         "target_achievement_percent": decimal_text(achievement),
         "elapsed_ms": elapsed_ms,

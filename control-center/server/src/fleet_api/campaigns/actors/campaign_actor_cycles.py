@@ -33,16 +33,21 @@ def observe_positions(
     *,
     action: str = "cycle_check",
 ) -> dict[str, Decimal | None]:
-    observed = {
-        symbol: service._observe_position(
-            lane.venue,
-            round_number=round_number,
-            sequence="actor",
-            symbol=symbol,
-            action=action,
-        )
-        for symbol, lane in lanes.items()
-    }
+    if not lanes:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(2, len(lanes)), thread_name_prefix="fleet-observe") as pool:
+        jobs = {
+            symbol: pool.submit(
+                service._observe_position,
+                lane.venue,
+                round_number=round_number,
+                sequence="actor",
+                symbol=symbol,
+                action=action,
+            )
+            for symbol, lane in lanes.items()
+        }
+        observed = {symbol: future.result() for symbol, future in jobs.items()}
     positions: dict[str, Decimal | None] = {}
     for symbol, value in observed.items():
         if value is None:
@@ -94,16 +99,25 @@ def close_lanes(
     jobs: dict[str, Any] = {}
     plans = {"BTC": opened.btc_plan, "ETH": opened.eth_plan}
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="fleet-close") as pool:
-        for offset, symbol in enumerate(("BTC", "ETH"), 3):
-            if stops.get(symbol, ("", ""))[0] == "submission_uncertain":
-                continue
-            position = service._observe_position(
+        eligible = tuple(
+            symbol for symbol in ("BTC", "ETH") if stops.get(symbol, ("", ""))[0] != "submission_uncertain"
+        )
+        observations = {
+            symbol: pool.submit(
+                service._observe_position,
                 lanes[symbol].venue,
                 round_number=opened.context.round_number,
                 sequence="barrier",
                 symbol=symbol,
                 action="close",
             )
+            for symbol in eligible
+        }
+        positions = {symbol: future.result() for symbol, future in observations.items()}
+        for offset, symbol in enumerate(("BTC", "ETH"), 3):
+            if symbol not in positions:
+                continue
+            position = positions[symbol]
             if position is None:
                 stops[symbol] = ("observation_uncertain", "position_observation_unavailable")
             elif abs(Decimal(str(position))) > plans[symbol].amount_step / 2:

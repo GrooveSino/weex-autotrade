@@ -193,7 +193,7 @@ def test_clearing_logs_is_account_scoped_and_new_events_continue_from_an_empty_c
     assert cleared.status_code == 204
     assert first_after_clear == {"lines": [], "cursor": None, "reset": True}
     assert len(second_logs["lines"]) == 1
-    assert [line["message"] for line in new_logs["lines"]] == ["实盘执行：运行 1 开始；剩余目标 500 USDT"]
+    assert [line["message"] for line in new_logs["lines"]] == ["实盘执行：运行 1 开始；剩余目标 500.0 USDT"]
 
 
 def test_explicit_refresh_is_visible_in_realtime_logs() -> None:
@@ -237,7 +237,7 @@ def test_campaign_progress_is_projected_to_account_log_updates() -> None:
     assert updates["reset"] is False
     assert len(updates["lines"]) == 1
     assert updates["lines"][0]["level"] == "success"
-    assert updates["lines"][0]["message"] == "实盘执行：BTCUSDT open 成交已核验；250 USDT / 2 笔"
+    assert updates["lines"][0]["message"] == "实盘执行：BTCUSDT open 成交已核验；250.0 USDT / 2 笔"
     assert "must-not-appear" not in str(updates["lines"])
 
 

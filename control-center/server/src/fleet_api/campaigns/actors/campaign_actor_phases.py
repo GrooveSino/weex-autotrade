@@ -37,6 +37,7 @@ from fleet_api.campaigns.actors.campaign_actor_planning import (
     retry_cycle_condition,
 )
 from fleet_api.campaigns.actors.phase_helpers.open_pair import open_pair
+from fleet_api.campaigns.actors.targets.target_policy import campaign_completion_floor, emit_tolerance_acceptance
 
 
 class CampaignActorPhases:
@@ -85,14 +86,9 @@ class CampaignActorPhases:
         environment = self._environment_factory("open")
         try:
             service = environment.volume_service
+            service._emit("cycle_preparing", round=context.round_number, attempt=context.attempt_number + 1)
             plan, preflight, btc_plan, eth_plan, sizing, lanes = build_cycle_plan(service, context)
             service.current_plan_id = plan.plan_id
-            service._emit(
-                "cycle_preparing",
-                round=context.round_number,
-                attempt=context.attempt_number,
-                desired_quote=sizing["desired_turnover_quote"],
-            )
             try:
                 selected, leverage_state = prepare_cycle_leverage(service, plan, sizing, context.round_number)
             except Exception as exc:
@@ -151,6 +147,7 @@ class CampaignActorPhases:
                 plan,
                 opened.context.round_number,
                 Decimal(str(opened.sizing["planned_turnover_quote"])),
+                max(opened.context.child.target_turnover_quote - opened.context.child_total_quote, Decimal(0)),
                 opened.btc_plan,
                 opened.eth_plan,
                 lanes,
@@ -275,12 +272,13 @@ class CampaignActorPhases:
         uncertain = any(_is_uncertain_stop(stop) for stop in stops.values())
         retry_condition = retry_cycle_condition(reason, quote, flat, uncertain)
         record_reason = None if retry_condition is not None else reason
+        completion_floor = campaign_completion_floor(context)
         should_continue = (
             not uncertain
             and record_reason is None
             and flat
             and retry_condition is None
-            and context.child_total_quote < context.child.target_turnover_quote
+            and completion_floor is None
         )
         gap = sampled_delay(campaign.round_gap_min_seconds, campaign.round_gap_max_seconds) if should_continue else 0
         record = cycle_record(
@@ -302,11 +300,16 @@ class CampaignActorPhases:
             reason=record["reason"],
             quote_volume=decimal_text(quote),
             total_quote=decimal_text(context.child_total_quote),
+            target_quote=decimal_text(context.child.target_turnover_quote),
+            remaining_quote=decimal_text(
+                max(context.child.target_turnover_quote - context.child_total_quote, Decimal(0))
+            ),
             elapsed_ms=record["elapsed_ms"],
         )
         if uncertain:
             return CloseCycle(quote, None, None, reason or "lane_execution_uncertain", 0)
-        if context.child_total_quote >= context.child.target_turnover_quote:
+        if completion_floor is not None:
+            emit_tolerance_acceptance(service, context, completion_floor)
             result = service._final_acceptance(
                 context.child,
                 context.summaries,
@@ -315,6 +318,7 @@ class CampaignActorPhases:
                 lanes,
                 opened.preflight,
                 context.execution_started_at_ms,
+                minimum_accepted_quote=completion_floor,
             )
             return CloseCycle(quote, result, None, None, 0)
         if retry_condition is not None:

@@ -9,7 +9,7 @@ import {
 } from '../services'
 import type { AccountDraft, AccountInstance, InstanceStatus } from '../types'
 import { calculateFundingPreflight } from '../utils/strategy'
-import type { FleetState } from './fleetAppState'
+import { snapshotTimeText, type FleetState } from './fleetAppState'
 
 export function useAccountActions(
   state: FleetState,
@@ -162,7 +162,7 @@ export function useAccountActions(
     try {
       const refreshed = await Promise.all(accounts.map(refreshAccountSnapshot))
       setAccounts(refreshed)
-      setLastGlobalSync('刚刚')
+      setLastGlobalSync(snapshotTimeText())
       setToast(`已刷新 ${refreshed.length} 个实例`)
     } catch (error) {
       setToast(error instanceof Error ? error.message : '批量刷新失败')

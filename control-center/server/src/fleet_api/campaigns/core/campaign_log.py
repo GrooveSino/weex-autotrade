@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from weex_cli.execution_progress import condition_presentation, describe_execution_event
 
 from fleet_api.models import LogLevel
 
 _SAFE_TEXT = re.compile(r"[^A-Za-z0-9._:/+\- ]+")
+_USDT_AMOUNT = re.compile(r"(?<![A-Za-z0-9.])(-?\d+(?:\.\d+)?) (?=USDT)")
 
 
 def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | None:
+    rendered = _render_campaign_event_log(event)
+    if rendered is None:
+        return None
+    level, message = rendered
+    return level, _format_usdt_amounts(message)
+
+
+def _render_campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | None:
     """Render a persisted Campaign event for the account's on-demand log stream.
 
     Campaign journal events deliberately contain only a small safe projection of
@@ -26,6 +36,10 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
 
     def core(key: str, *, fallback: str = "-") -> str:
         return _text(event.get(key), limit=80) or fallback
+
+    def remaining_detail() -> str:
+        remaining = value("remaining_quote", fallback="")
+        return f"，距目标还差 {remaining} USDT" if remaining else ""
 
     run = core("run")
     if name == "campaign_run_started":
@@ -53,7 +67,8 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
         return LogLevel.WARN, f"实盘执行：读取重试 {value('attempt')}；{value('operation')}，等待 {value('seconds')}s"
     if name == "campaign_finished":
         level = LogLevel.SUCCESS if core("status") == "completed" else LogLevel.WARN
-        return level, f"实盘执行：Campaign {core('status')}；累计 {value('total_quote')} USDT；{value('reason')}"
+        reason = "已达到目标" if core("status") == "completed" else value("reason")
+        return level, f"实盘执行：Campaign {core('status')}；累计 {value('total_quote')} USDT；{reason}"
     if name in {"preflight_started", "preflight_completed", "preflight_rejected", "preflight_retry"}:
         if name == "preflight_started":
             return LogLevel.INFO, "实盘执行：正在进行执行前检查（余额、持仓、挂单与 Beta）"
@@ -67,14 +82,14 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
             LogLevel.INFO,
             f"实盘执行：第 {value('round')} 轮开始；本轮完整交易量 "
             f"{value('planned_turnover_quote', fallback=value('desired_quote'))} USDT，"
-            f"开仓名义 {value('opening_notional_quote')} USDT",
+            f"开仓名义 {value('opening_notional_quote')} USDT{remaining_detail()}",
         )
     if name == "cycle_plan_created":
         turnover = value("planned_turnover_quote", fallback=value("desired_quote"))
         return (
             LogLevel.INFO,
             f"实盘执行：第 {value('round')} 轮已按最新 Beta 冻结执行快照；"
-            f"第 {value('attempt')} 次尝试，完整交易量 {turnover} USDT",
+            f"第 {value('attempt')} 次尝试，完整交易量 {turnover} USDT{remaining_detail()}",
         )
     if name == "condition_waiting":
         title, action = condition_presentation(value("condition"))
@@ -83,6 +98,13 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
         return LogLevel.SUCCESS, "实盘执行：执行条件已恢复；正在按最新 Beta 与行情生成下一轮。"
     if name == "cycle_preparing":
         return LogLevel.INFO, f"实盘执行：第 {value('round')} 轮正在读取 BTC/ETH 盘口并计算数量"
+    if name == "next_cycle_conditions_started":
+        return LogLevel.INFO, "实盘执行：轮次间隔已结束，正在只读核验下一轮账户条件与行情"
+    if name == "target_tolerance_accepted":
+        return LogLevel.SUCCESS, (
+            f"实盘执行：账户已空仓，剩余 {value('shortfall_quote')} USDT 在允许偏差 "
+            f"{value('tolerance_quote')} USDT 内；本次任务按完成处理"
+        )
     if name == "open_barrier_verified":
         return LogLevel.SUCCESS, f"实盘执行：BTC/ETH 本轮目标仓位已核验；第 {value('round')} 轮，开始持仓计时"
     if name == "open_barrier_not_ready":
@@ -130,7 +152,7 @@ def campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, str] | No
         return (
             level,
             f"实盘执行：第 {value('round')} 轮 {core('status')}；"
-            f"本轮 {value('quote_volume')} USDT，累计 {value('total_quote')} USDT",
+            f"本轮 {value('quote_volume')} USDT，累计 {value('total_quote')} USDT{remaining_detail()}",
         )
     if name in {"final_acceptance_started", "final_acceptance_completed"}:
         if name.endswith("started"):
@@ -162,3 +184,14 @@ def _text(raw: object, *, limit: int) -> str:
         return ""
     rendered = _SAFE_TEXT.sub("", str(raw)).strip()
     return rendered[:limit]
+
+
+def _format_usdt_amounts(message: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        try:
+            amount = Decimal(match.group(1))
+        except InvalidOperation:
+            return match.group(0)
+        return f"{amount.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP):f} "
+
+    return _USDT_AMOUNT.sub(replace, message)

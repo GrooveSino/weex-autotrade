@@ -9,6 +9,7 @@ from typing import Any
 
 from weex_cli.beta_allocation import BetaAllocation
 from weex_cli.beta_volume import _size_cycle, inspect_live_account
+from weex_cli.dust_position_close import classify_minimum_order_rejection
 from weex_cli.errors import SafetyError, ValidationError
 from weex_cli.models import decimal_text
 from weex_cli.reliability import NETWORK_ERRORS
@@ -20,6 +21,7 @@ from fleet_api.campaigns.actors.campaign_actor_models import (
     CycleCondition,
     CycleConditionError,
 )
+from fleet_api.campaigns.actors.targets.target_policy import desired_cycle_turnover
 
 
 def new_actor_context(campaign_service: Any, campaign: Campaign) -> CampaignActorContext:
@@ -123,6 +125,10 @@ def build_cycle_plan(
         raise CycleConditionError(_condition("shared_market_unavailable", str(exc))) from exc
     except (SafetyError, ValidationError) as exc:
         raise CycleConditionError(_condition_from_sizing_error(exc)) from exc
+    except Exception as exc:
+        if classify_minimum_order_rejection(exc) is not None or type(exc).__name__ == "InvalidOrder":
+            raise CycleConditionError(_condition("minimum_order_infeasible", "")) from exc
+        raise
     context.attempt_number = attempt
     sizing = {
         **sizing,
@@ -137,11 +143,7 @@ def build_cycle_plan(
 
 
 def _remaining_cycle_target(context: CampaignActorContext) -> Decimal:
-    remaining = context.child.target_turnover_quote - context.child_total_quote
-    desired = min(context.child.round_turnover_quote, remaining)
-    if desired <= 0:
-        raise RuntimeError("campaign child target is already complete")
-    return desired
+    return desired_cycle_turnover(context)
 
 
 def _latest_allocation(service: Any) -> BetaAllocation:

@@ -35,6 +35,12 @@ const initialSchedulerMetrics: SchedulerMetrics = {
   lastRoundDurationMs: 221,
 }
 
+export function snapshotTimeText(now = new Date()): string {
+  return now.toLocaleTimeString('zh-CN', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
+}
+
 export function useFleetState() {
   const [accounts, setAccounts] = useState<AccountInstance[]>(() => controlPlaneEnabled ? [] : mockAccounts)
   const [strategies, setStrategies] = useState<VolumeStrategy[]>(() => controlPlaneEnabled ? [] : mockStrategies)
@@ -59,7 +65,7 @@ export function useFleetState() {
   const [stopDialogOpen, setStopDialogOpen] = useState(false)
   const [stopPhrase, setStopPhrase] = useState('')
   const [toast, setToast] = useState<string | null>(null)
-  const [lastGlobalSync, setLastGlobalSync] = useState(controlPlaneEnabled ? '等待首个快照' : '刚刚')
+  const [lastGlobalSync, setLastGlobalSync] = useState(controlPlaneEnabled ? '等待加载' : snapshotTimeText())
   const [controlPlaneConnected, setControlPlaneConnected] = useState(!controlPlaneEnabled)
   const [controlPlaneAdapter, setControlPlaneAdapter] = useState(controlPlaneEnabled ? 'connecting' : 'browser-mock')
   const [controlPlaneExecutionEnabled, setControlPlaneExecutionEnabled] = useState(!controlPlaneEnabled)

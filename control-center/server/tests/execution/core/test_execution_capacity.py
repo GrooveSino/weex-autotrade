@@ -84,6 +84,45 @@ def test_stable_jitter_is_reused_for_a_reopened_queue_entry() -> None:
     assert repeated.estimated_start_at_ms >= int(time.time() * 1000)
 
 
+def test_idle_single_account_bypasses_stable_jitter() -> None:
+    current = 100.0
+    capacity = ExecutionCapacity(
+        max_active_executions=200,
+        max_normal_phases=20,
+        phase_start_rate_per_second=4,
+        per_proxy_gap_seconds=5,
+        stable_jitter_seconds=15,
+        now=lambda: current,
+        now_ms=lambda: int(current * 1_000),
+    )
+
+    reservation = capacity.try_start_phase("one:1:open", proxy_key="proxy-a")
+
+    assert reservation is not None
+    assert reservation.estimated_start_at_ms == 100_000
+    assert capacity.snapshot().queued_normal_phases == 0
+
+
+def test_competing_account_keeps_stable_jitter() -> None:
+    current = 100.0
+    capacity = ExecutionCapacity(
+        max_active_executions=200,
+        max_normal_phases=20,
+        phase_start_rate_per_second=10_000,
+        per_proxy_gap_seconds=0,
+        stable_jitter_seconds=15,
+        now=lambda: current,
+        now_ms=lambda: int(current * 1_000),
+    )
+    first = capacity.try_start_phase("one:1:open", proxy_key="proxy-a")
+    assert first is not None
+
+    queued = capacity.enqueue_phase("two:1:open", proxy_key="proxy-b")
+
+    assert queued.estimated_start_at_ms > 100_000
+    assert capacity.try_start_phase("two:1:open", proxy_key="proxy-b") is None
+
+
 def test_nonblocking_phase_probe_does_not_create_a_waiting_thread() -> None:
     capacity = ExecutionCapacity(
         max_active_executions=2,

@@ -132,7 +132,7 @@ function App() {
             <TimerReset size={13} />{controlPlaneHydrating ? '等待调度快照' : `${schedulerMetrics.lastRoundDurationMs ?? '-'} ms · 峰值 ${schedulerMetrics.maxObservedParallelism}/${schedulerMetrics.maxParallelPolls}`}
           </span>
           <FleetCapacityBadge capacity={executionCapacity} loading={controlPlaneHydrating} />
-          <span className="clock-state">同步 {lastGlobalSync}</span>
+          <span className="clock-state">账户快照 {lastGlobalSync}</span>
           {controlPlaneEnabled && <button className="local-user" type="button" title="退出本机用户" onClick={() => void logout()}>{localUser}</button>}
           <button className="button emergency" type="button" onClick={() => setStopDialogOpen(true)}><Square size={13} fill="currentColor" />全部停止</button>
         </div>

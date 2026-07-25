@@ -1019,6 +1019,58 @@ def test_open_and_close_phases_are_parallel_and_use_distinct_gateways(tmp_path, 
     assert sum(1 for event in events[:first_close] if event == ("leg_completed", "open")) == 2
 
 
+def test_final_acceptance_allows_an_explicit_shortfall_floor_only_after_flat_verification(
+    tmp_path, allocation: BetaAllocation
+) -> None:
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="500",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    service = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=lambda unused, symbol, side: ImmediateVenue(symbol, side),  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        reconciler_factory=lambda unused: DeterministicReconciler(),
+        now_ms=lambda: 1000,
+        sleep=lambda _: None,
+    )
+    summary = {
+        "accounting_verified": True,
+        "liquidity_policy_satisfied": True,
+        "quote_volume": "493.53206",
+        "realized_pnl": "0",
+        "commission_by_asset": {},
+        "fill_count": 4,
+        "maker_count": 4,
+        "taker_count": 0,
+        "unknown_liquidity_count": 0,
+    }
+
+    result = service._final_acceptance(
+        plan,
+        [summary],
+        [],
+        Decimal("493.53206"),
+        service._create_lanes(plan),
+        {},
+        1000,
+        minimum_accepted_quote=Decimal("475"),
+    )
+
+    assert result["status"] == "completed"
+    assert result["reason"] == "paired_target_completed_with_tolerance"
+    assert result["remaining_quote"] == "0"
+    assert result["target_shortfall_quote"] == "6.46794"
+
+
 def test_external_lane_gateways_are_reused_and_not_closed_by_child_service(
     tmp_path, allocation: BetaAllocation
 ) -> None:

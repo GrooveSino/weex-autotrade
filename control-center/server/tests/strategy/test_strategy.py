@@ -170,10 +170,10 @@ def test_lifetime_cycle_planning_sizes_the_residual_from_account_cumulative_volu
     assert result.sizing_mode == "residual_finish"
 
 
-def test_target_tolerance_is_deterministic_and_capped_for_large_targets() -> None:
-    assert target_tolerance_quote(Decimal("200")) == Decimal("1")
-    assert target_tolerance_quote(Decimal("10000")) == Decimal("25.0000")
-    assert target_tolerance_quote(Decimal("50000")) == Decimal("50")
+def test_target_tolerance_is_five_percent_with_a_one_quote_floor() -> None:
+    assert target_tolerance_quote(Decimal("10")) == Decimal("1")
+    assert target_tolerance_quote(Decimal("500")) == Decimal("25.00")
+    assert target_tolerance_quote(Decimal("10000")) == Decimal("500.00")
 
 
 def test_incremental_run_samples_one_cent_target_and_persists_direction_in_plan() -> None:

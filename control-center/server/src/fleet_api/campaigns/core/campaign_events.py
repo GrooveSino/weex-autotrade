@@ -46,7 +46,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "beta_version",
     }
     decimal_fields = {
-        "remaining_quote",
+        "remaining_quote", "target_quote", "shortfall_quote", "tolerance_quote",
         "total_quote",
         "child_quote",
         "seconds",

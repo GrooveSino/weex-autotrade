@@ -119,6 +119,45 @@ def test_sqlite_strategy_run_history_uses_stable_cursor_pagination(tmp_path: Pat
     repository.close()
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected_audit_status"),
+    [
+        ("paired_target_completed_with_tolerance", "verified"),
+        ("target_reached", "pending"),
+    ],
+)
+def test_completed_session_only_accepts_shortfall_for_explicit_tolerance_reason(
+    reason: str, expected_audit_status: str
+) -> None:
+    ledger = InMemoryTradeVolumeLedger()
+    service = SessionVolumeService(ledger)
+    service.start(
+        session_id="tolerance-run",
+        account_id="tolerance-account",
+        mode="live",
+        started_at_ms=500,
+        target_quote_volume=Decimal("500"),
+    )
+    ledger.record_account_fills(
+        "tolerance-account",
+        "live",
+        (fill("tolerance-fill", "493.53206", "close"),),
+    )
+    ledger.update_session("tolerance-run", source_complete=True, stale=False, pending_sync=False)
+
+    projection = service.finalize(
+        "tolerance-run",
+        result="completed",
+        reason=reason,
+        finished_at_ms=2_000,
+        final_lifetime_quote_volume=Decimal("493.53206"),
+    )
+
+    assert projection["status"] == "completed"
+    assert projection["verified_quote_volume"] == "493.53206"
+    assert projection["audit_status"] == expected_audit_status
+
+
 @pytest.mark.parametrize("ledger_kind", ["memory", "sqlite"])
 def test_terminal_session_keeps_terminal_state_and_marks_audit_discrepant_on_fill_conflict(
     tmp_path: Path, ledger_kind: str

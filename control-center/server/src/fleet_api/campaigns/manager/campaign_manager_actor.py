@@ -182,6 +182,10 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
                 "round": opened.context.round_number,
                 "attempt": opened.context.attempt_number,
                 "desired_quote": payload["planned_turnover_quote"],
+                "target_quote": str(opened.context.child.target_turnover_quote),
+                "remaining_quote": str(
+                    max(opened.context.child.target_turnover_quote - opened.context.child_total_quote, 0)
+                ),
                 "opening_notional_quote": payload["opening_notional_quote"],
                 "beta_version": payload["beta_version"],
             }

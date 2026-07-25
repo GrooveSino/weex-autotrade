@@ -155,10 +155,7 @@ def target_progress_quote(instance: AccountInstance, strategy: VolumeStrategy | 
 
 
 def target_tolerance_quote(target: Decimal) -> Decimal:
-    proportional = target * Decimal("0.0025")
-    if target >= Decimal("10000"):
-        return min(Decimal("50"), proportional)
-    return max(Decimal("1"), proportional)
+    return max(Decimal("1"), target * Decimal("0.05"))
 
 
 def _random_quote(minimum: Decimal, maximum: Decimal, rng: random.Random) -> Decimal:

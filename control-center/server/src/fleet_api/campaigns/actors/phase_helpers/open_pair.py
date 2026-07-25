@@ -16,6 +16,7 @@ def open_pair(
     plan: Any,
     round_number: int,
     planned_turnover_quote: Decimal,
+    remaining_target_quote: Decimal,
     btc_plan: Any,
     eth_plan: Any,
     lanes: Mapping[str, Any],
@@ -26,6 +27,8 @@ def open_pair(
         attempt=plan.plan_id.rsplit("-a", 1)[-1],
         desired_quote=decimal_text(planned_turnover_quote),
         planned_turnover_quote=decimal_text(planned_turnover_quote),
+        target_quote=decimal_text(plan.target_turnover_quote),
+        remaining_quote=decimal_text(remaining_target_quote),
         opening_notional_quote=decimal_text(
             btc_plan.quantity * btc_plan.reference_price + eth_plan.quantity * eth_plan.reference_price
         ),

@@ -121,12 +121,13 @@ class ExecutionCapacity:
             item = self._queued_item(key)
             if item is None:
                 current = self._now()
+                jitter = 0.0 if self._can_start_without_contention(proxy_key, current) else self._stable_jitter(key)
                 item = _QueuedPhase(
                     key=key,
                     proxy_key=proxy_key,
                     queued_at=current,
                     queued_at_ms=self._now_ms(),
-                    not_before=current + self._stable_jitter(key),
+                    not_before=current + jitter,
                 )
                 self._queued.append(item)
                 self._bump()
@@ -323,6 +324,14 @@ class ExecutionCapacity:
         digest = hashlib.blake2s(key.encode("utf-8"), digest_size=8).digest()
         ratio = int.from_bytes(digest, "big") / ((1 << 64) - 1)
         return ratio * self._stable_jitter_seconds
+
+    def _can_start_without_contention(self, proxy_key: str, current: float) -> bool:
+        return (
+            not self._queued
+            and not self._active
+            and current >= self._next_global_at
+            and current >= self._next_proxy_at.get(proxy_key, 0.0)
+        )
 
     @staticmethod
     def _percentile(values: list[int], ratio: float) -> int:

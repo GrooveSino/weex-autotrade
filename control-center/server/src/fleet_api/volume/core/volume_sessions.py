@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from fleet_api.strategy.strategy import target_tolerance_quote
 from fleet_api.volume.core.volume_contracts import TERMINAL_SESSION_STATUSES, NormalizedTradeFill, TradeVolumeLedger
 from fleet_api.volume.core.volume_helpers import _fill_signature, _in_session_window
+
+_TOLERANCE_COMPLETION_REASON = "paired_target_completed_with_tolerance"
 
 
 class SessionVolumeService:
@@ -93,7 +96,11 @@ class SessionVolumeService:
             and not bool(projection["pending_sync"])
             and not bool(projection.get("uncertain_order_state", False))
         )
-        audit_status = "verified" if verified_state and (result != "completed" or verified >= target) else "pending"
+        minimum_completed_quote = target
+        if reason == _TOLERANCE_COMPLETION_REASON:
+            minimum_completed_quote = max(Decimal(0), target - target_tolerance_quote(target))
+        target_verified = result != "completed" or verified >= minimum_completed_quote
+        audit_status = "verified" if verified_state and target_verified else "pending"
         self.ledger.update_session(
             session_id,
             status=result,

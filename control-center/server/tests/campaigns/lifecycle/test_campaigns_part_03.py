@@ -124,7 +124,25 @@ def test_campaign_progress_formatter_is_safe_and_keeps_verified_fill_context() -
     )
 
     assert level.value == "success"
-    assert message == "实盘执行：BTCUSDT open 成交已核验；250.50 USDT / 2 笔"
+    assert message == "实盘执行：BTCUSDT open 成交已核验；250.5 USDT / 2 笔"
+
+
+def test_cycle_log_reports_one_decimal_turnover_and_remaining_target() -> None:
+    level, message = campaign_event_log(
+        {
+            "name": "cycle_completed",
+            "status": "completed",
+            "fields": {
+                "round": 2,
+                "quote_volume": "164.53308",
+                "total_quote": "329.06616",
+                "remaining_quote": "670.93384",
+            },
+        }
+    )
+
+    assert level.value == "success"
+    assert message == "实盘执行：第 2 轮 completed；本轮 164.5 USDT，累计 329.1 USDT，距目标还差 670.9 USDT"
     assert "must-not-render" not in message
 
 

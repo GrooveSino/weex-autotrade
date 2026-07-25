@@ -140,6 +140,11 @@ class CampaignActorProgram:
                             "seconds": outcome.round_gap_seconds,
                         },
                     )
+                    actor.transition("preparing", reason="next_cycle_conditions")
+                    await self._emit_event(
+                        actor,
+                        {"event": "next_cycle_conditions_started", "round": context.round_number},
+                    )
         except Exception as exc:  # Durable submission classification stays in the manager callback.
             if context is not None and opened is not None:
                 actor.transition("stopping", reason=f"phase_exception:{type(exc).__name__.lower()}")

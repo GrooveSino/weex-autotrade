@@ -9,7 +9,7 @@ import {
   listVolumeStrategies,
   subscribeToInstanceEvents,
 } from '../services'
-import type { FleetState } from './fleetAppState'
+import { snapshotTimeText, type FleetState } from './fleetAppState'
 
 const betaPollIntervalMs = 250
 const betaRetryIntervalMs = 1_000
@@ -184,6 +184,7 @@ export function useFleetSynchronization(state: FleetState) {
           historySyncQueued: health.historySyncQueued,
           historySyncRunning: health.historySyncRunning,
         })
+        setLastGlobalSync(snapshotTimeText())
         setInitialControlPlaneError(null)
         setInitialControlPlaneSnapshotLoaded(true)
       } catch (error: unknown) {
@@ -203,7 +204,7 @@ export function useFleetSynchronization(state: FleetState) {
     }
   }, [localUser, setAccounts, setBoundStrategyExecutionEnabled, setControlPlaneAdapter,
     setControlPlaneConnected, setControlPlaneExecutionEnabled, setInitialControlPlaneError,
-    setExecutionCapacity, setInitialControlPlaneSnapshotLoaded, setStrategies, setToast])
+    setExecutionCapacity, setInitialControlPlaneSnapshotLoaded, setLastGlobalSync, setStrategies, setToast])
 
   useEffect(() => {
     if (!controlPlaneEnabled || !localUser) return
@@ -225,7 +226,7 @@ export function useFleetSynchronization(state: FleetState) {
       (snapshot) => {
         setAccounts(snapshot.instances)
         if (snapshot.runtime) setSchedulerMetrics(snapshot.runtime)
-        setLastGlobalSync('刚刚')
+        setLastGlobalSync(snapshotTimeText())
       },
       setControlPlaneConnected,
     )

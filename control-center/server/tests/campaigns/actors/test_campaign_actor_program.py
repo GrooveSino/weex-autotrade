@@ -255,11 +255,13 @@ def test_actor_emits_canonical_timer_completion_events_before_advancing() -> Non
         assert [event["event"] for event in events] == [
             "hold_completed",
             "round_gap_completed",
+            "next_cycle_conditions_started",
             "hold_completed",
         ]
         assert events[0]["round"] == 1
         assert events[1]["round"] == 1
         assert events[2]["round"] == 2
+        assert events[3]["round"] == 2
     finally:
         runtime.close()
 
