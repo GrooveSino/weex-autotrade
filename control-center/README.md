@@ -82,8 +82,8 @@ export FLEET_MASTER_KEY="$(uv run --project server python -c 'from cryptography.
 先安装稳定 LaunchAgent runner，再构建 service release。两个步骤都不会启动策略：
 
 ```bash
-control-center/scripts/macos/install-launch-agents.zsh --install
-control-center/scripts/macos/deploy-service-release.zsh
+control-center/scripts/macos/runtime/install-launch-agents.zsh --install
+control-center/scripts/macos/release/deploy-service-release.zsh
 ```
 
 服务仅从 `~/Library/Application Support/WEEXFleet/service-current` 运行，不依赖 `Documents` 工作区。启动前需要由现有的受控部署凭据流程提供 `~/Library/Application Support/WEEXFleet/.env.live`，其中至少包含上述 `weex-live` / SQLite 门禁，以及与现有加密 SQLite 凭据库匹配的 `FLEET_MASTER_KEY`。该文件、数据库、日志、账户 API Key、Passphrase 和代理密码都不得提交或放入 release。
@@ -91,7 +91,7 @@ control-center/scripts/macos/deploy-service-release.zsh
 激活脚本会先确认旧 API 没有实际活动 Campaign，再启动执行器并只通过 owner-only Unix Socket 做本机 health 校验，最后才切换 API：
 
 ```bash
-control-center/scripts/macos/activate-service-release.zsh
+control-center/scripts/macos/release/activate-service-release.zsh
 ```
 
 如果新 API 未通过 health，脚本会原子恢复 `service-previous`。执行器重启时，未完成任务会进入后台只读恢复检查；空仓且无挂单时自动收尾为可再次启动，存在真实残留时由统一启动窗口提供显式安全清理。系统不会自动恢复下单、补单、平仓或修改仓位。只有 API 与执行器 health 都正确后，才发布网页静态 release。
@@ -99,7 +99,7 @@ control-center/scripts/macos/activate-service-release.zsh
 拿到源码后的本机部署可使用一个显式命令完成。准备一份**未跟踪**的 `.env.live`，写入上述 `weex-live`、SQLite、主密钥和 Beta 来源变量后执行：
 
 ```bash
-control-center/scripts/macos/deploy-local-live.zsh \
+control-center/scripts/macos/release/deploy-local-live.zsh \
   --env /absolute/path/to/.env.live \
   --apply
 ```

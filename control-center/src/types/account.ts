@@ -1,8 +1,8 @@
 import type { StrategyProgress, VolumeStrategy } from './strategy'
 import type { VolumeSessionProjection } from './volume'
+import type { TradingMode } from './shared'
 
 export type InstanceStatus = 'running' | 'paused' | 'stopped' | 'warning' | 'error'
-export type TradingMode = 'demo' | 'live'
 export type ProxyType = 'none' | 'http' | 'https' | 'socks5'
 export type ProxyStatus = 'healthy' | 'degraded' | 'unchecked'
 export type ExecutionLifecycleState = 'idle' | 'preparing' | 'running' | 'stopping' | 'recovering' | 'recovery_cleanup_required' | 'orders_cleanup_required' | 'position_blocked'

@@ -8,6 +8,9 @@
     "dev:executor": "FLEET_EXECUTOR_SOCKET=run/weex-fleet-executor.sock PYTHONPATH=server/src uv run --project server python -m fleet_api.executor_main",
     "dev:api": "FLEET_EXECUTOR_SOCKET=run/weex-fleet-executor.sock uv run --project server uvicorn --app-dir server/src fleet_api.api_proxy:app --host 127.0.0.1 --port 8000",
     "build": "tsc -b && vite build",
+    "check:structure": "python3 scripts/check_structure.py",
+    "check:monitor-runtime": "node --experimental-strip-types scripts/check-monitor-runtime.mjs",
+    "check:panel-errors": "node --experimental-strip-types scripts/check-panel-errors.mjs",
     "lint": "eslint src vite.config.ts",
     "preview": "vite preview"
   },

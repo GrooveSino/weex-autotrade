@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { mockAccounts, mockStrategies } from '../data/mockAccounts'
-import { controlPlaneEnabled } from '../services/controlCenter'
+import { controlPlaneEnabled } from '../services'
 import type {
   AccountInstance,
   BetaMarketSnapshot,

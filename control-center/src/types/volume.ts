@@ -1,5 +1,5 @@
 import type { StrategyTargetMode } from './strategy'
-import type { TradingMode } from './account'
+import type { TradingMode } from './shared'
 
 export interface VolumeSessionProjection {
   sessionId: string

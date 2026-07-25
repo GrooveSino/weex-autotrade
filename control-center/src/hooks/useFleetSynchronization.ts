@@ -8,7 +8,7 @@ import {
   listAccountInstances,
   listVolumeStrategies,
   subscribeToInstanceEvents,
-} from '../services/controlCenter'
+} from '../services'
 import type { FleetState } from './fleetAppState'
 
 const betaPollIntervalMs = 250

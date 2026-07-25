@@ -3,7 +3,7 @@ import {
   createVolumeStrategy,
   deleteVolumeStrategy,
   updateVolumeStrategy,
-} from '../services/controlCenter'
+} from '../services'
 import type { StrategyDraft, VolumeStrategy } from '../types'
 import { calculateFundingPreflight, estimateRounds, targetProgress } from '../utils/strategy'
 import type { FleetState } from './fleetAppState'

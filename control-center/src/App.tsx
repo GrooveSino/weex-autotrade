@@ -21,19 +21,19 @@ import {
   Wifi,
   X,
 } from 'lucide-react'
-import { AccountDialog } from './components/AccountDialog'
-import { AccountTable } from './components/AccountTable'
-import { ClosePositionsDialog } from './components/ClosePositionsDialog'
-import { BoundStrategyExecutionDialog } from './components/BoundStrategyExecutionDialog'
-import { BetaSourceDialog } from './components/BetaSourceDialog'
-import { ExecutionDrawer } from './components/ExecutionDrawer'
-import { LogDrawer } from './components/LogDrawer'
-import { LocalLogin } from './components/LocalLogin'
-import { FleetCapacityBadge } from './components/FleetCapacityBadge'
-import { StrategyAssignmentDialog } from './components/StrategyAssignmentDialog'
-import { StrategyDialog } from './components/StrategyDialog'
+import { AccountDialog } from './components/accounts/AccountDialog'
+import { AccountTable } from './components/accounts/AccountTable'
+import { ClosePositionsDialog } from './components/dialogs/ClosePositionsDialog'
+import { BoundStrategyExecutionDialog } from './components/execution/BoundStrategyExecutionDialog'
+import { BetaSourceDialog } from './components/strategy/BetaSourceDialog'
+import { ExecutionDrawer } from './components/execution/ExecutionDrawer'
+import { LogDrawer } from './components/monitoring/LogDrawer'
+import { LocalLogin } from './components/shell/LocalLogin'
+import { FleetCapacityBadge } from './components/execution/FleetCapacityBadge'
+import { StrategyAssignmentDialog } from './components/strategy/StrategyAssignmentDialog'
+import { StrategyDialog } from './components/strategy/StrategyDialog'
 import { useFleetApp } from './hooks/useFleetApp'
-import { controlPlaneEnabled, dataSourceLabel } from './services/controlCenter'
+import { controlPlaneEnabled, dataSourceLabel } from './services'
 import type { BetaMarketSnapshot, StatusFilter } from './types'
 
 const compactNumber = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 })
@@ -281,6 +281,8 @@ function App() {
           enabled={boundStrategyExecutionEnabled}
           onClose={() => setBoundExecutionQueue((queue) => queue && queue.length > 1 ? queue.slice(1) : null)}
           onChanged={() => { /* Account state comes from the executor lifecycle snapshot. */ }}
+          onEditAccount={() => { setEditingAccount(boundExecutionQueue[0]); setAccountDialogOpen(true); setBoundExecutionQueue(null) }}
+          onOpenBetaSource={() => { setBetaSourceDialogOpen(true); setBoundExecutionQueue(null) }}
           onStarted={(execution) => {
             const currentAccount = accounts.find((account) => account.id === execution.instanceId)
               ?? boundExecutionQueue[0]

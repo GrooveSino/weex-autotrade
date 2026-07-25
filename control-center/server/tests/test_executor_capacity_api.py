@@ -8,10 +8,10 @@ from weex_cli.live_profile import LiveProfile
 
 import fleet_api.campaigns as campaigns_module
 import fleet_api.main as main_module
-from fleet_api.config import ControlPlaneSettings
+from fleet_api.config.config import ControlPlaneSettings
 from fleet_api.main import create_app
 
-from .test_api_support import LivePreviewGateway, LivePreviewProvider, create_payload, strategy_payload
+from .support.test_api_support import LivePreviewGateway, LivePreviewProvider, create_payload, strategy_payload
 
 
 def test_capacity_endpoint_reports_actor_io_process_and_sync_state() -> None:

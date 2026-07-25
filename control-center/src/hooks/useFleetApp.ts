@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { controlPlaneEnabled } from '../services/controlCenter'
+import { controlPlaneEnabled } from '../services'
 import { targetProgress } from '../utils/strategy'
 import { useFleetState } from './fleetAppState'
 import { useAccountActions } from './useAccountActions'

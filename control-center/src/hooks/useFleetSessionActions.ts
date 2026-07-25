@@ -5,7 +5,7 @@ import {
   loginLocalUser,
   logoutLocalUser,
   stopAllInstances,
-} from '../services/controlCenter'
+} from '../services'
 import type { FleetState } from './fleetAppState'
 
 export function useFleetSessionActions(state: FleetState, executionDisabled: boolean) {

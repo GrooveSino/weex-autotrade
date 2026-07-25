@@ -10,8 +10,8 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .auth import SESSION_COOKIE_NAME, LocalUserRegistry, LoginRequest, registry_path_from_env
-from .models import HealthResponse
+from fleet_api.auth.auth import SESSION_COOKIE_NAME, LocalUserRegistry, LoginRequest, registry_path_from_env
+from fleet_api.models import HealthResponse
 
 _HOP_BY_HOP_HEADERS = {"connection", "content-length", "host", "keep-alive", "transfer-encoding"}
 

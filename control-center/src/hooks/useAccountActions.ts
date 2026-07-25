@@ -6,7 +6,7 @@ import {
   deleteAccountInstance,
   refreshAccountSnapshot,
   updateAccountInstance,
-} from '../services/controlCenter'
+} from '../services'
 import type { AccountDraft, AccountInstance, InstanceStatus } from '../types'
 import { calculateFundingPreflight } from '../utils/strategy'
 import type { FleetState } from './fleetAppState'

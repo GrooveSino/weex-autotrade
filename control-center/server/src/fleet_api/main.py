@@ -6,21 +6,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider  # noqa: F401
 
-from .beta_allocation import HttpBetaAllocationProvider  # noqa: F401
-from .config import ControlPlaneSettings
-from .execution import PairAllocationProvider
-from .main_bootstrap import build_context, finish_context
-from .main_campaign_lifecycle import install_campaign_lifecycle
-from .main_http import install_http_support
-from .main_lifecycle import install_application_lifecycle
-from .main_routes_accounts import register_account_routes
-from .main_routes_bound import register_bound_strategy_routes
-from .main_routes_campaign import register_campaign_routes
-from .main_routes_health import register_health_routes
-from .main_routes_instances import register_instance_routes
-from .main_routes_monitor import register_strategy_monitor_routes
-from .main_support import install_projection_support
-from .telemetry import AccountTelemetryAdapterFactory
+from fleet_api.bootstrap.main_bootstrap import build_context, finish_context
+from fleet_api.bootstrap.main_campaign_lifecycle import install_campaign_lifecycle
+from fleet_api.bootstrap.main_lifecycle import install_application_lifecycle
+from fleet_api.bootstrap.main_support import install_projection_support
+from fleet_api.config.config import ControlPlaneSettings
+from fleet_api.execution import PairAllocationProvider
+from fleet_api.market.beta_allocation import HttpBetaAllocationProvider  # noqa: F401
+from fleet_api.runtime.telemetry import AccountTelemetryAdapterFactory
+from fleet_api.transport.http.main_http import install_http_support
+from fleet_api.transport.routes.main_routes_accounts import register_account_routes
+from fleet_api.transport.routes.main_routes_bound import register_bound_strategy_routes
+from fleet_api.transport.routes.main_routes_campaign import register_campaign_routes
+from fleet_api.transport.routes.main_routes_health import register_health_routes
+from fleet_api.transport.routes.main_routes_instances import register_instance_routes
+from fleet_api.transport.routes.main_routes_monitor import register_strategy_monitor_routes
 
 
 def create_app(

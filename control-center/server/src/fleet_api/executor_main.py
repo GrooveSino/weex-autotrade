@@ -5,7 +5,7 @@ import socket as socket_module
 import stat
 from pathlib import Path
 
-from .main import create_app
+from fleet_api.main import create_app
 
 app = create_app(require_command_id=True)
 
