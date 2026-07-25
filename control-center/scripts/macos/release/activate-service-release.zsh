@@ -206,16 +206,20 @@ launchctl bootstrap "${domain}" "${executor_plist}"
 # and persisted campaign/volume state. A cold SQLite start can exceed five
 # seconds on macOS, so allow a bounded local-only readiness window before
 # touching the API. This does not contact WEEX or resume any Campaign.
+executor_ready_checks=0
 for _ in {1..200}; do
-  if [[ -S "${socket_path}" ]] && curl --silent --fail --max-time 1 \
+  if [[ -S "${socket_path}" ]] && curl --silent --fail --max-time 3 \
     --unix-socket "${socket_path}" "http://localhost/_internal/executor-health" >/dev/null; then
-    break
+    executor_ready_checks=$((executor_ready_checks + 1))
+    if (( executor_ready_checks >= 2 )); then
+      break
+    fi
+  else
+    executor_ready_checks=0
   fi
   sleep 0.1
 done
-[[ -S "${socket_path}" ]] || { print -u2 "executor socket did not become available"; exit 1; }
-curl --silent --show-error --fail --max-time 1 \
-  --unix-socket "${socket_path}" "http://localhost/_internal/executor-health" >/dev/null || {
+(( executor_ready_checks >= 2 )) || {
   print -u2 "executor did not pass its local health check"
   exit 1
 }
