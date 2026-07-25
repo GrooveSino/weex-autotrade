@@ -17,16 +17,16 @@ function rangeText(period: AccountTradeVolumePeriod): string {
 
 export function AccountTradeVolumeDialog({ account, onClose }: AccountTradeVolumeDialogProps) {
   const [periods, setPeriods] = useState<AccountTradeVolumePeriod[]>([])
-  const [loading, setLoading] = useState<'short' | 'month' | null>(null)
+  const [loading, setLoading] = useState<'week' | 'month' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [generatedAtMs, setGeneratedAtMs] = useState<number | null>(null)
 
-  const load = async (scope: 'short' | 'month') => {
+  const load = async (scope: 'week' | 'month') => {
     if (loading) return
     setLoading(scope)
     setError(null)
     try {
-      const report = await fetchAccountTradeVolumeReport(account, scope === 'short' ? [1, 7] : [30])
+      const report = await fetchAccountTradeVolumeReport(account, scope === 'week' ? [7] : [30])
       setPeriods((current) => {
         const next = new Map(current.map((period) => [period.lookbackDays, period]))
         report.periods.forEach((period) => next.set(period.lookbackDays, period))
@@ -50,8 +50,8 @@ export function AccountTradeVolumeDialog({ account, onClose }: AccountTradeVolum
         <div className="trade-volume-report-body">
           <div className="trade-volume-intro"><ShieldCheck size={16} /><span>按 WEEX 实际成交 `quoteQty` 汇总；不会修改策略、仓位、挂单或成交账本。</span></div>
           <div className="trade-volume-actions">
-            <button className="button" type="button" disabled={loading !== null} onClick={() => void load('short')}>
-              {loading === 'short' ? <RefreshCw className="spin" size={15} /> : <BarChart3 size={15} />}统计近 1 天与 7 天
+            <button className="button" type="button" disabled={loading !== null} onClick={() => void load('week')}>
+              {loading === 'week' ? <RefreshCw className="spin" size={15} /> : <BarChart3 size={15} />}统计最近 7 天
             </button>
             <button className="button secondary" type="button" disabled={loading !== null} onClick={() => void load('month')}>
               {loading === 'month' ? <RefreshCw className="spin" size={15} /> : <Clock3 size={15} />}统计近 30 天
