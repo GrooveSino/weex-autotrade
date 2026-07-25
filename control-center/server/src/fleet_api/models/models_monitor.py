@@ -48,7 +48,7 @@ class ExecutionTimelineEntry(CamelModel):
 
 
 class StrategyMonitorSnapshot(CamelModel):
-    schema_version: int = 5
+    schema_version: int = 6
     instance_id: str
     session_id: str | None = None
     execution_id: str | None = None
@@ -74,6 +74,10 @@ class StrategyMonitorSnapshot(CamelModel):
     recovery_state: str | None = None
     recovery_attempt: int = Field(default=0, ge=0)
     next_recovery_check_at_ms: int | None = Field(default=None, gt=0)
+    condition_state: str | None = None
+    condition_attempt: int = Field(default=0, ge=0)
+    next_condition_check_at_ms: int | None = Field(default=None, gt=0)
+    condition_action: str | None = None
     boundary_state: Literal["flat", "owned_exposure", "external_exposure", "unknown"] = "unknown"
     btc_quote_volume: Decimal = Decimal(0)
     eth_quote_volume: Decimal = Decimal(0)

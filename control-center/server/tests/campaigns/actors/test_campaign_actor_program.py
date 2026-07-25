@@ -51,6 +51,9 @@ class _Phases:
     def prepare(self, _campaign: object) -> CampaignActorContext:
         return _context()
 
+    def check_open_conditions(self, _context: CampaignActorContext) -> None:
+        return
+
     def plan_open(self, _campaign: object, context: CampaignActorContext) -> OpenCycle:
         with self._lock:
             self.active_opens += 1

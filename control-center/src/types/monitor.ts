@@ -57,6 +57,10 @@ export interface StrategyMonitorSnapshot {
   recoveryState: string | null
   recoveryAttempt: number
   nextRecoveryCheckAtMs: number | null
+  conditionState: string | null
+  conditionAttempt: number
+  nextConditionCheckAtMs: number | null
+  conditionAction: string | null
   boundaryState: 'flat' | 'owned_exposure' | 'external_exposure' | 'unknown'
   btcQuoteVolume: string
   ethQuoteVolume: string

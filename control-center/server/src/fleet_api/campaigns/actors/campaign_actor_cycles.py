@@ -109,7 +109,7 @@ def close_lanes(
             elif abs(Decimal(str(position))) > plans[symbol].amount_step / 2:
                 jobs[symbol] = pool.submit(
                     service._flatten_lane,
-                    opened.context.child,
+                    opened.plan,
                     opened.context.round_number,
                     offset,
                     plans[symbol],
@@ -142,7 +142,7 @@ def safe_stop(
     """Use the emergency I/O stage to converge only the current cycle's legs."""
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="fleet-safe") as pool:
         return service._safe_stop(
-            opened.context.child,
+            opened.plan,
             lanes,
             opened.preflight,
             opened.context.execution_started_at_ms,
@@ -175,7 +175,7 @@ def cycle_record(
         "round": opened.context.round_number,
         "status": status,
         "reason": reason or ("paired_cycle_flat" if flat else "paired_cycle_not_flat"),
-        "desired_quote": opened.sizing["opening_notional_quote"],
+        "desired_quote": opened.sizing.get("planned_turnover_quote", opened.sizing["opening_notional_quote"]),
         "executed_quote_volume": decimal_text(quote),
         "cumulative_quote_volume": decimal_text(opened.context.child_total_quote),
         "planned_open_beta": opened.sizing.get("planned_open_beta"),

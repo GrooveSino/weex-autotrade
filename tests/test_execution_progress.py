@@ -264,12 +264,25 @@ def test_projector_carries_child_cycle_totals_across_campaign_runs() -> None:
 def test_projector_exposes_and_clears_hold_and_round_gap_countdowns() -> None:
     projector = ExecutionProgressProjector()
 
-    assert projector.apply({"event": "hold_started", "round": 1, "seconds": "43.6"}, at_ms=1_000) is None
+    assert projector.apply(
+        {
+            "event": "hold_started",
+            "round": 1,
+            "seconds": "43.6",
+            "started_at_ms": 900,
+            "deadline_at_ms": 44_500,
+        },
+        at_ms=1_000,
+    ) is None
     hold = projector.active_waits["hold"]
     assert hold.label == "双边持仓计时"
     assert hold.remaining_ms == 43_600
+    assert hold.started_at_ms == 900
+    assert hold.deadline_at_ms == 44_500
     projector.apply({"event": "hold_completed", "round": 1, "seconds": "43.6"}, at_ms=44_600)
     assert "hold" not in projector.active_waits
+    assert projector.phase == "准备平仓"
+    assert projector.active_waits["cycle-stage:1"].label == "持仓计时结束，正在进入平仓阶段"
 
     assert projector.apply({"event": "round_gap_started", "round": 1, "seconds": "77.6"}, at_ms=45_000) is None
     gap = projector.active_waits["round-gap"]
@@ -277,6 +290,60 @@ def test_projector_exposes_and_clears_hold_and_round_gap_countdowns() -> None:
     assert gap.remaining_ms == 77_600
     projector.apply({"event": "round_gap_completed", "round": 1, "seconds": "77.6"}, at_ms=122_600)
     assert projector.active_waits == {}
+    assert projector.phase == "准备下一轮"
+
+
+def test_projector_atomically_supersedes_round_waits_across_close_and_gap() -> None:
+    projector = ExecutionProgressProjector()
+    projector.apply({"event": "hold_started", "round": 2, "seconds": "10"}, at_ms=1_000)
+    projector.apply({"event": "hold_completed", "round": 2, "seconds": "10"}, at_ms=11_000)
+    assert tuple(projector.active_waits) == ("cycle-stage:2",)
+
+    projector.apply({"event": "close_barrier_started", "round": 2}, at_ms=11_010)
+    assert tuple(projector.active_waits) == ("cycle-stage:2",)
+    assert projector.active_waits["cycle-stage:2"].label == "读取实际持仓并准备并发平仓"
+    assert projector.phase == "平仓执行"
+
+    projector.apply(
+        {"event": "pair_waiting", "round": 2, "action": "close", "symbols": ["BTC", "ETH"]},
+        at_ms=11_020,
+    )
+    assert tuple(projector.active_waits) == ("pair:2:close",)
+    assert projector.active_waits["pair:2:close"].remaining_ms is None
+
+    projector.apply({"event": "cycle_completed", "round": 2, "status": "completed"}, at_ms=12_000)
+    assert projector.active_waits == {}
+    assert projector.phase == "轮次收尾"
+
+    projector.apply({"event": "round_gap_started", "round": 2, "seconds": "5"}, at_ms=12_010)
+    assert tuple(projector.active_waits) == ("round-gap",)
+    projector.apply({"event": "cycle_started", "round": 3}, at_ms=17_010)
+    assert projector.active_waits == {}
+    assert projector.phase == "开仓执行"
+
+
+def test_internal_or_late_events_cannot_regress_the_runtime_stage() -> None:
+    projector = ExecutionProgressProjector()
+    projector.apply({"event": "hold_started", "round": 1, "seconds": "1"}, at_ms=1_000)
+    projector.apply({"event": "hold_completed", "round": 1, "seconds": "1"}, at_ms=2_000)
+    projector.apply({"event": "actor_lifecycle", "phase": "closing"}, at_ms=2_001)
+    assert projector.phase == "准备平仓"
+
+    projector.apply({"event": "cycle_completed", "round": 1, "status": "completed"}, at_ms=3_000)
+    projector.apply({"event": "hold_started", "round": 1, "seconds": "99"}, at_ms=3_001)
+    projector.apply(
+        {
+            "event": "leg_progress",
+            "progress_event": "wait",
+            "round": 1,
+            "symbol": "BTC",
+            "action": "close",
+            "remaining_ms": 99_000,
+        },
+        at_ms=3_002,
+    )
+    assert projector.active_waits == {}
+    assert projector.phase == "轮次收尾"
 
 
 def test_hold_countdown_has_a_visible_target_position_barrier() -> None:

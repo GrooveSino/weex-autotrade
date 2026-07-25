@@ -5,10 +5,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from weex_cli.beta_volume import PairLegPlan
+from weex_cli.beta_allocation import BetaAllocation, BetaUnavailable
+from weex_cli.beta_volume import BetaVolumePlan, PairLegPlan
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, CampaignPhaseEnvironment, OpenCycle
 from fleet_api.campaigns.actors.campaign_actor_phases import CampaignActorPhases
+from fleet_api.campaigns.actors.campaign_actor_planning import build_cycle_plan
 
 
 class _Volume:
@@ -60,6 +62,7 @@ def _context() -> CampaignActorContext:
         plan_id="child-plan",
         round_turnover_quote=Decimal("100"),
         target_turnover_quote=Decimal("200"),
+        leverage=400,
         max_empty_rounds=3,
         estimated_rounds=2,
     )
@@ -70,17 +73,79 @@ def _campaign() -> object:
     return SimpleNamespace(hold_min_seconds=12, hold_max_seconds=12, round_gap_min_seconds=1, round_gap_max_seconds=1)
 
 
+def _allocation(version: str, beta: str) -> BetaAllocation:
+    return BetaAllocation(
+        beta=Decimal(beta),
+        btc_long_weight=Decimal("0.5"),
+        eth_short_weight=Decimal("0.5"),
+        version=version,
+        as_of_ms=1_000,
+        confidence=Decimal("1"),
+        confidence_threshold=Decimal("0.5"),
+        source="fake",
+    )
+
+
+def _plan(allocation: BetaAllocation) -> BetaVolumePlan:
+    btc, eth = _plans()
+    return BetaVolumePlan(
+        schema_version=5,
+        plan_id="child-plan",
+        created_at_ms=1,
+        target_turnover_quote=Decimal("200"),
+        round_turnover_quote=Decimal("100"),
+        opening_budget_quote=Decimal("50"),
+        max_position_quote=Decimal("500"),
+        timeout_seconds=10,
+        recovery_attempts=3,
+        max_empty_rounds=3,
+        cooldown_seconds=1,
+        leverage=400,
+        max_auto_leverage=125,
+        margin_buffer=Decimal("1.1"),
+        margin_mode="cross",
+        allocation=allocation,
+        btc=btc,
+        eth=eth,
+        estimated_turnover_quote=Decimal("100"),
+        direction="btc_long_eth_short",
+    )
+
+
 def _phases(volume: _Volume, *, stopping: bool = False) -> CampaignActorPhases:
     environment = CampaignPhaseEnvironment(SimpleNamespace(), volume, lambda: None)
     return CampaignActorPhases(lambda _phase: environment, is_stopping=lambda: stopping)
+
+
+def test_initial_beta_outage_enters_the_condition_loop_instead_of_aborting(monkeypatch) -> None:
+    claimed: list[object] = []
+    service = SimpleNamespace(
+        current_campaign=None,
+        _validate_authorization=lambda _campaign: (_ for _ in ()).throw(BetaUnavailable("temporary")),
+        campaign_store=SimpleNamespace(claim_for_execution=claimed.append),
+    )
+    environment = CampaignPhaseEnvironment(service, SimpleNamespace(), lambda: None)
+    monkeypatch.setattr("fleet_api.campaigns.actors.campaign_actor_phases.new_actor_context", lambda *_args: _context())
+
+    context = CampaignActorPhases(lambda _phase: environment, is_stopping=lambda: False).prepare(_campaign())
+
+    assert context.round_number == 1
+    assert claimed == [_campaign()]
 
 
 def test_hold_timer_starts_only_after_both_open_positions_are_verified(monkeypatch) -> None:
     volume = _Volume()
     btc, eth = _plans()
     monkeypatch.setattr(
-        "fleet_api.campaigns.actors.campaign_actor_phases._size_cycle",
-        lambda _plan, _lanes, _quote: (btc, eth, {"opening_notional_quote": "100"}),
+        "fleet_api.campaigns.actors.campaign_actor_phases.build_cycle_plan",
+        lambda _service, context: (
+            context.child,
+            {"boundary": "flat"},
+            btc,
+            eth,
+            {"opening_notional_quote": "100", "planned_turnover_quote": "200", "desired_turnover_quote": "200"},
+            {"BTC": object(), "ETH": object()},
+        ),
     )
     monkeypatch.setattr(
         "fleet_api.campaigns.actors.campaign_actor_phases.observe_positions",
@@ -99,8 +164,15 @@ def test_open_barrier_does_not_start_hold_until_both_legs_reach_target(monkeypat
     volume = _Volume()
     btc, eth = _plans()
     monkeypatch.setattr(
-        "fleet_api.campaigns.actors.campaign_actor_phases._size_cycle",
-        lambda _plan, _lanes, _quote: (btc, eth, {"opening_notional_quote": "100"}),
+        "fleet_api.campaigns.actors.campaign_actor_phases.build_cycle_plan",
+        lambda _service, context: (
+            context.child,
+            {"boundary": "flat"},
+            btc,
+            eth,
+            {"opening_notional_quote": "100", "planned_turnover_quote": "200", "desired_turnover_quote": "200"},
+            {"BTC": object(), "ETH": object()},
+        ),
     )
     monkeypatch.setattr(
         "fleet_api.campaigns.actors.campaign_actor_phases.observe_positions",
@@ -128,6 +200,46 @@ def test_actor_position_observation_normalizes_real_float_values() -> None:
     assert not positions_are_flat(positions, btc, eth)
 
 
+def test_each_attempt_freezes_the_latest_beta_without_mutating_the_authorized_plan(monkeypatch) -> None:
+    allocations = iter((_allocation("beta-1", "1"), _allocation("beta-2", "2")))
+    service = SimpleNamespace(
+        provider=SimpleNamespace(get=lambda: next(allocations)),
+        gateway=object(),
+        market_data=object(),
+        _create_lanes=lambda _plan: {"BTC": object(), "ETH": object()},
+        _read_with_retry=lambda call, **_kwargs: call(),
+        now_ms=lambda: 2_000,
+    )
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_planning.inspect_live_account",
+        lambda *_args, **_kwargs: {
+            "available_sufficient": True,
+            "active_position_count": 0,
+            "regular_order_count": 0,
+            "trigger_order_count": 0,
+        },
+    )
+    btc, eth = _plans()
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_planning._size_cycle",
+        lambda plan, _lanes, _desired, **_kwargs: (
+            btc,
+            eth,
+            {"estimated_turnover_quote": "96", "opening_notional_quote": "48"},
+        ),
+    )
+    context = CampaignActorContext(child=_plan(_allocation("preview", "1")), run_number=1, execution_started_at_ms=1)
+
+    first, *_before = build_cycle_plan(service, context)
+    context.child_total_quote = Decimal("96")
+    second, *_after = build_cycle_plan(service, context)
+
+    assert first.plan_id.endswith("-a0001")
+    assert second.plan_id.endswith("-a0002")
+    assert (first.allocation.version, second.allocation.version) == ("beta-1", "beta-2")
+    assert context.child.allocation.version == "preview"
+
+
 def test_actor_position_observation_rejects_non_finite_values() -> None:
     from weex_cli.errors import SafetyError
 
@@ -142,18 +254,20 @@ def test_close_stage_rebuilds_lanes_from_the_persisted_child_plan(monkeypatch) -
     volume = _Volume()
     btc, eth = _plans()
     context = _context()
+    cycle_plan = SimpleNamespace(plan_id="cycle-plan", target_turnover_quote=Decimal("200"))
     opened = OpenCycle(
         context=context,
         preflight={},
         btc_plan=btc,
         eth_plan=eth,
-        sizing={"opening_notional_quote": "100"},
+        sizing={"opening_notional_quote": "100", "planned_turnover_quote": "200"},
         selected_leverage=400,
         leverage_state={},
         open_summaries=[],
         lane_stops={},
         started_at_ms=9_000,
         hold_seconds=0,
+        execution_plan=cycle_plan,  # type: ignore[arg-type]
     )
     monkeypatch.setattr("fleet_api.campaigns.actors.campaign_actor_phases.close_lanes", lambda *_args: [])
     monkeypatch.setattr(
@@ -167,8 +281,50 @@ def test_close_stage_rebuilds_lanes_from_the_persisted_child_plan(monkeypatch) -
 
     outcome = _phases(volume).close(_campaign(), opened)
 
-    assert volume.lane_plans == [context.child]
+    assert volume.lane_plans == [cycle_plan]
     assert outcome.child_result == {"status": "completed", "reason": "target_verified_complete"}
+
+
+def test_partial_completed_attempt_advances_round_before_retrying_with_a_fresh_snapshot(monkeypatch) -> None:
+    volume = _Volume()
+    context = _context()
+    cycle_plan = _plan(_allocation("fresh-beta", "1"))
+    btc, eth = _plans()
+    opened = OpenCycle(
+        context=context,
+        preflight={},
+        btc_plan=btc,
+        eth_plan=eth,
+        sizing={"opening_notional_quote": "100", "planned_turnover_quote": "200"},
+        selected_leverage=400,
+        leverage_state={},
+        open_summaries=[{"symbol": "BTC", "quote_volume": "10"}],
+        lane_stops={"BTC": ("stopped", "post_only_rejected")},
+        started_at_ms=9_000,
+        hold_seconds=0,
+        execution_plan=cycle_plan,
+    )
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_phases.close_lanes",
+        lambda *_args: [{"symbol": "BTC", "quote_volume": "10"}],
+    )
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_phases.observe_positions",
+        lambda *_args, **_kwargs: {"BTC": Decimal("0"), "ETH": Decimal("0")},
+    )
+    monkeypatch.setattr("fleet_api.campaigns.actors.campaign_actor_phases.positions_are_flat", lambda *_args: True)
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_phases._terminal_reason",
+        lambda _stops: "post_only_rejected",
+    )
+    volume._refresh_pending_accounting = lambda *_args: None  # type: ignore[attr-defined]
+
+    outcome = _phases(volume).close(_campaign(), opened)
+
+    assert outcome.condition is not None
+    assert outcome.condition.code == "maker_attempt_unavailable"
+    assert context.child_total_quote == Decimal("20")
+    assert context.round_number == 2
 
 
 def test_stop_uses_emergency_safe_stop_instead_of_a_normal_close_phase(monkeypatch) -> None:

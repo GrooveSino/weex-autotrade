@@ -44,7 +44,7 @@ def test_monitor_replays_complete_legacy_journal_without_event_cap() -> None:
 
     assert snapshot.current_round == 2_104
     assert snapshot.projection_sequence == 2_104
-    assert snapshot.projection_version == 6
+    assert snapshot.projection_version == 7
     assert snapshot.stream_state == "ready"
 
 

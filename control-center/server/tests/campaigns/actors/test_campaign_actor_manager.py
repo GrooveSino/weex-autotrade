@@ -36,6 +36,17 @@ class _CompletedActorProgram:
         actor.transition("completed")
 
 
+class _RehydratedActorProgram:
+    resume_contexts: list[object] = []
+
+    def __init__(self, _campaign, _phases, *, resume_context=None, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+        self._resume_context = resume_context
+
+    async def __call__(self, actor) -> None:  # type: ignore[no-untyped-def]
+        type(self).resume_contexts.append(self._resume_context)
+        actor.transition("condition_waiting", reason="beta_unavailable")
+
+
 def test_manager_admits_and_releases_an_async_actor_without_legacy_worker(monkeypatch, tmp_path) -> None:
     settings = replace(live_settings(tmp_path), async_actor_runtime_enabled=True, max_active_executions=1)
     manager = CampaignWorkerManager(
@@ -75,6 +86,44 @@ def test_manager_admits_and_releases_an_async_actor_without_legacy_worker(monkey
     assert manager.active_worker_count() == 0
     assert manager.capacity_snapshot().active_executions == 0
     assert campaign.campaign_id not in manager._futures
+    manager.close()
+
+
+def test_restart_rehydrates_a_flat_condition_wait_without_recovery_or_reconfirmation(monkeypatch, tmp_path) -> None:
+    settings = replace(live_settings(tmp_path), async_actor_runtime_enabled=True, max_active_executions=1)
+    vault = EphemeralCredentialVault()
+    manager = CampaignWorkerManager(
+        settings,
+        vault,
+        InMemoryCampaignJournal(),
+        lambda: FakeBetaProvider(sample_campaign().allocation),  # type: ignore[arg-type]
+    )
+    campaign = replace(sample_campaign(), expires_at_ms=int(time.time() * 1_000) - 1)._with_computed_id()
+    record_metadata = {**metadata(campaign), "phase": "condition_waiting"}
+    manager.journal.create("ins-1", campaign, record_metadata)
+    manager.journal.update(campaign.campaign_id, status=BetaCampaignStatus.EXECUTING.value)
+    vault.put(
+        "ins-1",
+        CredentialMaterial(
+            api_key=SecretStr("key"), api_secret=SecretStr("secret"), passphrase=SecretStr("passphrase"), proxy_url=None
+        ),
+    )
+    _RehydratedActorProgram.resume_contexts.clear()
+    monkeypatch.setattr(
+        "fleet_api.campaigns.manager.campaign_manager_actor.CampaignActorProgram", _RehydratedActorProgram
+    )
+
+    assert manager.recover() == 1
+    for _ in range(30):
+        if _RehydratedActorProgram.resume_contexts:
+            break
+        time.sleep(0.01)
+
+    record = manager.journal.get(campaign.campaign_id)
+    assert _RehydratedActorProgram.resume_contexts == [None]
+    assert record is not None
+    assert record.status == BetaCampaignStatus.EXECUTING
+    assert record.metadata["phase"] == "condition_waiting"
     manager.close()
 
 

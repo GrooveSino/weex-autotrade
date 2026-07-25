@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_volume import (
-    _is_uncertain_stop,
-    _LegSpec,
-    _signed_open_quantity,
-    _size_cycle,
-    _terminal_reason,
-)
+from weex_cli.beta_allocation import BetaUnavailable
+from weex_cli.beta_volume import _is_uncertain_stop, _terminal_reason
 from weex_cli.models import decimal_text
 
 from fleet_api.campaigns.actors.campaign_actor_cycles import (
@@ -26,14 +21,22 @@ from fleet_api.campaigns.actors.campaign_actor_cycles import (
     targets_reached,
 )
 from fleet_api.campaigns.actors.campaign_actor_models import (
-    BOUNDARY_COUNTS,
     Campaign,
     CampaignActorContext,
     CloseCycle,
+    CycleCondition,
+    CycleConditionError,
     EnvironmentFactory,
     OpenCycle,
 )
-from fleet_api.campaigns.actors.campaign_actor_planning import new_actor_context, prepare_cycle_leverage
+from fleet_api.campaigns.actors.campaign_actor_planning import (
+    build_cycle_plan,
+    check_cycle_conditions,
+    new_actor_context,
+    prepare_cycle_leverage,
+    retry_cycle_condition,
+)
+from fleet_api.campaigns.actors.phase_helpers.open_pair import open_pair
 
 
 class CampaignActorPhases:
@@ -55,14 +58,26 @@ class CampaignActorPhases:
         try:
             service = environment.campaign_service
             service.current_campaign = campaign
-            service._validate_authorization(campaign)
-            service._emit("campaign_boundary_started", phase="initial")
-            boundary = service._read_boundary()
-            service._emit("campaign_boundary_completed", phase="initial")
-            if any(boundary.get(key) for key in BOUNDARY_COUNTS):
-                raise RuntimeError("campaign requires a flat account boundary")
+            # Static authorization checks run before the provider read. The
+            # normal condition loop owns temporary Beta outages.
+            with suppress(BetaUnavailable):
+                service._validate_authorization(campaign)
             service.campaign_store.claim_for_execution(campaign)
             return new_actor_context(service, campaign)
+        finally:
+            environment.close()
+
+    def prepare_for_resume(self, campaign: Campaign) -> None:
+        """Reclaim a confirmed condition wait without replaying preview drift checks."""
+        environment = self._environment_factory("prepare")
+        try:
+            service = environment.campaign_service
+            service.current_campaign = campaign
+            if campaign.schema_version not in {1, 2, 3, 4, 5}:
+                raise RuntimeError("unsupported campaign schema")
+            if campaign.profile_fingerprint != service.profile_fingerprint:
+                raise RuntimeError("campaign was authorized for a different live profile")
+            service.campaign_store.claim_for_execution(campaign)
         finally:
             environment.close()
 
@@ -70,21 +85,24 @@ class CampaignActorPhases:
         environment = self._environment_factory("open")
         try:
             service = environment.volume_service
-            plan = context.child
-            lanes = service._create_lanes(plan)
+            plan, preflight, btc_plan, eth_plan, sizing, lanes = build_cycle_plan(service, context)
             service.current_plan_id = plan.plan_id
-            preflight = service._preflight_with_read_retry(plan)
-            desired_quote = min(plan.round_turnover_quote, plan.target_turnover_quote - context.child_total_quote)
-            if desired_quote <= 0:
-                raise RuntimeError("campaign child target is already complete")
-            service._emit("cycle_preparing", round=context.round_number, desired_quote=decimal_text(desired_quote))
-            btc_plan, eth_plan, sizing = service._read_with_retry(
-                lambda: _size_cycle(plan, lanes, desired_quote),
-                operation="cycle_sizing",
-                retry_event="cycle_sizing_retry",
+            service._emit(
+                "cycle_preparing",
                 round=context.round_number,
+                attempt=context.attempt_number,
+                desired_quote=sizing["desired_turnover_quote"],
             )
-            selected, leverage_state = prepare_cycle_leverage(service, plan, sizing, context.round_number)
+            try:
+                selected, leverage_state = prepare_cycle_leverage(service, plan, sizing, context.round_number)
+            except Exception as exc:
+                raise CycleConditionError(
+                    CycleCondition(
+                        code="leverage_configuration_unavailable",
+                        detail="杠杆准备暂时无法完成，系统不会下单并会自动重新检查",
+                        action="等待账户配置恢复",
+                    )
+                ) from exc
             started_at_ms = service.now_ms()
             opened = OpenCycle(
                 context=context,
@@ -98,9 +116,26 @@ class CampaignActorPhases:
                 lane_stops={},
                 started_at_ms=started_at_ms,
                 hold_seconds=0,
+                execution_plan=plan,
             )
-            self._ownership_sink(opened, "planned")
+            try:
+                self._ownership_sink(opened, "planned")
+            except Exception as exc:
+                raise CycleConditionError(
+                    CycleCondition(
+                        code="persistence_unavailable",
+                        detail="执行快照暂时无法持久化，系统不会下单并会自动重新检查",
+                        action="等待本地执行记录恢复",
+                    )
+                ) from exc
             return opened
+        finally:
+            environment.close()
+
+    def check_open_conditions(self, context: CampaignActorContext) -> None:
+        environment = self._environment_factory("condition")
+        try:
+            check_cycle_conditions(environment.volume_service, context)
         finally:
             environment.close()
 
@@ -108,14 +143,14 @@ class CampaignActorPhases:
         environment = self._environment_factory("open")
         try:
             service = environment.volume_service
-            plan = opened.context.child
+            plan = opened.plan
             lanes = service._create_lanes(plan)
             service.current_plan_id = plan.plan_id
-            results = self._open_pair(
+            results = open_pair(
                 service,
                 plan,
                 opened.context.round_number,
-                Decimal(str(opened.sizing["opening_notional_quote"])),
+                Decimal(str(opened.sizing["planned_turnover_quote"])),
                 opened.btc_plan,
                 opened.eth_plan,
                 lanes,
@@ -145,8 +180,8 @@ class CampaignActorPhases:
         environment = self._environment_factory("close")
         try:
             service = environment.volume_service
-            lanes = service._create_lanes(opened.context.child)
-            service.current_plan_id = opened.context.child.plan_id
+            lanes = service._create_lanes(opened.plan)
+            service.current_plan_id = opened.plan.plan_id
             if self._is_stopping():
                 outcome = CloseCycle(Decimal(0), safe_stop(service, lanes, opened), "stop_requested", None, 0)
             else:
@@ -160,7 +195,7 @@ class CampaignActorPhases:
         environment = self._environment_factory("safe_stop")
         try:
             service = environment.volume_service
-            result = safe_stop(service, service._create_lanes(opened.context.child), opened)
+            result = safe_stop(service, service._create_lanes(opened.plan), opened)
             self._ownership_sink(opened, "closed" if result.get("status") != "uncertain" else "uncertain")
             return result
         finally:
@@ -188,42 +223,6 @@ class CampaignActorPhases:
             )
         finally:
             environment.close()
-
-    @staticmethod
-    def _open_pair(
-        service: Any,
-        plan: Any,
-        round_number: int,
-        desired_quote: Decimal,
-        btc_plan: Any,
-        eth_plan: Any,
-        lanes: Mapping[str, Any],
-    ) -> Mapping[str, tuple[dict[str, Any], tuple[str, str] | None]]:
-        service._emit(
-            "cycle_started",
-            round=round_number,
-            desired_quote=decimal_text(desired_quote),
-            btc_quantity=decimal_text(btc_plan.quantity),
-            eth_quantity=decimal_text(eth_plan.quantity),
-        )
-        specs = {
-            "BTC": _LegSpec(
-                btc_plan,
-                "open",
-                btc_plan.opening_side,
-                _signed_open_quantity(btc_plan),
-                f"{plan.plan_id}-r{round_number:03d}-bo",
-            ),
-            "ETH": _LegSpec(
-                eth_plan,
-                "open",
-                eth_plan.opening_side,
-                _signed_open_quantity(eth_plan),
-                f"{plan.plan_id}-r{round_number:03d}-eo",
-            ),
-        }
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="fleet-open") as pool:
-            return service._run_pair(pool, plan, round_number, 1, specs, lanes)
 
     def _verify_open_target(
         self,
@@ -274,13 +273,13 @@ class CampaignActorPhases:
         context.summaries.extend(legs)
         reason = _terminal_reason(stops)
         uncertain = any(_is_uncertain_stop(stop) for stop in stops.values())
-        context.empty_rounds = context.empty_rounds + 1 if quote == 0 else 0
-        if reason is None and context.empty_rounds > context.child.max_empty_rounds:
-            reason = "maximum_empty_rounds"
+        retry_condition = retry_cycle_condition(reason, quote, flat, uncertain)
+        record_reason = None if retry_condition is not None else reason
         should_continue = (
             not uncertain
-            and reason is None
+            and record_reason is None
             and flat
+            and retry_condition is None
             and context.child_total_quote < context.child.target_turnover_quote
         )
         gap = sampled_delay(campaign.round_gap_min_seconds, campaign.round_gap_max_seconds) if should_continue else 0
@@ -290,14 +289,14 @@ class CampaignActorPhases:
             quote,
             positions,
             flat=flat,
-            reason=reason,
+            reason=record_reason,
             uncertain=uncertain,
             round_gap_seconds=gap,
             elapsed_ms=max(0, service.now_ms() - opened.started_at_ms),
         )
         context.cycles.append(record)
         service._emit(
-            "cycle_completed" if record["status"] in {"completed", "recovered"} else "cycle_stopped",
+            "cycle_completed" if record["status"] in {"completed", "recovered", "empty"} else "cycle_stopped",
             round=context.round_number,
             status=record["status"],
             reason=record["reason"],
@@ -307,8 +306,6 @@ class CampaignActorPhases:
         )
         if uncertain:
             return CloseCycle(quote, None, None, reason or "lane_execution_uncertain", 0)
-        if reason is not None or not flat:
-            return CloseCycle(quote, None, reason or "paired_cycle_not_flat", None, 0)
         if context.child_total_quote >= context.child.target_turnover_quote:
             result = service._final_acceptance(
                 context.child,
@@ -320,6 +317,12 @@ class CampaignActorPhases:
                 context.execution_started_at_ms,
             )
             return CloseCycle(quote, result, None, None, 0)
+        if retry_condition is not None:
+            if quote > 0:
+                context.round_number += 1
+            return CloseCycle(quote, None, None, None, 0, condition=retry_condition)
+        if reason is not None or not flat:
+            return CloseCycle(quote, None, reason or "paired_cycle_not_flat", None, 0)
         context.round_number += 1
         gap_started_at_ms = service.now_ms()
         service._emit(

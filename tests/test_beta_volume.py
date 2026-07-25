@@ -2167,7 +2167,9 @@ def test_partial_open_is_reconciled_flat_then_next_cycle_continues(
     assert venues["ETH"].position == pytest.approx(0)
 
 
-def test_preflight_rejects_beta_drift_and_existing_exposure(tmp_path, allocation: BetaAllocation) -> None:
+def test_preflight_accepts_beta_changes_but_rejects_existing_exposure(
+    tmp_path, allocation: BetaAllocation
+) -> None:
     gateway = Gateway()
     plan = BetaVolumePlan.create(
         gateway,
@@ -2193,8 +2195,9 @@ def test_preflight_rejects_beta_drift_and_existing_exposure(tmp_path, allocation
         BetaVolumePlanStore(tmp_path),
         now_ms=lambda: 1000,  # type: ignore[arg-type]
     )
-    with pytest.raises(SafetyError, match="Beta moved"):
-        service.preflight(plan)
+    preflight = service.preflight(plan)
+    assert preflight["fresh_beta_version"] == moved.version
+    assert "beta_drift" not in preflight
 
     gateway.positions_by_symbol["BTC"] = [{"side": "long", "contracts": "0.1"}]
     service = LiveBetaVolumeService(

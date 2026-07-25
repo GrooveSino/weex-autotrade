@@ -36,6 +36,9 @@ class _Phases:
     def plan_open(self, _campaign: object, context: CampaignActorContext) -> OpenCycle:
         return OpenCycle(context, {}, None, None, {}, 1, {}, [], {}, 1, 0)  # type: ignore[arg-type]
 
+    def check_open_conditions(self, _context: CampaignActorContext) -> None:
+        return
+
     def execute_open(self, _campaign: object, _opened: OpenCycle) -> None:
         self.opened.set()
 
@@ -68,7 +71,7 @@ def test_shared_market_recovery_waits_before_normal_open_slot() -> None:
     assert capacity.admit("one")
     future = runtime.start("one", "account-one", program)
     try:
-        _wait(lambda: any(state.phase == "market_waiting" for state in states))
+        _wait(lambda: any(state.phase == "condition_waiting" for state in states))
         assert not phases.opened.is_set()
         assert capacity.snapshot().active_normal_phases == 0
         assert market.waiting == {"one"}

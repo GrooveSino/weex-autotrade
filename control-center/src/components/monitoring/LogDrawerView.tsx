@@ -72,6 +72,7 @@ export function LogDrawerView(props: Props) {
               <div><span>状态 / 阶段</span><strong>{monitor.status} / {monitor.phase}</strong></div><div><span>运行 / 轮次</span><strong>{monitor.currentRun || '-'} / {monitor.currentRound || '-'}</strong></div>
               <div><span>BTC / ETH 成交量</span><strong>{quote(monitor.btcQuoteVolume)} / {quote(monitor.ethQuoteVolume)} USDT</strong></div><div><span>Maker / Taker / Unknown</span><strong>{monitor.makerFillCount} / {monitor.takerFillCount} / {monitor.unknownFillCount}</strong></div>
               <div><span>挂单 / 撤单 / requote</span><strong>{monitor.submissions} / {monitor.cancels} / {monitor.requotes}</strong></div><div><span>数据来源</span><strong className={monitor.auditStatus !== 'verified' || monitor.ledgerSyncState !== 'complete' ? 'monitor-unverified' : 'monitor-verified'}>{volumeState}</strong>{volumeDetail && <small className="monitor-ledger-progress">{volumeDetail}</small>}</div>
+              {monitor.conditionState && <div><span>自动处理</span><strong>{monitor.conditionAction ?? '系统正在自动重新检查'}</strong></div>}
             </section>
             <section className="active-waits" aria-label="当前等待"><header><span>当前活动</span><small>{monitor.activeWaits.length ? `${monitor.activeWaits.length} 项并行等待` : '无活动等待'}</small></header>
               {monitor.activeWaits.map((wait) => <ActiveWaitRow key={wait.key} wait={wait} serverNowMs={serverNowMs} />)}

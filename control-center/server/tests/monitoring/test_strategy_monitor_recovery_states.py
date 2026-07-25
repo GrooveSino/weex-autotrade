@@ -83,3 +83,38 @@ def test_monitor_exposes_owned_recovery_boundary_without_generic_typeerror() -> 
     assert snapshot.recovery_state == "cleanup_required"
     assert snapshot.recovery_attempt == 2
     assert snapshot.phase == "当前任务仓位待安全收尾"
+
+
+def test_monitor_exposes_condition_wait_with_an_automatic_next_action() -> None:
+    journal, campaign, monitor = _monitor_with_session(source_complete=True, stale=False, pending_sync=False)
+    journal.add_event(
+        campaign.campaign_id,
+        _sanitize_event(
+            {
+                "event": "actor_lifecycle",
+                "phase": "condition_waiting",
+                "reason": "external_account_boundary",
+                "deadline_at_ms": 5_000,
+            }
+        ),
+    )
+    journal.add_event(
+        campaign.campaign_id,
+        _sanitize_event(
+            {
+                "event": "condition_waiting",
+                "condition": "external_account_boundary",
+                "attempt": 3,
+                "next_check_ms": 5_000,
+            }
+        ),
+    )
+
+    snapshot = monitor.snapshot("ins-1")
+
+    assert snapshot.phase == "正在等待执行条件恢复"
+    assert snapshot.condition_state == "external_account_boundary"
+    assert snapshot.condition_attempt == 3
+    assert snapshot.next_condition_check_at_ms == 5_000
+    assert snapshot.condition_action and "清理这些仓位或挂单" in snapshot.condition_action
+    assert snapshot.active_waits[-1].key == "condition"

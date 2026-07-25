@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
-from decimal import Decimal
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -15,18 +13,24 @@ from uuid import uuid4
 from weex_cli.beta_volume import BetaVolumePlanStore
 
 from fleet_api.auth.vault import CredentialMaterial
-from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, OpenCycle
+from fleet_api.campaigns.actors.campaign_actor_models import (
+    CampaignActorContext,
+    OpenCycle,
+    cycle_plan_from_ownership,
+)
 from fleet_api.campaigns.actors.campaign_actor_phases import CampaignActorPhases
 from fleet_api.campaigns.actors.campaign_actor_program import CampaignActorProgram
 from fleet_api.campaigns.actors.campaign_actor_resources import CampaignActorResourceMixin
 from fleet_api.campaigns.actors.campaign_recovery_program import CampaignRecoveryProgram
+from fleet_api.campaigns.actors.projection.condition_state import persist_condition_projection
 from fleet_api.campaigns.core.campaign_contracts import CampaignRecord
 from fleet_api.campaigns.core.campaign_events import _sanitize_event, submission_attempted
 from fleet_api.campaigns.core.campaign_helpers import _campaign_result_metrics, _worker_exception_reason
+from fleet_api.campaigns.manager.helpers.actor_values import accounting_checkpoint, ending_available_quote, now_ms
 from fleet_api.execution.runtime.async_execution_orchestrator import AsyncExecutionOrchestrator
 from fleet_api.execution.runtime.execution_actor_state import ExecutionActorState
 from fleet_api.models import BetaCampaignStatus
-from fleet_api.monitoring.campaign_monitor_publish import publish_monitor_event
+from fleet_api.monitoring.campaign_monitor_publish import append_monitor_event_direct, publish_monitor_event
 
 
 class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
@@ -46,6 +50,8 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
         record: CampaignRecord,
         material: CredentialMaterial,
         stop: threading.Event,
+        *,
+        resume_context: CampaignActorContext | None = None,
     ) -> Future[None]:
         phase_factory = CampaignActorPhases(
             lambda phase: self._actor_environment(record, material, stop, phase),
@@ -61,6 +67,7 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
             on_result=lambda result: self._actor_completed(record, material, result),
             on_failure=lambda error: self._actor_failed(record, error),
             on_event=self._actor_event_sink(record),
+            resume_context=resume_context,
         )
         future = self._actor_runtime.start(record.campaign_id, record.instance_id, program)
         with self._lock:
@@ -131,8 +138,9 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
             leverage_state={},
             open_summaries=summaries,
             lane_stops={},
-            started_at_ms=int(ownership.get("updated_at_ms") or _now_ms()),
+            started_at_ms=int(ownership.get("updated_at_ms") or now_ms()),
             hold_seconds=0,
+            execution_plan=cycle_plan_from_ownership(ownership, child),
         )
 
     def _persist_actor_ownership(self, record: CampaignRecord, opened: Any, state: str) -> None:
@@ -151,16 +159,46 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
         payload = {
             "plan_id": opened.context.child.plan_id,
             "round": opened.context.round_number,
+            "attempt": opened.context.attempt_number,
             "state": state,
             "legs": legs,
-            "updated_at_ms": _now_ms(),
+            "cycle_plan": opened.plan.as_dict(),
+            "opening_notional_quote": str(opened.sizing.get("opening_notional_quote") or "0"),
+            "planned_turnover_quote": str(opened.sizing.get("planned_turnover_quote") or "0"),
+            "completed_quote": str(opened.context.child_total_quote),
+            "accounting_checkpoint": accounting_checkpoint(opened.context.summaries),
+            "beta_version": str(opened.sizing.get("beta_version") or ""),
+            "beta_as_of_ms": str(opened.sizing.get("beta_as_of_ms") or ""),
+            "updated_at_ms": now_ms(),
         }
-        self.write_coordinator.critical(lambda: self.journal.update(record.campaign_id, execution_ownership=payload))
+        if state != "planned":
+            self.write_coordinator.critical(
+                lambda: self.journal.update(record.campaign_id, execution_ownership=payload)
+            )
+            return
+        event = _sanitize_event(
+            {
+                "event": "cycle_plan_created",
+                "round": opened.context.round_number,
+                "attempt": opened.context.attempt_number,
+                "desired_quote": payload["planned_turnover_quote"],
+                "opening_notional_quote": payload["opening_notional_quote"],
+                "beta_version": payload["beta_version"],
+            }
+        )
+
+        def persist() -> int:
+            self.journal.update(record.campaign_id, execution_ownership=payload)
+            return append_monitor_event_direct(self, record, event)
+
+        event["sequence"] = self.write_coordinator.critical(persist)
+        self._notify_progress(record.instance_id, event)
 
     def _actor_event_sink(self, record: CampaignRecord) -> Callable[[Mapping[str, Any]], None]:
         def sink(payload: Mapping[str, Any]) -> None:
             try:
                 event = _sanitize_event(dict(payload))
+                persist_condition_projection(self, record, event)
                 publish_monitor_event(self, record, event)
             except Exception:
                 # Execution telemetry can be replayed from the exchange and
@@ -214,14 +252,14 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
                 "status": status,
                 "reason": str(result.get("reason") or "execution_outcome_uncertain"),
             }
-        ending_available = _ending_available_quote(result)
+        ending_available = ending_available_quote(result)
         if ending_available is None:
             ending_available = self._read_ending_available(material)
         self.journal.update(
             record.campaign_id,
             status=status,
             result=result,
-            finished_at_ms=_now_ms(),
+            finished_at_ms=now_ms(),
             phase="finished",
             generated_quote=result.get("executed_quote_volume", "0"),
             remaining_quote=result.get("remaining_quote", "0"),
@@ -247,7 +285,7 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
         self.journal.update(
             record.campaign_id,
             status=status,
-            finished_at_ms=_now_ms(),
+            finished_at_ms=now_ms(),
             reason=stored_reason,
             error_id=error_id,
             failure_phase="actor",
@@ -275,14 +313,13 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
     def actor_state(self, campaign_id: str) -> ExecutionActorState | None:
         return self._actor_runtime.state(campaign_id)
 
-    def actor_runtime_snapshot(self):  # type: ignore[no-untyped-def]
-        return self._actor_runtime.snapshot()
+    def actor_runtime_snapshot(self):
+        return self._actor_runtime.snapshot()  # type: ignore[no-untyped-def]
 
     def connection_snapshots(self):  # type: ignore[no-untyped-def]
         return self.public_market_snapshot_service.snapshot(), self.private_order_stream_pool.snapshot()
 
     def collect_connections(self) -> None:
-        """Close released streams once their bounded idle period has elapsed."""
         self.private_order_stream_pool.collect()
 
     def _read_ending_available(self, material: CredentialMaterial) -> str | None:
@@ -303,18 +340,3 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
     def _proxy_key(self, material: CredentialMaterial) -> str:
         secret = material.proxy_url.get_secret_value() if material.proxy_url is not None else ""
         return "direct" if not secret else f"proxy-{sha256(secret.encode('utf-8')).hexdigest()[:16]}"
-
-
-def _ending_available_quote(result: Mapping[str, Any]) -> str | None:
-    boundary = result.get("final_boundary")
-    if isinstance(boundary, Mapping) and boundary.get("available_quote") is not None:
-        try:
-            value = Decimal(str(boundary["available_quote"]))
-        except Exception:
-            return None
-        return format(value, "f") if value.is_finite() else None
-    return None
-
-
-def _now_ms() -> int:
-    return time.time_ns() // 1_000_000

@@ -15,6 +15,7 @@ from fleet_api.campaigns.manager.campaign_manager_actor import CampaignActorRunt
 from fleet_api.campaigns.manager.campaign_manager_bound import CampaignBoundStrategyMixin
 from fleet_api.campaigns.manager.campaign_manager_cleanup import CampaignCleanupMixin
 from fleet_api.campaigns.manager.campaign_manager_commands import CampaignCommandMixin
+from fleet_api.campaigns.manager.campaign_manager_restart import CampaignRestartMixin
 from fleet_api.campaigns.manager.campaign_manager_worker import CampaignWorkerRuntimeMixin
 from fleet_api.config.config import ControlPlaneSettings
 from fleet_api.execution.resources.fleet_write_coordinator import FleetWriteCoordinator
@@ -30,6 +31,7 @@ from fleet_api.models import (
 
 
 class CampaignWorkerManager(
+    CampaignRestartMixin,
     CampaignCommandMixin,
     CampaignBoundStrategyMixin,
     CampaignCleanupMixin,
@@ -86,12 +88,6 @@ class CampaignWorkerManager(
         self._closing = False
         self._lock = RLock()
         self._create_actor_runtime()
-
-    def recover(self) -> int:
-        count = self.journal.recover_incomplete()
-        for record in self.journal.list_all():
-            self._notify(record.instance_id)
-        return count
 
     def get(self, instance_id: str, campaign_id: str) -> BetaCampaignView:
         return _view(self._require_record(instance_id, campaign_id))

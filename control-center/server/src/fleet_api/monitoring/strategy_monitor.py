@@ -9,6 +9,7 @@ from typing import Any
 from weex_cli.execution_progress import (
     EXECUTION_PROGRESS_PROJECTION_VERSION,
     ExecutionProgressProjector,
+    condition_presentation,
 )
 
 from fleet_api.auth.ownership import LEGACY_OWNER_USER_ID
@@ -161,12 +162,17 @@ class StrategyMonitorService:
             updated_at_ms=projection.updated_at_ms if projection is not None else server_time_ms,
         )
         recovery_state = text_or_none(record.metadata.get("recovery_state"))
+        condition_state = text_or_none(state.get("condition_state"))
+        if condition_state is None and actor is not None and actor.execution_state == "condition_waiting":
+            condition_state = actor.reason
+        _condition_label, condition_action = condition_presentation(condition_state)
         display_phase = (
             recovery_phase(recovery_state, record.metadata.get("reason"))
             if record.status in {"recovering", "uncertain"}
             else actor.phase
             if actor is not None
-            and actor.execution_state in {"admitted", "preparing", "phase_queued", "stopping", "recovering"}
+            and actor.execution_state
+            in {"admitted", "preparing", "condition_waiting", "phase_queued", "stopping", "recovering"}
             else str(state.get("phase") or record.metadata.get("phase") or "启动")
         )
 
@@ -202,6 +208,10 @@ class StrategyMonitorService:
             recovery_state=recovery_state,
             recovery_attempt=nonnegative_int(record.metadata.get("recovery_attempt")),
             next_recovery_check_at_ms=nonnegative_int(record.metadata.get("next_recovery_check_at_ms")) or None,
+            condition_state=condition_state,
+            condition_attempt=nonnegative_int(state.get("condition_attempt")),
+            next_condition_check_at_ms=nonnegative_int(state.get("next_condition_check_at_ms")) or None,
+            condition_action=condition_action if condition_state is not None else None,
             boundary_state=monitor_boundary_state(record),
             btc_quote_volume=btc_quote,
             eth_quote_volume=eth_quote,

@@ -106,8 +106,16 @@ class ExecutionActor:
             await asyncio.sleep(min(delay, 0.25))
         return False
 
-    async def wait_for_normal_phase(self, phase: str, *, proxy_key: str, round_number: int) -> PhaseReservation | None:
-        key = f"{self.execution_id}:{round_number}:{phase}"
+    async def wait_for_normal_phase(
+        self,
+        phase: str,
+        *,
+        proxy_key: str,
+        round_number: int,
+        attempt_number: int | None = None,
+    ) -> PhaseReservation | None:
+        queue_number = attempt_number if attempt_number is not None else round_number
+        key = f"{self.execution_id}:{queue_number}:{phase}"
         while not self.stop_event.is_set():
             reservation = self._capacity.try_start_phase(key, proxy_key=proxy_key)
             if reservation is not None:

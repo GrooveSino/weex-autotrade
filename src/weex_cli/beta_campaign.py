@@ -19,7 +19,6 @@ from weex_cli.beta_allocation import BetaAllocation, HttpBetaAllocationProvider
 from weex_cli.beta_volume import (
     DEFAULT_STRATEGY_DIRECTION,
     DEFAULT_TAKER_DUST_MAX_QUOTE,
-    MAX_BETA_DRIFT,
     STRATEGY_DIRECTIONS,
     BetaVolumePlan,
     BetaVolumePlanStore,
@@ -685,10 +684,7 @@ class LiveBetaVolumeCampaignService:
             raise SafetyError("campaign was authorized for a different live profile")
         if self.now_ms() >= campaign.expires_at_ms:
             raise SafetyError("campaign authorization expired; create a new dry run")
-        current = self._read_with_retry(self.provider.get, operation="beta_allocation")
-        drift = abs(current.beta - campaign.allocation.beta) / campaign.allocation.beta
-        if drift > MAX_BETA_DRIFT:
-            raise SafetyError("Beta moved more than 5% since campaign planning")
+        self._read_with_retry(self.provider.get, operation="beta_allocation")
 
     def _create_child(self, campaign: BetaVolumeCampaign, target: Decimal, run_number: int) -> BetaVolumePlan:
         created_at_ms = self.now_ms() + run_number

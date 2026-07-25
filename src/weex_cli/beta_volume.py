@@ -41,7 +41,6 @@ from weex_cli.models import decimal_text, decimal_value
 from weex_cli.reliability import NETWORK_ERRORS, ReadRetryPolicy, retry_read
 
 PLAN_MAX_AGE_SECONDS = 900
-MAX_BETA_DRIFT = Decimal("0.05")
 MAX_PRICE_DRIFT = Decimal("0.01")
 MARGIN_BUFFER = Decimal("1.20")
 MAX_AUTO_LEVERAGE = 99
@@ -557,9 +556,6 @@ class LiveBetaVolumeService:
         if self.provider is None:
             raise SafetyError("Beta provider is required for a normal execution")
         current = self.provider.get()
-        beta_drift = abs(current.beta - plan.allocation.beta) / plan.allocation.beta
-        if beta_drift > MAX_BETA_DRIFT:
-            raise SafetyError("Beta moved more than 5% since planning; create and review a new dry run")
         for leg in (plan.btc, plan.eth):
             current_price = _mid_price(self.gateway, leg.symbol)
             drift = abs(current_price - leg.reference_price) / leg.reference_price
@@ -577,7 +573,7 @@ class LiveBetaVolumeService:
             raise SafetyError("available USDT is insufficient for the planned opening budget")
         if account["active_position_count"] or account["regular_order_count"] or account["trigger_order_count"]:
             raise SafetyError("BTC/ETH positions or orders are present; refusing paired opening")
-        return {**account, "beta_drift": decimal_text(beta_drift), "fresh_beta_version": current.version}
+        return {**account, "fresh_beta_version": current.version}
 
     def execute(self, plan: BetaVolumePlan) -> dict[str, Any]:
         if plan.schema_version < 3:
@@ -2980,12 +2976,19 @@ def _size_cycle(
     plan: BetaVolumePlan,
     lanes: Mapping[str, _Lane],
     desired_turnover: Decimal,
+    *,
+    market_data: Any | None = None,
 ) -> tuple[PairLegPlan, PairLegPlan, dict[str, str]]:
     opening_budget = desired_turnover / 2
     btc_quote = opening_budget * plan.allocation.btc_long_weight
     eth_quote = opening_budget * plan.allocation.eth_short_weight
-    btc_price = _mid_price(lanes["BTC"].gateway, "BTC")
-    eth_price = _mid_price(lanes["ETH"].gateway, "ETH")
+    # Fleet supplies the single shared public book here.  Private lane
+    # gateways remain responsible for account state and mutations, but every
+    # account must size the same market snapshot rather than fan out public
+    # REST reads under concurrency.
+    price_source = market_data or lanes["BTC"].gateway
+    btc_price = _mid_price(price_source, "BTC")
+    eth_price = _mid_price(price_source, "ETH")
     btc_step = lanes["BTC"].gateway.amount_step("BTC")
     eth_step = lanes["ETH"].gateway.amount_step("ETH")
     btc_quantity, eth_quantity, estimated = _choose_pair_quantities_for_gateways(

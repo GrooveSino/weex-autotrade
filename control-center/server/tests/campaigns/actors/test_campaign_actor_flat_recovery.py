@@ -8,8 +8,6 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
-from weex_cli.errors import SafetyError
-
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, CloseCycle, OpenCycle
 from fleet_api.campaigns.actors.campaign_actor_program import CampaignActorProgram
 from fleet_api.campaigns.core.campaign_log import campaign_event_log
@@ -50,20 +48,25 @@ class _Phases:
         child = SimpleNamespace(estimated_rounds=10, max_empty_rounds=10)
         self.context = CampaignActorContext(child=child, run_number=1, execution_started_at_ms=1_000)
         self.plan_calls = 0
+        self.close_calls = 0
 
     def prepare(self, _campaign: object) -> CampaignActorContext:
         return self.context
 
     def plan_open(self, _campaign: object, context: CampaignActorContext) -> OpenCycle:
         self.plan_calls += 1
-        if self.plan_calls == 2:
-            raise SafetyError("Beta moved more than 5% since planning")
         return OpenCycle(context, {}, None, None, {}, 400, {}, [], {}, 1_000, 0)  # type: ignore[arg-type]
+
+    def check_open_conditions(self, _context: CampaignActorContext) -> None:
+        return
 
     def execute_open(self, _campaign: object, _opened: OpenCycle) -> None:
         return
 
     def close(self, _campaign: object, opened: OpenCycle) -> CloseCycle:
+        self.close_calls += 1
+        if self.close_calls == 2:
+            return CloseCycle(Decimal(0), {"status": "completed", "reason": "target_verified_complete"}, None, None, 0)
         opened.context.round_number += 1
         return CloseCycle(Decimal(0), None, None, None, 0)
 
@@ -71,7 +74,7 @@ class _Phases:
         return {"status": str(kwargs["status"]), "reason": str(kwargs["reason"])}
 
 
-def test_beta_change_after_flat_cycle_ends_without_recovery_dead_end() -> None:
+def test_flat_cycle_reenters_the_next_attempt_without_a_preview_reconfirmation() -> None:
     phases = _Phases()
     results: list[dict[str, Any]] = []
     failures: list[Exception] = []
@@ -90,25 +93,20 @@ def test_beta_change_after_flat_cycle_ends_without_recovery_dead_end() -> None:
     asyncio.run(program(actor))  # type: ignore[arg-type]
 
     assert failures == []
-    assert results == [{"status": "stopped", "reason": "worker_safety:beta_changed_since_preview"}]
-    assert actor.transitions[-1] == ("stopped", "worker_safety:beta_changed_since_preview")
-    assert events == [
-        {
-            "event": "next_cycle_preflight_rejected",
-            "round": 2,
-            "reason": "worker_safety:beta_changed_since_preview",
-        }
-    ]
+    assert results == [{"status": "completed", "reason": "target_verified_complete"}]
+    assert actor.transitions[-1] == ("completed", "target_verified_complete")
+    assert phases.plan_calls == 2
+    assert events == []
 
 
-def test_flat_cycle_beta_change_has_a_clear_restart_instruction() -> None:
+def test_condition_wait_has_an_automatic_chinese_next_action() -> None:
     rendered = campaign_event_log(
         {
-            "name": "next_cycle_preflight_rejected",
-            "fields": {"reason": "worker_safety:beta_changed_since_preview", "round": 2},
+            "name": "condition_waiting",
+            "fields": {"condition": "beta_unavailable", "round": 2},
         }
     )
 
     assert rendered is not None
-    assert "未提交新的订单" in rendered[1]
-    assert "重新确认新的策略预览" in rendered[1]
+    assert "最新 Beta 暂不可用" in rendered[1]
+    assert "自动读取最新 Beta" in rendered[1]

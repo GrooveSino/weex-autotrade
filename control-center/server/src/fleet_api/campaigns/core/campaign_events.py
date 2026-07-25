@@ -20,11 +20,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         at_ms = int(timestamp_ms) if timestamp_ms is not None else int(time.time() * 1000)
     except (TypeError, ValueError):
         at_ms = int(time.time() * 1000)
-    event: dict[str, Any] = {
-        "sequence": 1,
-        "name": name,
-        "at_ms": at_ms,
-    }
+    event: dict[str, Any] = {"sequence": 1, "name": name, "at_ms": at_ms}
     for key in ("phase", "run", "child_plan_id", "status"):
         if payload.get(key) is not None:
             event[key] = payload[key]
@@ -46,6 +42,8 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "queue_constraint",
         "position_side",
         "error_id",
+        "condition",
+        "beta_version",
     }
     decimal_fields = {
         "remaining_quote",
@@ -53,6 +51,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "child_quote",
         "seconds",
         "desired_quote",
+        "planned_turnover_quote",
         "opening_notional_quote",
         "quote_volume",
         "executed_quote_volume",
@@ -68,6 +67,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
     }
     integer_fields = {
         "attempt",
+        "condition_attempt",
         "max_attempts",
         "round",
         "event_index",
@@ -149,6 +149,8 @@ def _phase_for_event(name: str) -> str:
         return "safe_stop"
     if "planning" in name:
         return "planning"
+    if name.startswith("condition_wait"):
+        return "condition_waiting"
     if "run_started" in name:
         return "opening"
     if name.startswith("phase_pacing"):
@@ -173,6 +175,7 @@ def _publishes_fleet_snapshot(name: str) -> bool:
         "preflight_completed",
         "preflight_rejected",
         "cycle_started",
+        "cycle_plan_created",
         "cycle_completed",
         "cycle_stopped",
         # These are low-frequency, fill-reconciled state changes.  Publishing
@@ -194,6 +197,8 @@ def _publishes_fleet_snapshot(name: str) -> bool:
         "phase_pacing_started",
         "phase_pacing_completed",
         "phase_pacing_cancelled",
+        "condition_waiting",
+        "condition_wait_resumed",
         "dust_close_detected",
         "market_close_intent_persisted",
         "market_close_accepted",

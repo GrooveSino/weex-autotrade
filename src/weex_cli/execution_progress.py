@@ -28,7 +28,7 @@ WAITING_LABELS_ZH = {
     "open_order_clearance": "确认无残留挂单",
 }
 
-EXECUTION_PROGRESS_PROJECTION_VERSION = 5
+EXECUTION_PROGRESS_PROJECTION_VERSION = 7
 
 _ACTION_ZH = {"open": "开仓", "close": "平仓", "buy": "买入", "sell": "卖出"}
 _STATUS_ZH = {
@@ -43,11 +43,21 @@ _UNCERTAIN_REASON_ZH = {
     "worker_safety:account_boundary_not_flat": "发现持仓或挂单，账户边界不满足启动条件",
     "worker_safety:timing_policy_unavailable": "策略时间参数不可用",
     "worker_safety:beta_source_unavailable": "Final Beta 数据源不可用",
-    "worker_safety:beta_changed_since_preview": "Final Beta 已变化，需要重新预览",
     "worker_safety:authorization_expired": "启动确认已过期，需要重新预览",
     "worker_safety:leverage_verification_failed": "杠杆设置或核验未通过",
     "worker_safety:post_only_verification_failed": "POST_ONLY 状态核验未通过",
     "worker_safety:preflight_rejected": "执行前安全核验未通过",
+}
+_CONDITION_ZH = {
+    "account_read_retry": ("账户条件暂时无法读取", "系统会自动重新核验账户；无需重新启动。"),
+    "beta_unavailable": ("最新 Beta 暂不可用", "系统会自动读取最新 Beta 后继续。"),
+    "empty_cycle": ("本轮未形成可核验成交", "系统会使用新的行情快照自动继续尝试。"),
+    "external_account_boundary": ("账户存在来源不明的仓位或挂单", "请清理这些仓位或挂单；系统会自动复查并继续。"),
+    "insufficient_available_margin": ("可用保证金暂不足", "补足可用保证金后，系统会自动继续。"),
+    "maker_attempt_unavailable": ("本轮 Maker 条件暂不可用", "系统会按最新行情重新计算后继续。"),
+    "minimum_order_infeasible": ("当前最小下单量条件暂不满足", "系统会等待价格或目标条件变化后重新计算。"),
+    "persistence_unavailable": ("本地执行记录暂不可写入", "系统会等待本地记录恢复；在此之前不会下单。"),
+    "shared_market_unavailable": ("共享 BTC/ETH 行情暂不可用", "系统会等待共享行情恢复后继续。"),
 }
 
 
@@ -99,36 +109,66 @@ def status_label(value: Any) -> str:
     return _STATUS_ZH.get(rendered, rendered.replace("_", " "))
 
 
-def execution_phase(event: Mapping[str, Any]) -> str:
+def condition_presentation(value: Any) -> tuple[str, str]:
+    return _CONDITION_ZH.get(
+        str(value or ""),
+        ("执行条件暂不可用", "系统会自动重新检查；也可以随时安全停止。"),
+    )
+
+
+def execution_phase(event: Mapping[str, Any]) -> str | None:
     name = event_name(event)
+    if name == "actor_lifecycle":
+        return None
+    if name == "condition_waiting":
+        return "条件等待"
+    if name == "condition_wait_resumed":
+        return "重新生成下一轮"
     if name.startswith("dust_close") or name.startswith("market_close"):
         return "小额尾仓收敛"
     if name.startswith("safe_stop"):
         return "安全停止"
-    if name.startswith("campaign_boundary") or name.startswith("final_acceptance"):
+    if name.startswith("campaign_boundary"):
         return "账户边界核验"
+    if name.startswith("final_acceptance"):
+        return "最终验收"
+    if name == "campaign_run_started":
+        return "任务启动"
+    if name == "campaign_run_completed":
+        return "运行收尾"
     if name.startswith("campaign_child_planning") or name in {"cycle_preparing", "cycle_sizing_retry"}:
         return "轮次规划"
     if name.startswith("preflight"):
         return "执行前检查"
     if name.startswith("leverage") or name == "cycle_leverage_ready":
         return "杠杆准备"
+    if name == "cycle_started":
+        return "开仓执行"
+    if name in {"cycle_completed", "cycle_stopped"}:
+        return "轮次收尾"
+    if name.startswith("close_barrier"):
+        return "平仓执行"
     if name.startswith("leg"):
         symbol = event_value(event, "symbol", "")
         return f"{symbol} {action_label(event_value(event, 'action'))}".strip()
     if name.startswith("pair_wait") or name.startswith("open_barrier"):
-        return "双腿状态核验"
+        action = str(event_value(event, "action", ""))
+        return "双腿平仓核验" if action == "close" else "双腿开仓核验"
     if name.startswith("accounting"):
         return "成交明细对账"
-    if name.startswith("hold"):
+    if name == "hold_started":
         return "持仓等待"
-    if name.startswith("round_gap"):
+    if name == "hold_completed":
+        return "准备平仓"
+    if name == "round_gap_started":
         return "轮次间隔"
+    if name == "round_gap_completed":
+        return "准备下一轮"
     if name.startswith("phase_pacing"):
         return "全局执行错峰"
     if name in {"campaign_finished", "workflow_finished"}:
         return "任务完成"
-    return name.replace("_", " ")
+    return None
 
 
 def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation | None:
@@ -188,9 +228,21 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
         return TimelinePresentation(
             "info",
             f"第 {round_number} 轮开始",
-            f"目标 {value('desired_quote')} USDT / "
-            f"BTC {value('btc_quantity')} + ETH {value('eth_quantity')} / {value('leverage')}x",
+            f"本轮完整交易量 {value('planned_turnover_quote', value('desired_quote'))} USDT / "
+            f"开仓名义 {value('opening_notional_quote')} USDT / {value('leverage')}x",
         )
+    if name == "cycle_plan_created":
+        return TimelinePresentation(
+            "info",
+            f"第 {round_number} 轮执行快照已冻结",
+            f"第 {value('attempt')} 次尝试 / Beta {value('beta_version')} / "
+            f"完整交易量 {value('planned_turnover_quote', value('desired_quote'))} USDT",
+        )
+    if name == "condition_waiting":
+        title, action = condition_presentation(value("condition"))
+        return TimelinePresentation("warn", title, action)
+    if name == "condition_wait_resumed":
+        return TimelinePresentation("success", "执行条件已恢复", "系统正在按最新 Beta 与行情生成下一轮。")
     if name == "cycle_leverage_ready":
         return TimelinePresentation("success", "BTC/ETH 杠杆准备完成", f"{value('leverage')}x")
     if name in {"cycle_sizing_retry", "cycle_read_retry"}:
@@ -349,12 +401,18 @@ class ExecutionProgressProjector:
         self.btc_quote_volume = Decimal(0)
         self.eth_quote_volume = Decimal(0)
         self.execution_unknown_fill_count = 0
+        self.condition_state: str | None = None
+        self.condition_attempt = 0
+        self.next_condition_check_at_ms: int | None = None
         self._current_run_base_quote = Decimal(0)
         self._completed_leg_quotes: dict[str, Decimal] = {}
         self._completed_leg_fill_counts: dict[str, int] = {}
+        self._terminal_rounds: set[int] = set()
 
     def apply(self, event: Mapping[str, Any], *, at_ms: int) -> TimelinePresentation | None:
-        self.phase = execution_phase(event)
+        phase = execution_phase(event)
+        if phase is not None and not self._is_stale_round_wait(event):
+            self.phase = phase
         run = event_value(event, "run")
         round_number = event_value(event, "round")
         if run is not None:
@@ -379,10 +437,14 @@ class ExecutionProgressProjector:
             "btc_quote_volume": format(self.btc_quote_volume, "f"),
             "eth_quote_volume": format(self.eth_quote_volume, "f"),
             "execution_unknown_fill_count": self.execution_unknown_fill_count,
+            "condition_state": self.condition_state,
+            "condition_attempt": self.condition_attempt,
+            "next_condition_check_at_ms": self.next_condition_check_at_ms,
             "active_waits": [asdict(wait) for wait in self.active_waits.values()],
             "current_run_base_quote": format(self._current_run_base_quote, "f"),
             "completed_leg_quotes": {key: format(value, "f") for key, value in self._completed_leg_quotes.items()},
             "completed_leg_fill_counts": self._completed_leg_fill_counts,
+            "terminal_rounds": sorted(self._terminal_rounds),
         }
 
     @classmethod
@@ -400,6 +462,11 @@ class ExecutionProgressProjector:
         projector.btc_quote_volume = _decimal_or_zero(snapshot.get("btc_quote_volume"))
         projector.eth_quote_volume = _decimal_or_zero(snapshot.get("eth_quote_volume"))
         projector.execution_unknown_fill_count = _nonnegative_int(snapshot.get("execution_unknown_fill_count"))
+        state = snapshot.get("condition_state")
+        projector.condition_state = str(state) if isinstance(state, str) and state else None
+        projector.condition_attempt = _nonnegative_int(snapshot.get("condition_attempt"))
+        next_check = snapshot.get("next_condition_check_at_ms")
+        projector.next_condition_check_at_ms = _nonnegative_int(next_check) or None
         projector._current_run_base_quote = _decimal_or_zero(snapshot.get("current_run_base_quote"))
         completed = snapshot.get("completed_leg_quotes")
         if isinstance(completed, Mapping):
@@ -412,6 +479,11 @@ class ExecutionProgressProjector:
         if isinstance(fill_counts, Mapping):
             projector._completed_leg_fill_counts = {
                 str(key): _nonnegative_int(value) for key, value in fill_counts.items()
+            }
+        terminal_rounds = snapshot.get("terminal_rounds")
+        if isinstance(terminal_rounds, list):
+            projector._terminal_rounds = {
+                parsed for value in terminal_rounds if (parsed := _nonnegative_int(value)) > 0
             }
         waits = snapshot.get("active_waits")
         if isinstance(waits, list):
@@ -458,6 +530,34 @@ class ExecutionProgressProjector:
                 "deadline_at_ms": deadline_at_ms,
             }
         )
+
+    def _clear_round_waits(self, round_number: Any) -> None:
+        round_text = str(round_number)
+        exact = {
+            "hold",
+            "round-gap",
+            f"cycle-stage:{round_text}",
+            f"cycle-read:{round_text}",
+        }
+        prefixes = (
+            f"phase-pacing:{round_text}:",
+            f"pair:{round_text}:",
+            f"leg:{round_text}:",
+            "accounting:",
+        )
+        for key in tuple(self.active_waits):
+            if key in exact or key.startswith(prefixes):
+                self.active_waits.pop(key, None)
+
+    def _is_stale_round_wait(self, event: Mapping[str, Any]) -> bool:
+        name = event_name(event)
+        round_id = _nonnegative_int(event_value(event, "round", ""))
+        creates_wait = (
+            name in {"hold_started", "close_barrier_started", "accounting_waiting", "accounting_retry_wait"}
+            or name in {"pair_waiting", "pair_wait_progress", "leg_preparing", "leg_waiting"}
+            or (name == "leg_progress" and str(event_value(event, "progress_event", "")) == "wait")
+        )
+        return round_id in self._terminal_rounds and creates_wait
 
     def _update_volume(self, event: Mapping[str, Any]) -> None:
         name = event_name(event)
@@ -525,6 +625,7 @@ class ExecutionProgressProjector:
     def _update_waits(self, event: Mapping[str, Any], at_ms: int) -> bool:
         name = event_name(event)
         round_number = event_value(event, "round", "")
+        round_id = _nonnegative_int(round_number)
         action = str(event_value(event, "action", ""))
         symbol = str(event_value(event, "symbol", "")) or None
         leg_sequence = event_value(event, "leg_sequence", event_value(event, "sequence", ""))
@@ -532,8 +633,73 @@ class ExecutionProgressProjector:
         if name != "campaign_read_retry":
             self.active_waits.pop("campaign-read-retry", None)
 
+        if self._is_stale_round_wait(event):
+            return False
+
+        if name in {"cycle_completed", "cycle_stopped"}:
+            if round_id > 0:
+                self._terminal_rounds.add(round_id)
+            self._clear_round_waits(round_number)
+            return False
+        if name == "cycle_started":
+            self.condition_state = None
+            self.condition_attempt = 0
+            self.next_condition_check_at_ms = None
+            self.active_waits.pop("condition", None)
+            self.active_waits.pop("round-gap", None)
+            self.active_waits.pop(f"cycle-stage:{round_number}", None)
+
+        if name == "hold_completed":
+            self.active_waits.pop("hold", None)
+            self._set_wait(
+                ActiveWait(
+                    key=f"cycle-stage:{round_number}",
+                    label="持仓计时结束，正在进入平仓阶段",
+                    updated_at_ms=at_ms,
+                    action="close",
+                )
+            )
+            return False
+
+        if name == "round_gap_completed":
+            self.active_waits.pop("round-gap", None)
+            return False
+
+        if name == "condition_waiting":
+            condition = str(event_value(event, "condition", ""))
+            label, action_detail = condition_presentation(condition)
+            deadline_at_ms = _nonnegative_int(event_value(event, "next_check_ms")) or None
+            self.condition_state = condition or None
+            self.condition_attempt = _nonnegative_int(
+                event_value(event, "condition_attempt", event_value(event, "attempt"))
+            )
+            self.next_condition_check_at_ms = deadline_at_ms
+            self._set_wait(
+                ActiveWait(
+                    key="condition",
+                    label=label,
+                    updated_at_ms=at_ms,
+                    remaining_ms=None if deadline_at_ms is None else max(0, deadline_at_ms - at_ms),
+                    detail=action_detail,
+                    started_at_ms=at_ms,
+                    deadline_at_ms=deadline_at_ms,
+                )
+            )
+            return True
+        if name == "condition_wait_resumed":
+            self.condition_state = None
+            self.condition_attempt = 0
+            self.next_condition_check_at_ms = None
+            self.active_waits.pop("condition", None)
+
         pacing_key = f"phase-pacing:{round_number}:{event_value(event, 'phase', '')}"
         if name == "phase_pacing_started":
+            phase_name = str(event_value(event, "phase", ""))
+            if phase_name == "close":
+                self.active_waits.pop("hold", None)
+                self.active_waits.pop(f"cycle-stage:{round_number}", None)
+            elif phase_name == "open":
+                self.active_waits.pop("round-gap", None)
             phase = action_label(event_value(event, "phase", ""))
             deadline_at_ms = int(event_value(event, "deadline_at_ms", at_ms) or at_ms)
             self._set_wait(
@@ -556,13 +722,19 @@ class ExecutionProgressProjector:
             active = event_value(event, "active_symbols", event_value(event, "symbols", ())) or ()
             symbols = "/".join(str(item) for item in active)
             self.active_waits.pop(f"cycle-stage:{round_number}", None)
+            if action == "close":
+                self.active_waits.pop("hold", None)
             self._set_wait(
                 ActiveWait(
                     key=f"pair:{round_number}:{action}",
                     label=f"{symbols} {action_label(action)} · 等待进入确定状态",
                     updated_at_ms=at_ms,
                     elapsed_ms=int(event_value(event, "elapsed_ms", 0) or 0),
-                    remaining_ms=int(event_value(event, "remaining_ms", 0) or 0),
+                    remaining_ms=(
+                        None
+                        if event_value(event, "remaining_ms") is None
+                        else int(event_value(event, "remaining_ms", 0) or 0)
+                    ),
                     detail="到期后自动撤单并核验仓位",
                     action=action,
                 )
@@ -639,7 +811,22 @@ class ExecutionProgressProjector:
                 finite[name] = (f"cycle-read:{round_number}", "杠杆读取失败，等待重查")
         if name in finite:
             key, label = finite[name]
-            self._set_wait(ActiveWait(key, label, at_ms, remaining_ms=seconds, symbol=symbol, action=action or None))
+            if name in {"hold_started", "round_gap_started"}:
+                self._clear_round_waits(round_number)
+            started_at_ms = event_value(event, "started_at_ms")
+            deadline_at_ms = event_value(event, "deadline_at_ms")
+            self._set_wait(
+                ActiveWait(
+                    key,
+                    label,
+                    at_ms,
+                    remaining_ms=seconds,
+                    symbol=symbol,
+                    action=action or None,
+                    started_at_ms=None if started_at_ms is None else int(started_at_ms),
+                    deadline_at_ms=None if deadline_at_ms is None else int(deadline_at_ms),
+                )
+            )
             return True
 
         stages = {
@@ -665,6 +852,11 @@ class ExecutionProgressProjector:
         }
         if name in stages:
             key, label = stages[name]
+            if name == "close_barrier_started":
+                self.active_waits.pop("hold", None)
+                self.active_waits.pop("round-gap", None)
+                self.active_waits.pop(f"phase-pacing:{round_number}:close", None)
+                self.active_waits.pop(f"pair:{round_number}:close", None)
             self._set_wait(ActiveWait(key, label, at_ms, symbol=symbol, action=action or None))
             return name not in {"dust_close_detected", "market_close_intent_persisted", "market_close_accepted"}
 
@@ -674,11 +866,7 @@ class ExecutionProgressProjector:
             "preflight_completed": ("preflight",),
             "preflight_rejected": ("preflight",),
             "cycle_started": (f"cycle-stage:{round_number}", f"cycle-read:{round_number}"),
-            "cycle_completed": (f"cycle-stage:{round_number}", f"cycle-read:{round_number}"),
-            "cycle_stopped": (f"cycle-stage:{round_number}", f"cycle-read:{round_number}"),
             "pair_wait_completed": (f"pair:{round_number}:{action}",),
-            "hold_completed": ("hold",),
-            "round_gap_completed": ("round-gap",),
             "accounting_wait_completed": (f"accounting:{symbol or ''}",),
             "final_acceptance_completed": ("final-acceptance",),
             "safe_stop_cancel_unverified": ("safe-stop", f"safe-stop:{symbol or ''}"),
@@ -689,6 +877,9 @@ class ExecutionProgressProjector:
         }
         if name in {"workflow_finished", "campaign_finished"}:
             self.active_waits.clear()
+            self.condition_state = None
+            self.condition_attempt = 0
+            self.next_condition_check_at_ms = None
         for key in removals.get(name, ()):
             self.active_waits.pop(key, None)
         if name == "pair_wait_completed":

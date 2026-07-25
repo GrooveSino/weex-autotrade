@@ -202,7 +202,6 @@ def _worker_exception_reason(exc: Exception) -> str:
         ("flat btc/eth positions", "account_boundary_not_flat"),
         ("timing policy", "timing_policy_unavailable"),
         ("beta provider", "beta_source_unavailable"),
-        ("beta moved", "beta_changed_since_preview"),
         ("authorization expired", "authorization_expired"),
         ("campaign authorization expired", "authorization_expired"),
         ("leverage", "leverage_verification_failed"),

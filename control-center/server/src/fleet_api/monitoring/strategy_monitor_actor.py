@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from weex_cli.execution_progress import condition_presentation
+
 from fleet_api.models import ActiveExecutionWait, ExecutionTimelineEntry, LogLevel
 
 
@@ -16,11 +18,14 @@ class ActorLifecycleProjection:
     queue_position: int | None = None
     estimated_start_at_ms: int | None = None
     proxy_limited: bool = False
+    reason: str | None = None
+    deadline_at_ms: int | None = None
 
 
 _PHASE_TEXT = {
     "admitted": "已接纳，等待准备",
     "preparing": "正在准备执行条件",
+    "condition_waiting": "正在等待执行条件恢复",
     "market_waiting": "等待共享行情恢复",
     "phase_queued": "正常阶段排队",
     "opening": "正在执行开仓阶段",
@@ -50,20 +55,25 @@ def latest_actor_lifecycle(rows: list[dict[str, Any]]) -> ActorLifecycleProjecti
             queue_position=queue_position,
             estimated_start_at_ms=estimated,
             proxy_limited=constraint in {"proxy_active", "proxy_cooldown"},
+            reason=str(_field(event, "reason") or "") or None,
+            deadline_at_ms=_integer_or_none(_field(event, "deadline_at_ms")),
         )
     return None
 
 
 def actor_active_wait(actor: ActorLifecycleProjection | None, *, updated_at_ms: int) -> ActiveExecutionWait | None:
-    if actor is not None and actor.execution_state == "market_waiting":
+    if actor is not None and actor.execution_state in {"market_waiting", "condition_waiting"}:
+        label, detail = condition_presentation(actor.reason)
+        if actor.execution_state == "market_waiting":
+            label, detail = "等待共享行情恢复", "BTC / ETH 共享盘口尚未同时达到新鲜度要求"
         return ActiveExecutionWait(
-            key="shared-market-recovery",
-            label="等待共享行情恢复",
+            key="condition" if actor.execution_state == "condition_waiting" else "shared-market-recovery",
+            label=label,
             updated_at_ms=updated_at_ms,
             elapsed_ms=0,
-            remaining_ms=None,
-            detail="BTC / ETH 共享盘口尚未同时达到新鲜度要求",
-            deadline_at_ms=None,
+            remaining_ms=None if actor.deadline_at_ms is None else max(0, actor.deadline_at_ms - updated_at_ms),
+            detail=detail,
+            deadline_at_ms=actor.deadline_at_ms,
         )
     if actor is None or actor.execution_state != "phase_queued":
         return None
@@ -89,7 +99,7 @@ def actor_timeline_entry(campaign_id: str, event: dict[str, Any]) -> ExecutionTi
     state = str(_field(event, "phase") or "admitted")
     level = (
         "warn"
-        if state in {"stopping", "recovering", "failed"}
+        if state in {"condition_waiting", "stopping", "recovering", "failed"}
         else "success"
         if state in {"completed", "stopped"}
         else "info"
@@ -145,6 +155,9 @@ def _actor_detail(event: dict[str, Any]) -> str:
     state = str(_field(event, "phase") or "")
     if state == "market_waiting":
         return "等待 BTC / ETH 共享盘口恢复，不会提交订单或回退到账号代理 REST"
+    if state == "condition_waiting":
+        _title, detail = condition_presentation(_field(event, "reason"))
+        return detail
     if state != "phase_queued":
         return _reason_text(str(_field(event, "reason") or ""))
     position = _integer_or_none(_field(event, "queue_position"))

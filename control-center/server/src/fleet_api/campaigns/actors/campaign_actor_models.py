@@ -21,6 +21,26 @@ class CampaignActorContext:
     summaries: list[dict[str, Any]] = field(default_factory=list)
     cycles: list[dict[str, Any]] = field(default_factory=list)
     empty_rounds: int = 0
+    attempt_number: int = 0
+    condition_attempt: int = 0
+    condition_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CycleCondition:
+    """A retryable, read-only prerequisite for the next flat opening phase."""
+
+    code: str
+    detail: str
+    action: str
+
+
+class CycleConditionError(RuntimeError):
+    """Stop before the exchange mutation boundary and wait for conditions."""
+
+    def __init__(self, condition: CycleCondition) -> None:
+        super().__init__(condition.code)
+        self.condition = condition
 
 
 @dataclass(slots=True)
@@ -39,6 +59,23 @@ class OpenCycle:
     # The hold countdown starts only after both opening legs reach the
     # verified target, not when the opening orders first begin.
     hold_started_at_ms: int | None = None
+    # A new immutable plan is created for every opening attempt.  Older
+    # records omit it, in which case the user-authorized child remains valid
+    # for recovery compatibility only.
+    execution_plan: BetaVolumePlan | None = None
+
+    @property
+    def plan(self) -> BetaVolumePlan:
+        return self.execution_plan or self.context.child
+
+
+def cycle_plan_from_ownership(ownership: Mapping[str, Any], fallback: BetaVolumePlan) -> BetaVolumePlan:
+    """Use a persisted cycle snapshot when a safe-stop actor is reconstructed."""
+    snapshot = ownership.get("cycle_plan")
+    try:
+        return BetaVolumePlan.from_dict(snapshot) if isinstance(snapshot, Mapping) else fallback
+    except Exception:
+        return fallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +86,7 @@ class CloseCycle:
     uncertain_reason: str | None
     round_gap_seconds: float
     round_gap_started_at_ms: int | None = None
+    condition: CycleCondition | None = None
 
 
 @dataclass(slots=True)
