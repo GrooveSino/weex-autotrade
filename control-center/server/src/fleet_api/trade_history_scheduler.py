@@ -88,6 +88,37 @@ class TradeHistorySyncScheduler:
         )
         self.request(instance.id, INITIAL_BASELINE)
 
+    def resume_initial_baseline(self, instance: AccountInstance) -> None:
+        """Resume an incomplete baseline after an explicit launch preparation."""
+        if instance.mode is not TradingMode.LIVE:
+            return
+        checkpoint = self._ledger.sync_checkpoint(instance.id, instance.mode.value) or {}
+        if checkpoint.get("initial_baseline_state") == "complete":
+            return
+        values: dict[str, object] = {
+            "pending": True,
+            "stale": bool(checkpoint.get("stale")),
+            "sync_reason": INITIAL_BASELINE,
+            "next_sync_at_ms": 0,
+            "initial_baseline_state": "queued",
+        }
+        if checkpoint.get("last_success_at_ms") is None:
+            # Older releases popped a window before its request succeeded.
+            # No successful page means the only safe resume is a fresh scan.
+            values.update(
+                cursor=None,
+                high_watermark_ms=None,
+                source_complete=False,
+                coverage_complete=False,
+                scan_state=None,
+            )
+        self._ledger.save_sync_checkpoint(
+            instance.id,
+            instance.mode.value,
+            **values,
+        )
+        self.request(instance.id, INITIAL_BASELINE)
+
     def request(self, instance_id: str, reason: str, *, delay_ms: int = 0) -> None:
         priority = _priority(reason)
         due_at_ms = _now_ms() + max(0, delay_ms)

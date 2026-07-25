@@ -95,6 +95,32 @@ def test_new_account_initial_baseline_runs_once_then_becomes_silent() -> None:
     asyncio.run(scenario())
 
 
+def test_explicit_prepare_resumes_a_pending_initial_baseline() -> None:
+    instance = account("pending")
+    service = FakeService({instance.id: instance})
+    ledger = InMemoryTradeVolumeLedger()
+    ledger.save_sync_checkpoint(
+        instance.id,
+        "live",
+        cursor="scan-1-1",
+        pending=False,
+        stale=True,
+        scan_state={"pending_windows": [[20, 30]]},
+        sync_reason="initial_baseline",
+        initial_baseline_state="pending",
+    )
+    subject = scheduler(service, FakeRuntime(), ledger)
+
+    subject.resume_initial_baseline(instance)
+
+    checkpoint = ledger.sync_checkpoint(instance.id, "live") or {}
+    assert checkpoint["initial_baseline_state"] == "queued"
+    assert checkpoint["pending"] is True
+    assert checkpoint["cursor"] is None
+    assert checkpoint["scan_state"] is None
+    assert subject.metrics().queued == 1
+
+
 def test_idle_accounts_do_not_receive_background_history_requests() -> None:
     async def scenario() -> None:
         instance = account("idle")

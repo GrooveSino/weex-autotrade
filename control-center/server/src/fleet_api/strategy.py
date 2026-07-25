@@ -45,8 +45,6 @@ def resolve_strategy_run_plan(
 
     lifetime = Decimal(str(instance.volume.lifetime))
     if instance.strategy.target_mode is StrategyTargetMode.LIFETIME:
-        if not instance.volume.complete:
-            raise StrategyRunBlocked("complete lifetime trade history synchronization before starting")
         if lifetime >= instance.strategy.target_volume_quote_max:
             raise StrategyTargetReached("the lifetime strategy target range is already verified complete")
         next_cent = ((lifetime * Decimal(100)).to_integral_value(rounding=ROUND_FLOOR) + Decimal(1)) / Decimal(100)

@@ -232,3 +232,30 @@ def test_lifetime_run_samples_only_unreached_range_and_blocks_at_maximum() -> No
         resolve_strategy_run_plan(reached, None)
     with pytest.raises(StrategyRunBlocked):
         resolve_strategy_run_plan(instance, {"status": "active"})
+
+
+def test_lifetime_run_freezes_current_verified_ledger_even_while_history_audit_is_pending() -> None:
+    selected = strategy(
+        targetMode="lifetime",
+        targetVolumeQuoteMin="12000.00",
+        targetVolumeQuoteMax="19000.00",
+    )
+    instance = AccountInstance(
+        id="pending-history-lifetime",
+        name="sample",
+        account_tag="test",
+        api_key_tail="ABCD",
+        mode=TradingMode.LIVE,
+        status=InstanceStatus.STOPPED,
+        phase="idle",
+        proxy=ProxySnapshot(type=ProxyType.HTTPS, host="proxy.example.com:9000"),
+        volume=VolumeSnapshot(lifetime=250, complete=False),
+        strategy_id=selected.id,
+        strategy=selected,
+    )
+
+    plan = resolve_strategy_run_plan(instance, None, randbelow=lambda _size: 0)
+
+    assert plan.strategy_target_quote_volume == Decimal("12000")
+    assert plan.execution_target_quote_volume == Decimal("11750")
+    assert plan.baseline_lifetime_quote_volume == Decimal("250")

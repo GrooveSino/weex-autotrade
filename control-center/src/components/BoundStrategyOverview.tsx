@@ -17,6 +17,11 @@ export function BoundStrategyOverview({
   directionDisabled,
   onDirectionChange,
 }: BoundStrategyOverviewProps) {
+  const targetMinimum = Number(account.strategy.targetVolumeQuoteMin)
+  const targetMaximum = Number(account.strategy.targetVolumeQuoteMax)
+  const hasTargetRange = targetMinimum !== targetMaximum
+  const selectedTarget = execution?.selectedTargetQuoteVolume ?? execution?.strategyTargetQuoteVolume
+  const executionTarget = execution?.executionTargetQuoteVolume ?? execution?.targetQuote
   return <>
     <div className="bound-direction-control" role="radiogroup" aria-label="BTC 与 ETH 交易方向">
       <span>交易方向</span>
@@ -31,13 +36,17 @@ export function BoundStrategyOverview({
         <strong>{execution?.strategyName ?? account.strategy.name}<small>v{execution?.strategyVersion ?? account.strategy.version}</small></strong>
       </div>
       <div>
-        <span>{execution?.targetMode === 'lifetime' || account.strategy.targetMode === 'lifetime' ? '本次执行差额' : '本次新增目标'}</span>
-        <strong>{quote.format(Number(execution?.executionTargetQuoteVolume ?? execution?.targetQuote ?? account.strategy.targetVolumeQuote))}<small>USDT</small></strong>
+        <span>{hasTargetRange ? '策略目标范围' : '策略目标'}</span>
+        <strong>{hasTargetRange ? `${quote.format(targetMinimum)} - ${quote.format(targetMaximum)}` : quote.format(targetMaximum)}<small>USDT</small></strong>
       </div>
-      <div>
-        <span>本次抽取目标</span>
-        <strong>{quote.format(Number(execution?.selectedTargetQuoteVolume ?? execution?.strategyTargetQuoteVolume ?? account.strategy.targetVolumeQuoteMax))}<small>USDT</small></strong>
-      </div>
+      {hasTargetRange && selectedTarget !== null && selectedTarget !== undefined && <div>
+        <span>本次随机目标</span>
+        <strong>{quote.format(Number(selectedTarget))}<small>USDT</small></strong>
+      </div>}
+      {executionTarget !== null && executionTarget !== undefined && <div>
+        <span>{execution?.targetMode === 'lifetime' ? '本次待完成' : '本次新增目标'}</span>
+        <strong>{quote.format(Number(executionTarget))}<small>USDT</small></strong>
+      </div>}
       <div>
         <span>每轮总交易量</span>
         <strong>{quote.format(Number(execution?.roundTurnoverQuoteMin ?? account.strategy.roundTurnoverQuoteMin))} - {quote.format(Number(execution?.cycleVolume ?? account.strategy.roundTurnoverQuoteMax))}<small>USDT</small></strong>

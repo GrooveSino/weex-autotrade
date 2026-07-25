@@ -171,7 +171,10 @@ class WeexLiveTradeHistorySource(TradeHistorySource):
         if context.instance.mode is not TradingMode.LIVE:
             raise ReadonlyLiveAccountRequired("WEEX read-only history currently supports Live accounts")
 
-        start_ms, end_ms = self._pending.pop()
+        # Keep the window in the durable source snapshot until the request has
+        # succeeded. A timeout must retry the same coverage instead of silently
+        # dropping the failed interval from the baseline.
+        start_ms, end_ms = self._pending[-1]
         rows = await asyncio.to_thread(
             self._gateway.trade_rows,
             "live",
@@ -182,6 +185,7 @@ class WeexLiveTradeHistorySource(TradeHistorySource):
         )
         if not isinstance(rows, list):
             raise InvalidWeexPayload("WEEX trade history returned a non-list response")
+        self._pending.pop()
 
         fills: tuple[NormalizedTradeFill, ...] = ()
         high_watermark_ms: int | None = None

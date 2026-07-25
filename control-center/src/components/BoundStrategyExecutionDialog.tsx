@@ -46,6 +46,9 @@ function copy(value: string, onToast: (message: string) => void) {
 
 function launchErrorMessage(reason: unknown, fallback: string): string {
   const message = reason instanceof Error ? reason.message : fallback
+  if (message.includes('complete lifetime trade history synchronization')) {
+    return '成交历史基线尚未完成，系统正在后台继续只读核验。请稍后重新获取确认。'
+  }
   if (message.startsWith('final beta source unavailable:')) {
     return 'Final Beta 来源当前不可用，无法安全生成启动确认。请在顶部 Final Beta 旁检查来源设置，待数据恢复后重新获取确认；本次不会提交订单。'
   }

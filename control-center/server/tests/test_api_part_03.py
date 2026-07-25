@@ -132,7 +132,7 @@ def test_strategy_target_mode_and_funding_preflight_are_exposed_and_enforced() -
     assert "funding preflight failed" in rejected.json()["detail"]
 
 
-def test_lifetime_target_requires_complete_trade_history_before_start() -> None:
+def test_lifetime_target_requires_complete_trade_history_before_legacy_mock_start() -> None:
     app = create_app(ControlPlaneSettings(seed_demo_data=False))
     with TestClient(app) as api:
         created = api.post("/api/v1/instances", json=create_payload()).json()

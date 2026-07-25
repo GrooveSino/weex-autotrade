@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from pydantic import SecretStr
 
 from fleet_api.models import AccountInstance, InstanceStatus, ProxySnapshot, ProxyType, TradingMode
@@ -63,6 +64,22 @@ class SplittingGateway:
         ]
 
 
+class FailOnceGateway(SplittingGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def trade_rows(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        start_time = int(kwargs["start_time"])
+        end_time = int(kwargs["end_time"])
+        limit = int(kwargs["limit"])
+        self.trade_calls.append((start_time, end_time, limit))
+        if not self.failed:
+            self.failed = True
+            raise TimeoutError("fixture timeout")
+        return []
+
+
 def test_hundred_row_window_split_survives_source_restore_without_duplicate_fills() -> None:
     async def scenario() -> None:
         gateway = SplittingGateway()
@@ -83,5 +100,23 @@ def test_hundred_row_window_split_survives_source_restore_without_duplicate_fill
 
         assert [fill.identity for fill in fills] == ["fill-0", "fill-1000", "fill-2000", "fill-3000"]
         assert len(gateway.trade_calls) == 7
+
+    asyncio.run(scenario())
+
+
+def test_failed_window_remains_in_checkpoint_and_is_retried_exactly() -> None:
+    async def scenario() -> None:
+        gateway = FailOnceGateway()
+        context = TradeHistoryContext(account(), material())
+        source = WeexLiveTradeHistorySource(gateway)
+        source.begin(10, 20, coverage_complete=True)
+
+        with pytest.raises(TimeoutError):
+            await source.fetch_page(context, cursor=None, limit=100)
+        assert source.snapshot()["pending_windows"] == [[10, 20]]
+
+        page = await source.fetch_page(context, cursor=None, limit=100)
+        assert page.complete is True
+        assert gateway.trade_calls == [(10, 20, 100), (10, 20, 100)]
 
     asyncio.run(scenario())

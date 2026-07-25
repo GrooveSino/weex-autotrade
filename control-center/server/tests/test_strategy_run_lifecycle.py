@@ -174,6 +174,40 @@ def test_prepare_reuses_sampled_target_until_direction_or_run_changes(tmp_path, 
         assert 1000 <= float(next_run["selectedTargetQuoteVolume"]) <= 1500
 
 
+def test_lifetime_prepare_uses_verified_ledger_while_baseline_audit_resumes(tmp_path, monkeypatch) -> None:
+    profile = _profile(tmp_path)
+    monkeypatch.setattr(main_module, "LiveCampaignBetaAllocationProvider", LivePreviewProvider)
+    monkeypatch.setattr(
+        campaigns_module.CampaignWorkerManager,
+        "_profile_and_gateway",
+        lambda _self, _material: (profile, LivePreviewGateway()),
+    )
+    app = create_app(_live_settings(tmp_path))
+    with TestClient(app) as api:
+        request = strategy_payload(target="19000")
+        request.update(
+            {
+                "targetMode": "lifetime",
+                "targetVolumeQuoteMin": "12000.00",
+                "targetVolumeQuoteMax": "19000.00",
+            }
+        )
+        strategy = api.post("/api/v1/strategies", json=request).json()
+        payload = create_payload(mode="live")
+        payload["strategyId"] = strategy["id"]
+        instance = api.post("/api/v1/instances", json=payload).json()
+
+        prepared = api.post(f"/api/v1/instances/{instance['id']}/strategy-run/prepare", json={})
+
+        assert prepared.status_code == 200
+        preview = prepared.json()["preview"]
+        assert 12000 <= float(preview["selectedTargetQuoteVolume"]) <= 19000
+        assert preview["selectedTargetQuoteVolume"] == preview["strategyTargetQuoteVolume"]
+        assert any("历史基线正在后台核验" in warning for warning in preview["warnings"])
+        checkpoint = app.state.trade_volume_ledger.sync_checkpoint(instance["id"], "live") or {}
+        assert checkpoint["initial_baseline_state"] == "queued"
+
+
 def test_cleanup_rejects_concurrent_command_for_same_account(tmp_path, monkeypatch) -> None:
     manager = CampaignWorkerManager(
         live_settings(tmp_path),

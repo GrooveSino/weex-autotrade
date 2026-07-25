@@ -47,6 +47,7 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
     publish_snapshot = ctx.publish_snapshot
     strategy_run_plan = ctx.strategy_run_plan
     strategy_run_lifecycle = ctx.strategy_run_lifecycle
+    trade_history_scheduler = ctx.trade_history_scheduler
 
     async def prepare_strategy_run(instance_id: str, direction) -> StrategyRunPrepareResponse:
         instance = service.get_instance(instance_id)
@@ -55,10 +56,13 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
         prepared = await strategy_run_lifecycle.prepare(instance, vault.get(instance_id), direction)
         if prepared.disposition != "idle":
             if prepared.disposition == "ready" and prepared.execution is not None:
+                warnings = ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"]
+                if not instance.volume.complete:
+                    warnings.append("历史基线正在后台核验；本次目标以创建预览时的已核验账本为基线")
                 preview = BetaCampaignPreview.model_validate(
                     {
                         **prepared.execution.model_dump(),
-                        "warnings": ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"],
+                        "warnings": warnings,
                         "blockers": [],
                     }
                 )
@@ -77,6 +81,8 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 boundary_checked_at_ms=prepared.boundary_checked_at_ms,
             )
         instance = service.get_instance(instance_id)
+        if instance.strategy.target_mode.value == "lifetime" and not instance.volume.complete:
+            trade_history_scheduler.resume_initial_baseline(instance)
         plan = strategy_run_plan(instance, direction)
         session_id = f"session-{uuid4().hex}"
         try:
@@ -94,10 +100,13 @@ def register_bound_strategy_routes(app: FastAPI, ctx: FleetAppContext) -> None:
                 reason_code="final_beta_unavailable",
                 message=str(exc),
             )
+        warnings = ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"]
+        if not instance.volume.complete:
+            warnings.append("历史基线正在后台核验；本次目标以创建预览时的已核验账本为基线")
         preview = BetaCampaignPreview.model_validate(
             {
                 **view.model_dump(),
-                "warnings": ["所有订单固定为 POST_ONLY", "本次完成量仅以已核验成交账本为准"],
+                "warnings": warnings,
                 "blockers": [],
             }
         )
