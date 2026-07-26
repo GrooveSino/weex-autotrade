@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from functools import partial
 from uuid import uuid4
@@ -35,6 +34,7 @@ from fleet_api.models import BetaSourceSettings
 from fleet_api.monitoring.events import InstanceEventBroker, StrategyMonitorEventBroker
 from fleet_api.monitoring.strategy_monitor import StrategyMonitorService
 from fleet_api.persistence.command_ledger import CommandReceiptLedger
+from fleet_api.release_metadata import service_release_id
 from fleet_api.runtime.runtime import AccountRuntimeManager
 from fleet_api.runtime.telemetry import AccountTelemetryAdapterFactory, MockAccountTelemetryAdapterFactory
 from fleet_api.runtime.trade_history_scheduler import TradeHistorySyncScheduler
@@ -90,7 +90,7 @@ def build_context(settings: ControlPlaneSettings, *, require_command_id: bool) -
         mock_cycle_total_quote=settings.mock_cycle_total_quote,
     )
     ctx.executor_generation = uuid4().hex
-    ctx.executor_release_id = os.environ.get("FLEET_EXECUTOR_RELEASE_ID", "dev").strip() or "dev"
+    ctx.executor_release_id = service_release_id("FLEET_EXECUTOR_RELEASE_ID")
     ctx.broker = InstanceEventBroker(ctx.executor_generation)
     ctx.strategy_monitor_event_broker = StrategyMonitorEventBroker()
     ctx.execution_journal.recover_incomplete()

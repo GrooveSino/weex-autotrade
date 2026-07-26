@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from fleet_api.auth.auth import SESSION_COOKIE_NAME, LocalUserRegistry, LoginRequest, registry_path_from_env
 from fleet_api.models import HealthResponse
+from fleet_api.release_metadata import service_release_id
 
 _HOP_BY_HOP_HEADERS = {"connection", "content-length", "host", "keep-alive", "transfer-encoding"}
 
@@ -79,7 +80,7 @@ def create_app(
     auth_required: bool | None = None,
 ) -> FastAPI:
     socket_path = executor_socket or _executor_socket()
-    release_id = api_release_id or os.environ.get("FLEET_API_RELEASE_ID", "dev").strip() or "dev"
+    release_id = api_release_id or service_release_id("FLEET_API_RELEASE_ID")
     registry = user_registry or LocalUserRegistry(registry_path_from_env())
     require_auth = (
         _as_bool(os.environ.get("FLEET_LOCAL_USER_AUTH_REQUIRED", "true")) if auth_required is None else auth_required
