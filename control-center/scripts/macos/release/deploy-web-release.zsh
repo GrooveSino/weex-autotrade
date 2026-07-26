@@ -35,8 +35,10 @@ if [[ -z "${FLEET_WEB_DIST_SOURCE:-}" ]]; then
   # The public Fleet console is mounted below a reverse-proxy prefix. Keep
   # this distinct from the loopback static server root so Vite emits asset and
   # API URLs that work on the public route.
-  web_public_base_path="${FLEET_WEB_PUBLIC_BASE_PATH:-${VITE_PUBLIC_BASE_PATH:-/}}"
-  web_api_base_url="${FLEET_WEB_API_BASE_URL:-${VITE_API_BASE_URL:-/api/v1}}"
+  # Fleet is published below Caddy's /fleet/ prefix. Keeping both values
+  # explicit prevents a root-path bundle from loading another site's assets.
+  web_public_base_path="${FLEET_WEB_PUBLIC_BASE_PATH:-${VITE_PUBLIC_BASE_PATH:-/fleet/}}"
+  web_api_base_url="${FLEET_WEB_API_BASE_URL:-${VITE_API_BASE_URL:-/fleet/api/v1}}"
   # LaunchAgent and remote SSH shells do not load interactive fnm/nvm setup.
   # Resolve npm explicitly so a normal release does not depend on shell rc files.
   npm_bin="${FLEET_NPM_BIN:-}"
