@@ -124,7 +124,7 @@ def _render_campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, s
     if name in {"pair_wait_started", "pair_wait_completed", "close_barrier_started"}:
         labels = {
             "pair_wait_started": "正在等待 BTC/ETH 两腿进入确定状态",
-            "pair_wait_completed": "BTC/ETH 两腿状态已核验",
+            "pair_wait_completed": "BTC/ETH 两腿订单与仓位状态已读取",
             "close_barrier_started": "开仓阶段结束，正在读取持仓并准备双腿平仓",
         }
         return (LogLevel.SUCCESS if name == "pair_wait_completed" else LogLevel.INFO, f"实盘执行：{labels[name]}")
@@ -145,6 +145,14 @@ def _render_campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, s
                 "实盘执行："
                 f"{value('symbol')} {value('action')} 成交已核验；"
                 f"{value('quote_volume')} USDT / {value('fill_count')} 笔",
+            )
+        reason = value("reason")
+        if name == "leg_stopped" and reason == "post_only_rejected":
+            return (
+                LogLevel.WARN,
+                "实盘执行："
+                f"{value('symbol')} {value('action')} Maker 报价被交易所拒绝；"
+                "已确认未吃单，系统将读取最新盘口后自动继续。",
             )
         state = "已安全停止" if name == "leg_stopped" else "结果待后台只读核验"
         return (

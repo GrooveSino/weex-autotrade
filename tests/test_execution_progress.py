@@ -33,7 +33,7 @@ def test_projector_keeps_parallel_legs_and_clears_them_at_pair_barrier() -> None
 
     assert projector.active_waits == {}
     assert presentation is not None
-    assert presentation.title == "BTC/ETH 双腿屏障已通过"
+    assert presentation.title == "BTC/ETH 双腿订单与仓位已读取"
 
 
 def test_projector_reads_leg_sequence_without_confusing_journal_sequence() -> None:
@@ -123,9 +123,10 @@ def test_timeline_projection_covers_the_supported_execution_event_catalog() -> N
         ({"event": "market_close_verified", "verified": True}, "BTC 小额尾仓已清零"),
         ({"event": "market_close_uncertain"}, "BTC 小额尾仓市价平仓结果待核验"),
         ({"event": "leg_stopped"}, "BTC 开仓已安全停止"),
+        ({"event": "leg_stopped", "reason": "post_only_rejected"}, "BTC 开仓 Maker 报价被交易所拒绝"),
         ({"event": "leg_uncertain"}, "BTC 开仓状态不确定"),
         ({"event": "position_observation_unavailable"}, "BTC 开仓仓位读取失败"),
-        ({"event": "pair_wait_completed"}, "BTC/ETH 双腿屏障已通过"),
+        ({"event": "pair_wait_completed"}, "BTC/ETH 双腿订单与仓位已读取"),
         ({"event": "close_barrier_started"}, "开仓阶段结束"),
         ({"event": "accounting_wait_completed"}, "BTC 成交明细对账完成"),
         ({"event": "accounting_retry_wait"}, "BTC 成交明细尚未完整"),

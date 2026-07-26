@@ -110,3 +110,18 @@ def test_condition_wait_has_an_automatic_chinese_next_action() -> None:
     assert rendered is not None
     assert "最新 Beta 暂不可用" in rendered[1]
     assert "自动读取最新 Beta" in rendered[1]
+
+
+def test_post_only_rejection_does_not_claim_the_campaign_has_stopped() -> None:
+    rendered = campaign_event_log(
+        {
+            "name": "leg_stopped",
+            "fields": {"symbol": "ETH", "action": "close", "reason": "post_only_rejected"},
+        }
+    )
+
+    assert rendered is not None
+    assert rendered[0].value == "warn"
+    assert "Maker 报价被交易所拒绝" in rendered[1]
+    assert "自动继续" in rendered[1]
+    assert "已安全停止" not in rendered[1]

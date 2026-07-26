@@ -98,3 +98,118 @@ def test_confirmed_owned_close_rejection_keeps_cycle_for_only_remaining_leg() ->
     assert opened.context.child_total_quote == Decimal("20")
     assert len(opened.close_summaries) == 1
     assert opened.context.round_number == 2
+
+
+def test_one_leg_closed_and_other_rejected_keeps_owned_position_for_requote() -> None:
+    service, opened = _Service(), _opened()
+    campaign = SimpleNamespace(round_gap_min_seconds=0, round_gap_max_seconds=0)
+    opened.open_summaries.insert(
+        0,
+        {
+            "symbol": "BTC",
+            "position_side": "long",
+            "action": "open",
+            "accounting_verified": True,
+            "executed_quantity": "1",
+            "quote_volume": "20",
+        },
+    )
+
+    def one_filled_one_rejected(_service, _lanes, _opened, stops):  # type: ignore[no-untyped-def]
+        stops["ETH"] = ("stopped", "post_only_rejected")
+        return [
+            {
+                "symbol": "BTC",
+                "position_side": "long",
+                "action": "close",
+                "accounting_verified": True,
+                "executed_quantity": "1",
+                "quote_volume": "20",
+            }
+        ]
+
+    outcome = close_cycle(
+        service,
+        {},
+        campaign,
+        opened,
+        close_lanes_fn=one_filled_one_rejected,
+        observe_positions_fn=lambda *_args: {"BTC": Decimal(0), "ETH": Decimal("-0.2")},
+        terminal_reason_fn=lambda _stops: None,
+    )
+
+    assert outcome.close_condition is not None
+    assert outcome.close_condition.code == "owned_close_maker_retry"
+    assert outcome.stopped_reason is None
+    assert opened.context.child_total_quote == 0
+    assert opened.context.round_number == 1
+    assert [name for name, _fields in service.events] == [
+        "close_barrier_started",
+        "pair_wait_completed",
+        "owned_close_maker_retry",
+    ]
+
+
+def test_two_confirmed_close_rejections_keep_both_owned_legs_for_requote() -> None:
+    service, opened = _Service(), _opened()
+    campaign = SimpleNamespace(round_gap_min_seconds=0, round_gap_max_seconds=0)
+    opened.open_summaries.insert(
+        0,
+        {
+            "symbol": "BTC",
+            "position_side": "long",
+            "action": "open",
+            "accounting_verified": True,
+            "executed_quantity": "1",
+            "quote_volume": "20",
+        },
+    )
+
+    def both_rejected(_service, _lanes, _opened, stops):  # type: ignore[no-untyped-def]
+        stops.update(
+            {
+                "BTC": ("stopped", "post_only_rejected"),
+                "ETH": ("stopped", "post_only_rejected"),
+            }
+        )
+        return []
+
+    outcome = close_cycle(
+        service,
+        {},
+        campaign,
+        opened,
+        close_lanes_fn=both_rejected,
+        observe_positions_fn=lambda *_args: {"BTC": Decimal("1"), "ETH": Decimal("-0.2")},
+        terminal_reason_fn=lambda _stops: None,
+    )
+
+    assert outcome.close_condition is not None
+    assert outcome.close_condition.code == "owned_close_maker_retry"
+    assert outcome.stopped_reason is None
+    assert opened.context.child_total_quote == 0
+
+
+def test_both_opening_post_only_rejections_wait_instead_of_stopping() -> None:
+    service, opened = _Service(), _opened()
+    campaign = SimpleNamespace(round_gap_min_seconds=0, round_gap_max_seconds=0)
+    opened.open_summaries.clear()
+    opened.lane_stops = {
+        "BTC": ("stopped", "post_only_rejected"),
+        "ETH": ("stopped", "post_only_rejected"),
+    }
+
+    outcome = close_cycle(
+        service,
+        {},
+        campaign,
+        opened,
+        close_lanes_fn=lambda *_args: [],
+        observe_positions_fn=lambda *_args: {"BTC": Decimal(0), "ETH": Decimal(0)},
+    )
+
+    assert outcome.condition is not None
+    assert outcome.condition.code == "empty_cycle"
+    assert outcome.stopped_reason is None
+    assert opened.context.child_total_quote == 0
+    assert opened.context.round_number == 1

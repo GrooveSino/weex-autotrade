@@ -24,6 +24,16 @@ from fleet_api.campaigns.actors.campaign_actor_planning import (
 )
 from fleet_api.campaigns.actors.targets.target_policy import campaign_completion_floor, emit_tolerance_acceptance
 
+_RETRYABLE_MAKER_REASONS = frozenset(
+    {
+        "post_only_rejected",
+        "stale_price",
+        "maximum_residence",
+        "unknown_liquidity",
+        "recovery_attempts_exhausted",
+    }
+)
+
 
 def close_cycle(
     service: Any,
@@ -49,7 +59,12 @@ def close_cycle(
     reason = terminal_reason_fn(stops)
     uncertain = any(is_uncertain_stop(stop) for stop in stops.values())
     owned = owned_positions_match_cycle(positions, opened)
-    close_condition = retry_owned_close_condition(reason, flat=flat, uncertain=uncertain, owned=owned)
+    close_condition = retry_owned_close_condition(
+        _confirmed_maker_retry_reason(stops) or reason,
+        flat=flat,
+        uncertain=uncertain,
+        owned=owned,
+    )
     opened.lane_stops = stops
     if close_condition is not None:
         service._emit(
@@ -124,14 +139,16 @@ def close_cycle(
 
 
 def _retryable_stops_cleared(stops: Mapping[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
-    retryable = {
-        "post_only_rejected",
-        "stale_price",
-        "maximum_residence",
-        "unknown_liquidity",
-        "recovery_attempts_exhausted",
-    }
-    return {symbol: stop for symbol, stop in stops.items() if stop[1] not in retryable}
+    return {symbol: stop for symbol, stop in stops.items() if stop[1] not in _RETRYABLE_MAKER_REASONS}
+
+
+def _confirmed_maker_retry_reason(stops: Mapping[str, tuple[str, str]]) -> str | None:
+    """Classify a known passive rejection locally, before generic terminal policy."""
+    for symbol in ("BTC", "ETH"):
+        stop = stops.get(symbol)
+        if stop is not None and stop[0] == "stopped" and stop[1] in _RETRYABLE_MAKER_REASONS:
+            return stop[1]
+    return None
 
 
 def _round_gap(

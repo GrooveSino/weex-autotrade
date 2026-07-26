@@ -132,12 +132,18 @@ def describe_execution_event(event: Mapping[str, Any]) -> TimelinePresentation |
     if name == "market_close_uncertain":
         return TimelinePresentation("error", f"{symbol} 小额尾仓市价平仓结果待核验", str(value("reason")))
     if name in {"leg_stopped", "leg_uncertain"}:
+        if name == "leg_stopped" and value("reason") == "post_only_rejected":
+            return TimelinePresentation(
+                "warn",
+                f"{symbol} {action} Maker 报价被交易所拒绝",
+                "已确认未吃单；系统会读取最新盘口后自动继续，不会追价或改用市价单",
+            )
         title = f"{symbol} {action}{'已安全停止' if name == 'leg_stopped' else '状态不确定'}"
         return TimelinePresentation("error" if name == "leg_stopped" else "warn", title, str(value("reason")))
     if name == "position_observation_unavailable":
         return TimelinePresentation("error", f"{symbol} {action}仓位读取失败", "已停止该通道继续下单")
     if name == "pair_wait_completed":
-        return TimelinePresentation("success", "BTC/ETH 双腿屏障已通过", f"第 {round_number} 轮 / {action}")
+        return TimelinePresentation("success", "BTC/ETH 双腿订单与仓位已读取", f"第 {round_number} 轮 / {action}")
     if name == "open_barrier_verified":
         return TimelinePresentation("success", "BTC/ETH 目标仓位已核验", f"第 {round_number} 轮 / 开始持仓计时")
     if name == "open_barrier_not_ready":
