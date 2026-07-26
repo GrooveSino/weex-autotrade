@@ -17,6 +17,7 @@ from fleet_api.models.models_account import (  # noqa: F401
 )
 from fleet_api.models.models_beta import (  # noqa: F401
     AccountTradeVolumePeriod,
+    AccountTradeVolumeProjection,
     AccountTradeVolumeReportResponse,
     BetaMarketSnapshot,
     BetaSourceSettings,

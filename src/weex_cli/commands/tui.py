@@ -6,8 +6,8 @@ from typing import Annotated
 import typer
 
 from weex_cli.cli_support import app_context, invoke
-from weex_cli.tui_accounts import DEFAULT_ACCOUNT_FILE
-from weex_cli.tui_app import run_tui
+from weex_cli.tui.accounts import DEFAULT_ACCOUNT_FILE
+from weex_cli.tui.app import run_tui
 
 
 def tui(

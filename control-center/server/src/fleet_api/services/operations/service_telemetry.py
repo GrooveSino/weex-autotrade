@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from decimal import Decimal
 
@@ -20,9 +21,29 @@ from fleet_api.services.control.service_errors import (
 )
 from fleet_api.services.control.service_shared import delay_label as _delay_label
 from fleet_api.strategy.strategy import target_progress_quote
+from fleet_api.volume.core.volume_history import TradeVolumeAggregate
 
 
 class ServiceTelemetryMixin:
+    def apply_volume_aggregate(self, instance_id: str, aggregate: TradeVolumeAggregate) -> AccountInstance:
+        """Refresh only the account-level volume projection from committed fills."""
+        instance = self.get_instance(instance_id)
+        updated = instance.model_copy(
+            update={
+                "volume": instance.volume.model_copy(
+                    update={
+                        "lifetime": _finite_volume_float(aggregate.lifetime),
+                        "today": _finite_volume_float(aggregate.today),
+                        "complete": aggregate.complete,
+                    }
+                ),
+                "updated_at": "刚刚",
+            },
+            deep=True,
+        )
+        self.repository.replace(updated)
+        return updated
+
     def apply_telemetry(
         self,
         instance_id: str,
@@ -45,13 +66,18 @@ class ServiceTelemetryMixin:
             strategy_progress = strategy_progress.model_copy(
                 update={"generated_volume_quote": max(Decimal(0), strategy_generated_volume_quote)}
             )
+        telemetry_volume = telemetry.volume
+        if telemetry_volume.lifetime < instance.volume.lifetime:
+            # A manual history import may commit after this poll reads its ledger
+            # aggregate. Never let that older observation lower the projection.
+            telemetry_volume = instance.volume
         updated = instance.model_copy(
             update={
                 # Telemetry owns account observations only. Execution status and
                 # phase are projected from the strategy lifecycle elsewhere.
                 "phase": instance.phase,
                 "wallet": telemetry.wallet,
-                "volume": telemetry.volume,
+                "volume": telemetry_volume,
                 "exposure": telemetry.exposure,
                 "proxy": instance.proxy.model_copy(
                     update={
@@ -314,3 +340,10 @@ class ServiceTelemetryMixin:
             self.repository.replace(updated)
             self._append_log(instance.id, LogLevel.WARN, "检测到服务重启；正在只读恢复运行状态")
         return reconciled
+
+
+def _finite_volume_float(value: Decimal) -> float:
+    parsed = float(value)
+    if not value.is_finite() or value < 0 or not math.isfinite(parsed):
+        raise ValidationFailed("volume aggregate must be finite and non-negative")
+    return parsed

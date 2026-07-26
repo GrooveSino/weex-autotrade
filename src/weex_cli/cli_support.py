@@ -8,12 +8,12 @@ from typing import Any, TypeVar
 import ccxt
 import typer
 
-from weex_cli.config import Settings, normalize_mode
-from weex_cli.errors import WeexCliError
-from weex_cli.gateway import WeexGateway
+from weex_cli.core.config import Settings, normalize_mode
+from weex_cli.core.errors import WeexCliError
+from weex_cli.core.redaction import redact_text
+from weex_cli.exchange.rest.gateway import WeexGateway
 from weex_cli.live_profile import LiveProfile, load_live_profile
-from weex_cli.output import emit_error
-from weex_cli.redaction import redact_text
+from weex_cli.presentation.output import emit_error
 
 T = TypeVar("T")
 

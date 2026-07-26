@@ -8,8 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.errors import ValidationError
-from weex_cli.gateway import WeexGateway, summarize_position_size
+from weex_cli.control_api.exchange import ValidationError, WeexGateway, summarize_position_size
 
 from fleet_api.execution.runtime.execution_io import NORMAL_IO_PRIORITY, BoundedGateway, ExecutionIoBudget
 

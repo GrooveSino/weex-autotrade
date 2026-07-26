@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 import weex_cli.trade_reporting as trade_reporting
-from weex_cli.errors import ValidationError
+from weex_cli.core.errors import ValidationError
 from weex_cli.trade_reporting import TradeReportService, current_timestamp_ms, parse_timestamp
 
 

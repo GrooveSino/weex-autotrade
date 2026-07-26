@@ -107,13 +107,24 @@ export async function fetchAccountTradeVolumeReport(
   if (controlPlaneEnabled) {
     const query = new URLSearchParams()
     lookbackDays.forEach((days) => query.append('lookback_days', String(days)))
-    return apiRequest<AccountTradeVolumeReport>(`/instances/${account.id}/trade-volume-report?${query}`)
+    return apiRequest<AccountTradeVolumeReport>(`/instances/${account.id}/trade-volume-report?${query}`, { method: 'POST' })
   }
   await sleep(320)
   const today = Math.max(account.volume.today, 0)
   const now = Date.now()
   return {
     generatedAtMs: now,
+    ledgerScannedFillCount: 0,
+    ledgerInsertedFillCount: 0,
+    ledgerDeduplicatedFillCount: 0,
+    ledgerLifetimeQuoteVolume: String(account.volume.lifetime),
+    ledgerTodayQuoteVolume: String(account.volume.today),
+    ledgerSourceComplete: account.volume.complete,
+    accountVolume: {
+      lifetimeQuoteVolume: String(account.volume.lifetime),
+      todayQuoteVolume: String(account.volume.today),
+      sourceComplete: account.volume.complete,
+    },
     periods: lookbackDays.map((days) => {
       const totalQuoteVolume = today * (days === 1 ? 1 : days === 7 ? 4.3 : 12.1)
       return {

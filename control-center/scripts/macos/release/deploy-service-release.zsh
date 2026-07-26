@@ -90,7 +90,7 @@ from pathlib import Path
 release = Path(sys.argv[1])
 release_id = sys.argv[2]
 required = [
-    release / "src/weex_cli/beta_campaign.py",
+    release / "src/weex_cli/beta_campaign/__init__.py",
     release / "control-center/server/src/fleet_api/executor_main.py",
     release / "control-center/server/src/fleet_api/api_proxy.py",
     release / "control-center/server/.venv/bin/python",
@@ -116,7 +116,7 @@ PYTHONPATH="${stage_dir}/src:${stage_dir}/control-center/server/src" \
   "${stage_dir}/control-center/server/.venv/bin/python" - <<'PY'
 from fleet_api.api_proxy import create_app as create_proxy_app
 from fleet_api.executor_main import create_app as create_executor_app
-from weex_cli.execution_progress import ExecutionProgressProjector
+from weex_cli.control_api.progress import ExecutionProgressProjector
 
 assert create_proxy_app is not None
 assert create_executor_app is not None

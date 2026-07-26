@@ -5,9 +5,9 @@ from decimal import Decimal
 
 import ccxt
 
-from weex_cli.beta_volume import _accounting_summary
-from weex_cli.dust_position_close import close_dust_position_once
-from weex_cli.execution_reconciliation import LegFillReport
+from weex_cli.beta_volume import accounting_summary
+from weex_cli.execution.dust_position_close import close_dust_position_once
+from weex_cli.execution.reconciliation import LegFillReport
 
 
 class IntentStore:
@@ -217,8 +217,8 @@ def test_accounting_accepts_only_explicit_verified_dust_taker_policy() -> None:
     }
     ordinary_taker = {**dust_leg, "liquidity_policy_satisfied": False, "dust_market_close": False}
 
-    accepted = _accounting_summary([dust_leg])
-    rejected = _accounting_summary([ordinary_taker])
+    accepted = accounting_summary([dust_leg])
+    rejected = accounting_summary([ordinary_taker])
 
     assert accepted["maker_only"] is False
     assert accepted["liquidity_policy_satisfied"] is True

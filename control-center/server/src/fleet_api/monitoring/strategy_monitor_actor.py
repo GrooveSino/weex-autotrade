@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from weex_cli.execution_progress import condition_presentation
+from weex_cli.control_api.progress import condition_presentation
 
 from fleet_api.models import ActiveExecutionWait, ExecutionTimelineEntry, LogLevel
 

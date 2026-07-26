@@ -7,8 +7,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from weex_cli.cli import app
-from weex_cli.commands import live
-from weex_cli.config import Settings
+from weex_cli.commands.live import maker_volume as live_maker_volume
+from weex_cli.core.config import Settings
 
 runner = CliRunner()
 
@@ -25,7 +25,7 @@ class PlanGateway:
 
 
 def test_live_maker_volume_cli_plans_by_default_with_exact_gate(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(live, "gateway_for", lambda ctx: PlanGateway())
+    monkeypatch.setattr(live_maker_volume, "gateway_for", lambda ctx: PlanGateway())
     result = runner.invoke(
         app,
         [
@@ -54,7 +54,7 @@ def test_live_maker_volume_cli_plans_by_default_with_exact_gate(tmp_path: Path, 
 
 
 def test_live_maker_volume_cli_execution_still_requires_environment_gate(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(live, "gateway_for", lambda ctx: PlanGateway())
+    monkeypatch.setattr(live_maker_volume, "gateway_for", lambda ctx: PlanGateway())
     disabled = Settings.load(
         environ={
             "WEEX_API_KEY": "key",
@@ -63,7 +63,7 @@ def test_live_maker_volume_cli_execution_still_requires_environment_gate(tmp_pat
             "WEEX_LIVE_TRADING_ENABLED": "false",
         }
     )
-    monkeypatch.setattr(live, "settings_for", lambda ctx: disabled)
+    monkeypatch.setattr(live_maker_volume, "settings_for", lambda ctx: disabled)
     planned = runner.invoke(
         app,
         ["live", "maker-volume", "--plan-directory", str(tmp_path), "--json"],

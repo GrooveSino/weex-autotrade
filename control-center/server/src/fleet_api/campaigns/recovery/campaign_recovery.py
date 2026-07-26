@@ -5,9 +5,8 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, Protocol
 
-from weex_cli.beta_campaign import inspect_live_account, live_profile_fingerprint
-from weex_cli.gateway import WeexGateway
-from weex_cli.live_profile import LiveProfile
+from weex_cli.control_api.campaigns import inspect_live_account, live_profile_fingerprint
+from weex_cli.control_api.exchange import LiveProfile, WeexGateway
 
 from fleet_api.auth.vault import CredentialMaterial
 from fleet_api.services.control.service import UnsafeOperation

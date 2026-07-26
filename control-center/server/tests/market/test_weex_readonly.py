@@ -107,6 +107,14 @@ class FakeReadonlyGateway:
                 "quoteQty": "25.25",
                 "time": self.fill_time,
             },
+            {
+                "id": "missing-authoritative-quote",
+                "orderId": "order-without-quote",
+                "symbol": "BTCUSDT",
+                "price": "50000",
+                "qty": "0.5",
+                "time": self.fill_time,
+            },
         ]
 
     def close(self) -> None:

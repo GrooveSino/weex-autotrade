@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_campaign import BetaVolumeCampaign, LiveBetaVolumeCampaignService
-from weex_cli.beta_volume import BetaVolumePlan, LiveBetaVolumeService, PairLegPlan
+from weex_cli.control_api.campaigns import BetaVolumeCampaign, LiveBetaVolumeCampaignService
+from weex_cli.control_api.volume import BetaVolumePlan, LiveBetaVolumeService, PairLegPlan
 
 
 @dataclass(slots=True)
@@ -63,6 +63,10 @@ class OpenCycle:
     # records omit it, in which case the user-authorized child remains valid
     # for recovery compatibility only.
     execution_plan: BetaVolumePlan | None = None
+    # Close-side Maker attempts can be re-quoted while this same cycle remains
+    # live. Keep their summaries with the opening fills so accounting is
+    # finalized exactly once when the pair becomes flat.
+    close_summaries: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def plan(self) -> BetaVolumePlan:
@@ -87,6 +91,7 @@ class CloseCycle:
     round_gap_seconds: float
     round_gap_started_at_ms: int | None = None
     condition: CycleCondition | None = None
+    close_condition: CycleCondition | None = None
 
 
 @dataclass(slots=True)
@@ -100,3 +105,8 @@ EnvironmentFactory = Callable[[str], CampaignPhaseEnvironment]
 CampaignResult = tuple[str, str, Decimal, list[dict[str, Any]]]
 Campaign = BetaVolumeCampaign
 BOUNDARY_COUNTS = ("active_position_count", "regular_order_count", "trigger_order_count")
+
+
+def _actor_terminal_phase(result: Mapping[str, Any]) -> str:
+    status = str(result.get("status") or "stopped")
+    return "recovering" if status == "uncertain" else "completed" if status == "completed" else "stopped"

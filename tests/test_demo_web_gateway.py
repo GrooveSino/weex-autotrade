@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from weex_cli.config import Settings
-from weex_cli.demo_web_gateway import (
+from weex_cli.core.config import Settings
+from weex_cli.core.errors import ValidationError
+from weex_cli.exchange.rest.demo_web import (
     CANCEL_ALL_PATH,
     CANCEL_ORDER_PATH,
     DEMO_COIN_ID,
@@ -17,7 +18,6 @@ from weex_cli.demo_web_gateway import (
     _random_text,
     web_signature,
 )
-from weex_cli.errors import ValidationError
 
 
 class FakeTransport:

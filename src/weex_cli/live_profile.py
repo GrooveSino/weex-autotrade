@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
-from weex_cli.config import Settings
-from weex_cli.errors import ConfigurationError, SafetyError
+from weex_cli.core.config import Settings
+from weex_cli.core.errors import ConfigurationError, SafetyError
 
 
 @dataclass(frozen=True)

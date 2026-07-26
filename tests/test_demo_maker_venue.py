@@ -4,8 +4,8 @@ from decimal import ROUND_DOWN, Decimal
 
 import pytest
 
-from weex_cli.demo_maker_venue import DemoAdaptiveMakerVenue
-from weex_cli.errors import SubmissionUncertainError, ValidationError
+from weex_cli.core.errors import SubmissionUncertainError, ValidationError
+from weex_cli.execution.venues import DemoAdaptiveMakerVenue
 
 
 class Clock:

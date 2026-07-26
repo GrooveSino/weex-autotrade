@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import json
 import time
 from threading import RLock
 from typing import Any
 
-from weex_cli.beta_campaign import BetaVolumeCampaign
-from weex_cli.execution_progress import ExecutionProgressProjector
+from weex_cli.control_api.campaigns import BetaVolumeCampaign
+from weex_cli.control_api.progress import ExecutionProgressProjector
 
 from fleet_api.campaigns.core.campaign_contracts import ACTIVE_STATUSES, CampaignRecord, ExecutionMonitorProjection
+from fleet_api.campaigns.persistence.json_codec import json_copy
 from fleet_api.models import BetaCampaignStatus
 from fleet_api.services.control.service import UnsafeOperation
 
@@ -76,14 +76,14 @@ class InMemoryCampaignJournal:
     ) -> None:
         with self._lock:
             current = self._records[campaign_id.lower()]
-            merged = {**current.metadata, **metadata}
+            merged = json_copy({**current.metadata, **metadata})
             self._records[campaign_id.lower()] = CampaignRecord(
                 current.campaign_id,
                 current.instance_id,
                 current.campaign,
                 status or current.status,
                 merged,
-                result if result is not None else current.result,
+                json_copy(result) if result is not None else current.result,
                 current.events,
             )
 
@@ -91,7 +91,7 @@ class InMemoryCampaignJournal:
         with self._lock:
             current = self._records[campaign_id.lower()]
             sequence = len(current.events) + 1
-            stored_event = {**event, "sequence": sequence}
+            stored_event = json_copy({**event, "sequence": sequence})
             self._records[campaign_id.lower()] = CampaignRecord(
                 current.campaign_id,
                 current.instance_id,
@@ -119,7 +119,7 @@ class InMemoryCampaignJournal:
             try:
                 current = self._records[campaign_id.lower()]
                 sequence = len(current.events) + 1
-                stored_event = json.loads(json.dumps({**event, "sequence": sequence}, separators=(",", ":")))
+                stored_event = json_copy({**event, "sequence": sequence})
                 projected_state = state
                 if projected_state is None:
                     existing_projection = self._monitor_projections.get(current.campaign_id)
@@ -128,7 +128,7 @@ class InMemoryCampaignJournal:
                     )
                     projector.apply(stored_event, at_ms=int(stored_event.get("at_ms") or 0))
                     projected_state = projector.snapshot()
-                stored_state = json.loads(json.dumps(projected_state, separators=(",", ":")))
+                stored_state = json_copy(projected_state)
                 now_ms = int(event.get("at_ms") or time.time() * 1000)
                 projection = ExecutionMonitorProjection(
                     owner_user_id=owner_user_id,
@@ -224,7 +224,7 @@ class InMemoryCampaignJournal:
 
     def replace_boundary_projection(self, instance_id: str, projection: dict[str, Any]) -> None:
         with self._lock:
-            self._boundary_projections[instance_id] = json.loads(json.dumps(projection, separators=(",", ":")))
+            self._boundary_projections[instance_id] = json_copy(projection)
 
     def claim_execution(self, campaign_id: str, *, started_at_ms: int) -> bool:
         with self._lock:

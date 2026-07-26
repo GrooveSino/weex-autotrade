@@ -30,7 +30,7 @@ def test_bound_strategy_execution_creates_session_only_after_confirmed_idempoten
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(

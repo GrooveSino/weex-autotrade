@@ -33,6 +33,7 @@ import { FleetCapacityBadge } from './components/execution/FleetCapacityBadge'
 import { StrategyAssignmentDialog } from './components/strategy/StrategyAssignmentDialog'
 import { StrategyDialog } from './components/strategy/StrategyDialog'
 import { useFleetApp } from './hooks/useFleetApp'
+import { serviceReleaseLabel } from './utils/serviceRelease'
 import { controlPlaneEnabled, dataSourceLabel } from './services'
 import type { BetaMarketSnapshot, StatusFilter } from './types'
 
@@ -99,7 +100,7 @@ function BetaStatus({ snapshot, available, loading, receivedAtMs }: BetaStatusPr
 }
 
 function App() {
-  const { accounts, setAccounts, strategies, search, setSearch, filter, setFilter, selectedIds, refreshingIds, actioningIds, logAccount, setLogAccount, logSessionId, setLogSessionId, executionAccount, setExecutionAccount, accountDialogOpen, setAccountDialogOpen, editingAccount, setEditingAccount, strategyDialogOpen, setStrategyDialogOpen, betaSourceDialogOpen, setBetaSourceDialogOpen, strategyDialogInitialId, setStrategyDialogInitialId, assignmentAccounts, setAssignmentAccounts, closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen, stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, controlPlaneConnected, controlPlaneAdapter, boundStrategyExecutionEnabled, executionCapacity, boundExecutionQueue, setBoundExecutionQueue, initialControlPlaneError, schedulerMetrics, betaSnapshot, betaAvailable, setBetaAvailable, betaLoading, setBetaLoading, betaReceivedAtMs, pendingWebReleaseId, localUser, localUserLoading, localUserError, loginRequired, login, searchInputRef, controlPlaneHydrating, executionDisabled, refreshBlockedByWorkflow, filteredAccounts, stats, canStartSelected, canPauseSelected, canStopSelected, selectOne, selectAllVisible, updateStatuses, toggleRunning, refreshOne, refreshAll, confirmClosePositions, saveAccount, deleteEditingAccount, closeAccountDialog, createStrategy, updateStrategy, duplicateStrategy, deleteStrategy, assignStrategy, emergencyStop, logout } = useFleetApp()
+  const { accounts, setAccounts, strategies, search, setSearch, filter, setFilter, selectedIds, refreshingIds, actioningIds, logAccount, setLogAccount, logSessionId, setLogSessionId, executionAccount, setExecutionAccount, accountDialogOpen, setAccountDialogOpen, editingAccount, setEditingAccount, strategyDialogOpen, setStrategyDialogOpen, betaSourceDialogOpen, setBetaSourceDialogOpen, strategyDialogInitialId, setStrategyDialogInitialId, assignmentAccounts, setAssignmentAccounts, closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen, stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, controlPlaneConnected, controlPlaneAdapter, serviceReleaseId, boundStrategyExecutionEnabled, executionCapacity, boundExecutionQueue, setBoundExecutionQueue, initialControlPlaneError, schedulerMetrics, betaSnapshot, betaAvailable, setBetaAvailable, betaLoading, setBetaLoading, betaReceivedAtMs, pendingWebReleaseId, localUser, localUserLoading, localUserError, loginRequired, login, searchInputRef, controlPlaneHydrating, executionDisabled, refreshBlockedByWorkflow, filteredAccounts, stats, canStartSelected, canPauseSelected, canStopSelected, selectOne, selectAllVisible, updateStatuses, toggleRunning, refreshOne, refreshAll, confirmClosePositions, saveAccount, deleteEditingAccount, closeAccountDialog, createStrategy, updateStrategy, duplicateStrategy, deleteStrategy, assignStrategy, emergencyStop, logout } = useFleetApp()
 
   if (loginRequired) return <LocalLogin loading={localUserLoading} error={localUserError} onSubmit={login} />
 
@@ -114,7 +115,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><ChevronsUp size={19} /></span>
-          <div><strong>WEEX Fleet</strong><span>多账号交易控制台</span></div>
+          <div><strong>WEEX Fleet</strong><span>多账号交易控制台{serviceReleaseLabel(serviceReleaseId)}</span></div>
           <span className="prototype-badge">{controlPlaneHydrating ? '正在连接控制面' : controlPlaneAdapter === 'weex-live' ? 'WEEX 实盘控制面' : controlPlaneAdapter === 'weex-readonly' ? 'WEEX 只读' : controlPlaneEnabled ? 'API 模拟' : '浏览器模拟'}</span>
         </div>
         <div className="topbar-right">
@@ -218,6 +219,13 @@ function App() {
               setAccountDialogOpen(true)
             }}
             onAssignStrategy={(account) => setAssignmentAccounts([account])}
+            onVolumeUpdated={(accountId, volume) => {
+              setAccounts((current) => current.map((account) => account.id === accountId ? {
+                ...account,
+                volume: { ...account.volume, ...volume, lifetimeSourceComplete: volume.complete },
+                updatedAt: '刚刚',
+              } : account))
+            }}
           />
           )}
 

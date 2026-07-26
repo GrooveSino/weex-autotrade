@@ -102,6 +102,17 @@ export interface AccountTradeVolumePeriod {
 export interface AccountTradeVolumeReport {
   periods: AccountTradeVolumePeriod[]
   generatedAtMs: number
+  ledgerScannedFillCount: number
+  ledgerInsertedFillCount: number
+  ledgerDeduplicatedFillCount: number
+  ledgerLifetimeQuoteVolume: string
+  ledgerTodayQuoteVolume: string
+  ledgerSourceComplete: boolean
+  accountVolume: {
+    lifetimeQuoteVolume: string
+    todayQuoteVolume: string
+    sourceComplete: boolean
+  }
 }
 
 export interface AccountDraft {

@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 from pydantic import SecretStr
-from weex_cli.errors import SafetyError
+from weex_cli.core.errors import SafetyError
 
 from fleet_api.auth.vault import CredentialMaterial, EphemeralCredentialVault
 from fleet_api.campaigns import (

@@ -1,8 +1,9 @@
+import json
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from weex_cli.beta_allocation import BetaAllocation
+from weex_cli.beta_campaign.allocation import BetaAllocation
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, CycleConditionError
 from fleet_api.campaigns.actors.campaign_actor_planning import build_cycle_plan
@@ -91,7 +92,7 @@ def test_exchange_invalid_order_during_sizing_becomes_a_retryable_minimum_condit
         lambda child, **fields: SimpleNamespace(**{**vars(child), **fields}),
     )
     monkeypatch.setattr(
-        "fleet_api.campaigns.actors.campaign_actor_planning._size_cycle",
+        "fleet_api.campaigns.actors.campaign_actor_planning.size_cycle",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(InvalidOrder("amount below minimum")),
     )
 
@@ -99,3 +100,61 @@ def test_exchange_invalid_order_during_sizing_becomes_a_retryable_minimum_condit
         build_cycle_plan(service, context)
 
     assert captured.value.condition.code == "minimum_order_infeasible"
+
+
+def test_cycle_preflight_snapshot_is_json_serializable(monkeypatch) -> None:
+    allocation = BetaAllocation(
+        beta=Decimal("1"),
+        btc_long_weight=Decimal("0.5"),
+        eth_short_weight=Decimal("0.5"),
+        version="beta-json-safe",
+        as_of_ms=1_234,
+        confidence=Decimal("1"),
+        confidence_threshold=Decimal("0.5"),
+        source="fake",
+    )
+    context = _context(target="500", total="400", normal_cycle="164.5")
+    context.child = SimpleNamespace(
+        **vars(context.child),
+        plan_id="child",
+        leverage=400,
+        max_auto_leverage=400,
+        margin_buffer=Decimal("1.1"),
+    )  # type: ignore[assignment]
+    service = SimpleNamespace(
+        provider=SimpleNamespace(get=lambda: allocation),
+        gateway=object(),
+        market_data=object(),
+        now_ms=lambda: 1_234,
+        _create_lanes=lambda _plan: {"BTC": object(), "ETH": object()},
+        _read_with_retry=lambda call, **_fields: call(),
+    )
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_planning.inspect_live_account",
+        lambda *_args, **_kwargs: {
+            "available_quote": "100",
+            "available_sufficient": True,
+            "active_position_count": 0,
+            "regular_order_count": 0,
+            "trigger_order_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_planning.replace",
+        lambda child, **fields: SimpleNamespace(**{**vars(child), **fields}),
+    )
+    monkeypatch.setattr(
+        "fleet_api.campaigns.actors.campaign_actor_planning.size_cycle",
+        lambda *_args, **_kwargs: (
+            object(),
+            object(),
+            {"estimated_turnover_quote": "100", "opening_notional_quote": "50"},
+        ),
+    )
+
+    _, preflight, *_ = build_cycle_plan(service, context)
+
+    assert preflight["fresh_beta_version"] == "beta-json-safe"
+    assert preflight["fresh_beta_as_of_ms"] == 1_234
+    assert "allocation" not in preflight
+    json.dumps(preflight)

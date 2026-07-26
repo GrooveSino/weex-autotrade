@@ -3,9 +3,9 @@ from __future__ import annotations
 import ccxt
 import pytest
 
-from weex_cli.errors import SafetyError, SubmissionUncertainError
-from weex_cli.models import OrderIntent
-from weex_cli.service import TradingService
+from weex_cli.core.errors import SafetyError, SubmissionUncertainError
+from weex_cli.core.models import OrderIntent
+from weex_cli.execution.service import TradingService
 
 
 def intent(mode: str = "demo") -> OrderIntent:

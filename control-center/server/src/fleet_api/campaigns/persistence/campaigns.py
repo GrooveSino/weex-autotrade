@@ -1,7 +1,7 @@
 """Compatibility exports for the Fleet live-campaign subsystem."""
 
-from weex_cli.beta_campaign import LiveBetaVolumeCampaignService  # noqa: F401
-from weex_cli.live_websocket import WeexCampaignWebSocketRuntime  # noqa: F401
+from weex_cli.control_api.campaigns import LiveBetaVolumeCampaignService  # noqa: F401
+from weex_cli.control_api.streams import WeexCampaignWebSocketRuntime  # noqa: F401
 
 from fleet_api.campaigns.core.campaign_contracts import (  # noqa: F401
     CampaignJournal,
@@ -10,9 +10,6 @@ from fleet_api.campaigns.core.campaign_contracts import (  # noqa: F401
     _AccountLease,
 )
 from fleet_api.campaigns.core.campaign_events import (  # noqa: F401
-    _phase_for_event,
-    _publishes_fleet_snapshot,
-    _safe_event_text,
     _sanitize_event,
     _view,
 )
@@ -30,6 +27,9 @@ from fleet_api.campaigns.core.campaign_helpers import (  # noqa: F401
     _reconciliation_confirmation,
     _reconciliation_required,
     _worker_exception_reason,
+)
+from fleet_api.campaigns.core.event_projection import (  # noqa: F401
+    phase_for_event as _phase_for_event,
 )
 from fleet_api.campaigns.manager.campaign_manager import CampaignWorkerManager  # noqa: F401
 from fleet_api.campaigns.persistence.campaign_memory_journal import InMemoryCampaignJournal

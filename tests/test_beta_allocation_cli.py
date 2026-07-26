@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from weex_cli.beta_allocation import BetaUnavailable, HttpBetaAllocationProvider, parse_beta_payload
+from weex_cli.beta_campaign.allocation import BetaUnavailable, HttpBetaAllocationProvider, parse_beta_payload
 
 
 def healthy_payload() -> dict[str, object]:

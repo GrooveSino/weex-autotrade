@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from functools import partial
 from uuid import uuid4
 
-from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider
+from weex_cli.control_api.allocation import HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider
 
 from fleet_api.accounts.fixtures.seed import ensure_mock_volume_baselines, seed_mock_instances
 from fleet_api.accounts.repository import InMemoryAccountRepository, SQLiteAccountRepository
@@ -29,7 +30,6 @@ from fleet_api.execution import (
 from fleet_api.market.beta_allocation import HttpBetaAllocationProvider
 from fleet_api.market.beta_source import BetaSourceRuntime, InMemoryBetaSourceStore, SQLiteBetaSourceStore
 from fleet_api.market.campaign_beta_provider import CachedCampaignBetaProvider
-from fleet_api.market.weex_readonly import build_readonly_gateway
 from fleet_api.market.weex_readonly_adapter import WeexReadonlyAccountTelemetryAdapterFactory
 from fleet_api.models import BetaSourceSettings
 from fleet_api.monitoring.events import InstanceEventBroker, StrategyMonitorEventBroker
@@ -184,8 +184,9 @@ def finish_context(
         max_concurrent_requests=settings.weex_history_max_concurrency,
     )
     ctx.account_trade_volume_report_service = AccountTradeVolumeReportService(
-        build_readonly_gateway,
-        request_timeout_ms=settings.weex_request_timeout_ms,
+        partial(ctx.runtime.authoritative_session_fills, timeout_seconds=120.0),
+        ctx.volume_ledger,
+        ctx.service.apply_volume_aggregate,
         max_concurrent_reports=1,
     )
     ctx.strategy_monitor = StrategyMonitorService(ctx.campaign_journal, ctx.volume_ledger, ctx.executor_generation)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import typer
 
 from weex_cli.cli_support import settings_for
-from weex_cli.output import emit
+from weex_cli.presentation.output import emit
 
 app = typer.Typer(help="Inspect local CLI configuration.")
 

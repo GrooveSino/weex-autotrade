@@ -7,9 +7,7 @@ from decimal import ROUND_DOWN, Decimal
 import ccxt
 import pytest
 
-from weex_cli.adaptive_executor import TargetExecutionResult, VenueOrder
-from weex_cli.adaptive_maker import MarketSnapshot
-from weex_cli.beta_allocation import BetaAllocation
+from weex_cli.beta_campaign.allocation import BetaAllocation
 from weex_cli.beta_volume import (
     BetaVolumePlan,
     BetaVolumePlanStore,
@@ -17,9 +15,11 @@ from weex_cli.beta_volume import (
     beta_volume_confirmation,
     select_leverage,
 )
-from weex_cli.beta_volume_workflow import BetaVolumeApplication, BetaVolumePlanRequest
-from weex_cli.errors import SafetyError, ValidationError
-from weex_cli.execution_reconciliation import LegFillReport, LegFillRequest
+from weex_cli.beta_volume.workflow import BetaVolumeApplication, BetaVolumePlanRequest
+from weex_cli.core.errors import SafetyError, ValidationError
+from weex_cli.execution.adaptive import TargetExecutionResult, VenueOrder
+from weex_cli.execution.adaptive_maker import MarketSnapshot
+from weex_cli.execution.reconciliation import LegFillReport, LegFillRequest
 
 
 class Gateway:
@@ -1069,6 +1069,53 @@ def test_final_acceptance_allows_an_explicit_shortfall_floor_only_after_flat_ver
     assert result["reason"] == "paired_target_completed_with_tolerance"
     assert result["remaining_quote"] == "0"
     assert result["target_shortfall_quote"] == "6.46794"
+
+
+def test_finish_does_not_publish_success_before_result_is_persisted(
+    tmp_path, allocation: BetaAllocation, monkeypatch
+) -> None:
+    gateway = Gateway()
+    plan = BetaVolumePlan.create(
+        gateway,
+        allocation,
+        target_turnover_quote="500",
+        max_position_quote="1200",
+        timeout_seconds=120,
+        now_ms=1000,
+    )
+    store = BetaVolumePlanStore(tmp_path)
+    events: list[dict[str, object]] = []
+    service = LiveBetaVolumeService(
+        gateway,
+        Provider(allocation),  # type: ignore[arg-type]
+        store,
+        venue_factory=lambda unused, symbol, side: ImmediateVenue(symbol, side),  # type: ignore[arg-type]
+        gateway_factory=Gateway,
+        reconciler_factory=lambda unused: DeterministicReconciler(),
+        event_sink=events.append,
+        now_ms=lambda: 1000,
+        sleep=lambda _: None,
+    )
+    monkeypatch.setattr(
+        store,
+        "save",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TypeError("result is not serializable")),
+    )
+
+    with pytest.raises(TypeError, match="result is not serializable"):
+        service._finish(
+            plan,
+            "completed",
+            "paired_target_completed",
+            [],
+            [],
+            Decimal("500"),
+            service._create_lanes(plan),
+            {},
+            1000,
+        )
+
+    assert not any(event.get("event") == "workflow_finished" for event in events)
 
 
 def test_external_lane_gateways_are_reused_and_not_closed_by_child_service(
@@ -2219,9 +2266,7 @@ def test_partial_open_is_reconciled_flat_then_next_cycle_continues(
     assert venues["ETH"].position == pytest.approx(0)
 
 
-def test_preflight_accepts_beta_changes_but_rejects_existing_exposure(
-    tmp_path, allocation: BetaAllocation
-) -> None:
+def test_preflight_accepts_beta_changes_but_rejects_existing_exposure(tmp_path, allocation: BetaAllocation) -> None:
     gateway = Gateway()
     plan = BetaVolumePlan.create(
         gateway,

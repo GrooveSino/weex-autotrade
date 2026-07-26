@@ -4,9 +4,8 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_campaign import BetaVolumeCampaign, campaign_confirmation
-from weex_cli.errors import SafetyError
-from weex_cli.gateway import WeexGateway
+from weex_cli.control_api.campaigns import BetaVolumeCampaign, campaign_confirmation
+from weex_cli.control_api.exchange import SafetyError, WeexGateway
 
 from fleet_api.campaigns.core.campaign_contracts import CampaignRecord
 from fleet_api.models import BetaCampaignStatus
@@ -27,6 +26,15 @@ def _preview_metadata(campaign: BetaVolumeCampaign, available: Decimal, readines
         ),
         "readiness": readiness,
         "phase": "planned",
+    }
+
+
+def _dust_close_policy(*, enabled: bool, max_quote: Decimal) -> dict[str, object]:
+    return {
+        "enabled": enabled,
+        "maxQuote": str(max_quote),
+        "stages": ["normal_close", "safe_stop"],
+        "marketCloseOnce": True,
     }
 
 

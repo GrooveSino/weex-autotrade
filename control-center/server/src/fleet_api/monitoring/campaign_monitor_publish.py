@@ -5,11 +5,11 @@ from __future__ import annotations
 from concurrent.futures import Future
 from typing import Any
 
-from weex_cli.execution_progress import EXECUTION_PROGRESS_PROJECTION_VERSION
+from weex_cli.control_api.progress import EXECUTION_PROGRESS_PROJECTION_VERSION
 
 from fleet_api.auth.ownership import LEGACY_OWNER_USER_ID
 from fleet_api.campaigns.core.campaign_contracts import CampaignRecord
-from fleet_api.campaigns.core.campaign_events import _publishes_fleet_snapshot
+from fleet_api.campaigns.core.event_projection import publishes_fleet_snapshot
 
 _COALESCED_EVENTS = frozenset({"leg_progress", "leg_waiting", "pair_wait_progress"})
 
@@ -62,5 +62,5 @@ def append_monitor_event_direct(manager: Any, record: CampaignRecord, event: dic
 def _publish_committed(manager: Any, record: CampaignRecord, event: dict[str, Any], sequence: int) -> None:
     event["sequence"] = sequence
     manager._notify_progress(record.instance_id, event)
-    if _publishes_fleet_snapshot(str(event["name"])):
+    if publishes_fleet_snapshot(str(event["name"])):
         manager._notify(record.instance_id)

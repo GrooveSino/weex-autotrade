@@ -264,16 +264,19 @@ def test_projector_carries_child_cycle_totals_across_campaign_runs() -> None:
 def test_projector_exposes_and_clears_hold_and_round_gap_countdowns() -> None:
     projector = ExecutionProgressProjector()
 
-    assert projector.apply(
-        {
-            "event": "hold_started",
-            "round": 1,
-            "seconds": "43.6",
-            "started_at_ms": 900,
-            "deadline_at_ms": 44_500,
-        },
-        at_ms=1_000,
-    ) is None
+    assert (
+        projector.apply(
+            {
+                "event": "hold_started",
+                "round": 1,
+                "seconds": "43.6",
+                "started_at_ms": 900,
+                "deadline_at_ms": 44_500,
+            },
+            at_ms=1_000,
+        )
+        is None
+    )
     hold = projector.active_waits["hold"]
     assert hold.label == "双边持仓计时"
     assert hold.remaining_ms == 43_600

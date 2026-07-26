@@ -18,7 +18,7 @@ def persist_condition_projection(manager: Any, record: Any, event: Mapping[str, 
                 next_condition_check_at_ms=fields.get("next_check_ms"),
             )
         )
-    elif name in {"condition_wait_resumed", "condition_wait_rehydrated"}:
+    elif name in {"condition_wait_resumed", "condition_wait_rehydrated", "owned_close_maker_retry_resumed"}:
         manager.write_coordinator.critical(
             lambda: manager.journal.update(
                 record.campaign_id,

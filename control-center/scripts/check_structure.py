@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,9 +18,7 @@ def source_files(root: Path) -> list[Path]:
     return sorted(
         path
         for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix in SOURCE_EXTENSIONS
-        and not EXCLUDED_PARTS.intersection(path.parts)
+        if path.is_file() and path.suffix in SOURCE_EXTENSIONS and not EXCLUDED_PARTS.intersection(path.parts)
     )
 
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from weex_cli.beta_allocation import BetaAllocation, BetaUnavailable
+from weex_cli.beta_campaign.allocation import BetaAllocation, BetaUnavailable
 from weex_cli.beta_volume import BetaVolumePlan, PairLegPlan
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext, CampaignPhaseEnvironment, OpenCycle
@@ -221,7 +221,7 @@ def test_each_attempt_freezes_the_latest_beta_without_mutating_the_authorized_pl
     )
     btc, eth = _plans()
     monkeypatch.setattr(
-        "fleet_api.campaigns.actors.campaign_actor_planning._size_cycle",
+        "fleet_api.campaigns.actors.campaign_actor_planning.size_cycle",
         lambda plan, _lanes, _desired, **_kwargs: (
             btc,
             eth,
@@ -241,7 +241,7 @@ def test_each_attempt_freezes_the_latest_beta_without_mutating_the_authorized_pl
 
 
 def test_actor_position_observation_rejects_non_finite_values() -> None:
-    from weex_cli.errors import SafetyError
+    from weex_cli.core.errors import SafetyError
 
     from fleet_api.campaigns.actors.campaign_actor_cycles import observe_positions
 
@@ -317,7 +317,7 @@ def test_partial_completed_attempt_advances_round_before_retrying_with_a_fresh_s
     )
     monkeypatch.setattr("fleet_api.campaigns.actors.campaign_actor_phases.positions_are_flat", lambda *_args: True)
     monkeypatch.setattr(
-        "fleet_api.campaigns.actors.campaign_actor_phases._terminal_reason",
+        "fleet_api.campaigns.actors.campaign_actor_phases.terminal_reason",
         lambda _stops: "post_only_rejected",
     )
     volume._refresh_pending_accounting = lambda *_args: None  # type: ignore[attr-defined]

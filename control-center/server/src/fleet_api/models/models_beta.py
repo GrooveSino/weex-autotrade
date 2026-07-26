@@ -90,9 +90,24 @@ class AccountTradeVolumePeriod(CamelModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AccountTradeVolumeProjection(CamelModel):
+    """Committed account-level totals returned after a manual history import."""
+
+    lifetime_quote_volume: Decimal = Field(ge=0)
+    today_quote_volume: Decimal = Field(ge=0)
+    source_complete: bool
+
+
 class AccountTradeVolumeReportResponse(CamelModel):
     periods: tuple[AccountTradeVolumePeriod, ...]
     generated_at_ms: int = Field(gt=0)
+    ledger_scanned_fill_count: int = Field(ge=0)
+    ledger_inserted_fill_count: int = Field(ge=0)
+    ledger_deduplicated_fill_count: int = Field(ge=0)
+    ledger_lifetime_quote_volume: Decimal = Field(ge=0)
+    ledger_today_quote_volume: Decimal = Field(ge=0)
+    ledger_source_complete: bool
+    account_volume: AccountTradeVolumeProjection
 
 
 class VolumeSessionResponse(CamelModel):

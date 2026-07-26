@@ -5,16 +5,16 @@ from pathlib import Path
 
 import pytest
 
-import weex_cli.beta_campaign_workflow as workflow_module
-from weex_cli.beta_allocation import BetaAllocation, BetaUnavailable
+import weex_cli.beta_campaign.workflow as workflow_module
 from weex_cli.beta_campaign import campaign_confirmation
-from weex_cli.beta_campaign_workflow import (
+from weex_cli.beta_campaign.allocation import BetaAllocation, BetaUnavailable
+from weex_cli.beta_campaign.workflow import (
     BetaCampaignApplication,
     CampaignPreviewRequest,
     CampaignRuntimePaths,
 )
-from weex_cli.config import Settings
-from weex_cli.errors import SafetyError, ValidationError
+from weex_cli.core.config import Settings
+from weex_cli.core.errors import SafetyError, ValidationError
 from weex_cli.live_profile import LiveProfile
 
 

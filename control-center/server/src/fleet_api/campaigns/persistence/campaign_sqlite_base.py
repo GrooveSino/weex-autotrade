@@ -7,9 +7,10 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from weex_cli.beta_campaign import BetaVolumeCampaign
+from weex_cli.control_api.campaigns import BetaVolumeCampaign
 
 from fleet_api.campaigns.core.campaign_contracts import ACTIVE_STATUSES, CampaignRecord, ExecutionMonitorProjection
+from fleet_api.campaigns.persistence.json_codec import compact_json
 from fleet_api.models import BetaCampaignStatus
 from fleet_api.services.control.service import UnsafeOperation
 
@@ -93,9 +94,9 @@ class SQLiteCampaignJournalBase:
                         (
                             campaign.campaign_id,
                             instance_id,
-                            json.dumps(campaign.as_dict(), separators=(",", ":")),
+                            compact_json(campaign.as_dict()),
                             BetaCampaignStatus.PLANNED.value,
-                            json.dumps(metadata, separators=(",", ":")),
+                            compact_json(metadata),
                             now_ms,
                             now_ms,
                         ),
@@ -206,8 +207,8 @@ class SQLiteCampaignJournalBase:
                 "updated_at_ms = ? WHERE campaign_id = ?",
                 (
                     status or current_status,
-                    json.dumps(merged, separators=(",", ":")),
-                    json.dumps(result, separators=(",", ":")) if result is not None else current_result,
+                    compact_json(merged),
+                    compact_json(result) if result is not None else current_result,
                     int(time.time() * 1000),
                     campaign_id.lower(),
                 ),
@@ -259,7 +260,7 @@ class SQLiteCampaignJournalBase:
                 "INSERT INTO account_boundary_projections(instance_id, state_json, updated_at_ms) VALUES (?, ?, ?) "
                 "ON CONFLICT(instance_id) DO UPDATE SET state_json = excluded.state_json, "
                 "updated_at_ms = excluded.updated_at_ms",
-                (instance_id, json.dumps(projection, separators=(",", ":")), int(time.time() * 1000)),
+                (instance_id, compact_json(projection), int(time.time() * 1000)),
             )
 
     def remove(self, instance_id: str) -> None:

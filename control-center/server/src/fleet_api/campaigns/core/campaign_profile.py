@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from weex_cli.config import Credentials, Settings
-from weex_cli.gateway import WeexGateway
-from weex_cli.live_profile import LiveProfile
+from weex_cli.control_api.exchange import Credentials, LiveProfile, Settings, WeexGateway
 
 from fleet_api.auth.vault import CredentialMaterial
 from fleet_api.campaigns.core.campaign_helpers import _normalize_proxy_url

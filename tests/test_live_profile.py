@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from weex_cli.errors import ConfigurationError, SafetyError
+from weex_cli.core.errors import ConfigurationError, SafetyError
 from weex_cli.live_profile import load_live_profile
 
 

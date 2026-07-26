@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from weex_cli.errors import ValidationError
-from weex_cli.models import OrderIntent, decimal_text, decimal_value
-from weex_cli.symbols import base_asset, ccxt_swap_symbol, demo_symbol_id, live_symbol_id
+from weex_cli.core.errors import ValidationError
+from weex_cli.core.models import OrderIntent, decimal_text, decimal_value
+from weex_cli.core.symbols import base_asset, ccxt_swap_symbol, demo_symbol_id, live_symbol_id
 
 
 @pytest.mark.parametrize("value", ["BTC", "BTCUSDT", "BTCSUSDT", "BTC/USDT:USDT", "btc-usdt"])

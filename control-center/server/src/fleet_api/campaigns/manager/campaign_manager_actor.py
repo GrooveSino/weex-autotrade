@@ -10,7 +10,7 @@ from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
-from weex_cli.beta_volume import BetaVolumePlanStore
+from weex_cli.control_api.volume import BetaVolumePlanStore
 
 from fleet_api.auth.vault import CredentialMaterial
 from fleet_api.campaigns.actors.campaign_actor_models import (
@@ -145,7 +145,7 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
 
     def _persist_actor_ownership(self, record: CampaignRecord, opened: Any, state: str) -> None:
         """Persist the execution-owned quantity before a later phase may fail."""
-        from weex_cli.beta_volume import _owned_position_quantity
+        from weex_cli.control_api.volume import owned_position_quantity
 
         legs: dict[str, dict[str, str]] = {}
         summaries = opened.context.summaries or opened.open_summaries
@@ -153,7 +153,7 @@ class CampaignActorRuntimeMixin(CampaignActorResourceMixin):
             legs[symbol] = {
                 "position_side": plan.position_side,
                 "planned_quantity": str(plan.quantity),
-                "owned_quantity": str(_owned_position_quantity(summaries, symbol, plan.position_side)),
+                "owned_quantity": str(owned_position_quantity(summaries, symbol, plan.position_side)),
                 "amount_step": str(plan.amount_step),
             }
         payload = {

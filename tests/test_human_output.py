@@ -5,7 +5,7 @@ from io import StringIO
 
 from rich.console import Console
 
-from weex_cli.human_output import TerminalExecutionProgress, render_human
+from weex_cli.presentation.human import TerminalExecutionProgress, render_human
 
 
 def rendered(payload) -> tuple[bool, str]:

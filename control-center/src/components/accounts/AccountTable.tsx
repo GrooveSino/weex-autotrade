@@ -21,6 +21,7 @@ interface AccountTableProps {
   onClosePositions: (account: AccountInstance) => void
   onEdit: (account: AccountInstance) => void
   onAssignStrategy: (account: AccountInstance) => void
+  onVolumeUpdated: (accountId: string, volume: { lifetime: number; today: number; complete: boolean }) => void
 }
 
 const currency = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -61,7 +62,7 @@ function historySyncLabel(account: AccountInstance): string {
   return `最近成交已落账 · ${relativeTime(sync.lastSuccessAtMs)}`
 }
 
-export function AccountTable({ accounts, selectedIds, refreshingIds, actioningIds, executionDisabled, boundStrategyExecutionEnabled, onSelect, onSelectAll, onToggleRunning, onOpenLogs, onOpenExecutions, onRefresh, onClosePositions, onEdit, onAssignStrategy }: AccountTableProps) {
+export function AccountTable({ accounts, selectedIds, refreshingIds, actioningIds, executionDisabled, boundStrategyExecutionEnabled, onSelect, onSelectAll, onToggleRunning, onOpenLogs, onOpenExecutions, onRefresh, onClosePositions, onEdit, onAssignStrategy, onVolumeUpdated }: AccountTableProps) {
   const [, setClockTick] = useState(0)
   const [tradeVolumeAccount, setTradeVolumeAccount] = useState<AccountInstance | null>(null)
   const allSelected = accounts.length > 0 && accounts.every((account) => selectedIds.has(account.id))
@@ -287,7 +288,7 @@ export function AccountTable({ accounts, selectedIds, refreshingIds, actioningId
         </tbody>
       </table>
       {accounts.length === 0 && <div className="empty-state"><RefreshCw size={20} /><span>当前筛选没有账号实例</span></div>}
-      {tradeVolumeAccount && <AccountTradeVolumeDialog account={tradeVolumeAccount} onClose={() => setTradeVolumeAccount(null)} />}
+      {tradeVolumeAccount && <AccountTradeVolumeDialog account={tradeVolumeAccount} onClose={() => setTradeVolumeAccount(null)} onVolumeUpdated={onVolumeUpdated} />}
     </div>
   )
 }

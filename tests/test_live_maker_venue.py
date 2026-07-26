@@ -5,7 +5,7 @@ from decimal import Decimal
 import ccxt
 import pytest
 
-from weex_cli.live_maker_venue import LiveAdaptiveMakerVenue
+from weex_cli.execution.venues import LiveAdaptiveMakerVenue
 from weex_cli.live_websocket import MarketStreamUnavailable
 
 

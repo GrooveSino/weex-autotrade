@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from weex_cli.config import Settings, normalize_mode
-from weex_cli.errors import ConfigurationError
+from weex_cli.core.config import Settings, normalize_mode
+from weex_cli.core.errors import ConfigurationError
 
 
 def test_settings_loads_canonical_credentials() -> None:

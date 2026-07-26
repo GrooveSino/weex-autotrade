@@ -5,8 +5,8 @@ from decimal import ROUND_DOWN, Decimal
 import ccxt
 import pytest
 
-from weex_cli.errors import ValidationError
-from weex_cli.maker_volume import MakerVolumePlan, MakerVolumeService, maker_volume_confirmation
+from weex_cli.core.errors import ValidationError
+from weex_cli.volume.maker import MakerVolumePlan, MakerVolumeService, maker_volume_confirmation
 
 
 class FakeClock:

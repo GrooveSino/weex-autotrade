@@ -6,7 +6,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from weex_cli.config import Credentials, Settings
+from weex_cli.core.config import Credentials, Settings
 from weex_cli.live_profile import LiveProfile
 
 import fleet_api.campaigns as campaigns_module

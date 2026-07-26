@@ -4,7 +4,7 @@ import re
 from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from weex_cli.execution_progress import condition_presentation, describe_execution_event
+from weex_cli.control_api.progress import condition_presentation, describe_execution_event
 
 from fleet_api.models import LogLevel
 
@@ -94,6 +94,10 @@ def _render_campaign_event_log(event: Mapping[str, object]) -> tuple[LogLevel, s
     if name == "condition_waiting":
         title, action = condition_presentation(value("condition"))
         return LogLevel.WARN, f"实盘执行：{title}。下一步：{action}"
+    if name == "owned_close_maker_retry":
+        return LogLevel.WARN, "实盘执行：本任务持有的仓位尚未平完，POST_ONLY 平仓报价暂不可成交；正在重新读取盘口。"
+    if name == "owned_close_maker_retry_resumed":
+        return LogLevel.INFO, "实盘执行：最新盘口已重新读取，正在以新的 Maker 报价继续平仓。"
     if name == "condition_wait_resumed":
         return LogLevel.SUCCESS, "实盘执行：执行条件已恢复；正在按最新 Beta 与行情生成下一轮。"
     if name == "cycle_preparing":

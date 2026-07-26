@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from weex_cli.beta_campaign import BetaVolumeCampaign
+from weex_cli.control_api.campaigns import BetaVolumeCampaign
 
 from fleet_api.models import BetaCampaignStatus
 from fleet_api.services.control.service import UnsafeOperation

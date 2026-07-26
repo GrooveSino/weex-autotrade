@@ -3,8 +3,8 @@ from concurrent.futures import Future
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
-from weex_cli.beta_allocation import BetaAllocation
 from weex_cli.beta_campaign import BetaVolumeCampaign
+from weex_cli.beta_campaign.allocation import BetaAllocation
 
 from fleet_api.accounts.repository import InMemoryAccountRepository
 from fleet_api.auth.vault import CredentialMaterial, EphemeralCredentialVault
@@ -46,7 +46,7 @@ class LivePreviewProvider:
         pass
 
     def get(self):
-        from weex_cli.beta_allocation import BetaAllocation
+        from weex_cli.beta_campaign.allocation import BetaAllocation
 
         return BetaAllocation(
             beta=Decimal("0.4"),
@@ -65,7 +65,7 @@ class UnavailableLivePreviewProvider:
         pass
 
     def get(self):
-        from weex_cli.beta_allocation import BetaUnavailable
+        from weex_cli.beta_campaign.allocation import BetaUnavailable
 
         raise BetaUnavailable("beta_request_failed:httperror")
 

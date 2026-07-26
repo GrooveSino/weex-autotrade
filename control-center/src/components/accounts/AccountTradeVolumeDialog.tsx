@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { BarChart3, Clock3, RefreshCw, ShieldCheck, X } from 'lucide-react'
-import type { AccountInstance, AccountTradeVolumePeriod } from '../../types'
+import type { AccountInstance, AccountTradeVolumePeriod, AccountTradeVolumeReport } from '../../types'
 import { fetchAccountTradeVolumeReport } from '../../services'
 
 interface AccountTradeVolumeDialogProps {
   account: AccountInstance
   onClose: () => void
+  onVolumeUpdated: (accountId: string, volume: { lifetime: number; today: number; complete: boolean }) => void
 }
 
 const quote = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 })
@@ -15,11 +16,12 @@ function rangeText(period: AccountTradeVolumePeriod): string {
   return `${format.format(period.startAtMs)} 至 ${format.format(period.endAtMs)}`
 }
 
-export function AccountTradeVolumeDialog({ account, onClose }: AccountTradeVolumeDialogProps) {
+export function AccountTradeVolumeDialog({ account, onClose, onVolumeUpdated }: AccountTradeVolumeDialogProps) {
   const [periods, setPeriods] = useState<AccountTradeVolumePeriod[]>([])
   const [loading, setLoading] = useState<'week' | 'month' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [generatedAtMs, setGeneratedAtMs] = useState<number | null>(null)
+  const [ledgerUpdate, setLedgerUpdate] = useState<AccountTradeVolumeReport | null>(null)
 
   const load = async (scope: 'week' | 'month') => {
     if (loading) return
@@ -33,6 +35,12 @@ export function AccountTradeVolumeDialog({ account, onClose }: AccountTradeVolum
         return [...next.values()].sort((left, right) => left.lookbackDays - right.lookbackDays)
       })
       setGeneratedAtMs(report.generatedAtMs)
+      setLedgerUpdate(report)
+      onVolumeUpdated(account.id, {
+        lifetime: Number(report.accountVolume.lifetimeQuoteVolume),
+        today: Number(report.accountVolume.todayQuoteVolume),
+        complete: report.accountVolume.sourceComplete,
+      })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '近期交易量暂时无法统计。请检查账号代理和 API 只读权限后重试。')
     } finally {
@@ -44,11 +52,11 @@ export function AccountTradeVolumeDialog({ account, onClose }: AccountTradeVolum
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="dialog trade-volume-dialog" role="dialog" aria-modal="true" aria-labelledby="trade-volume-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
-          <div><h2 id="trade-volume-title">近期交易量</h2><span>{account.name} · 只读统计</span></div>
+          <div><h2 id="trade-volume-title">近期交易量</h2><span>{account.name} · 成交账本更新</span></div>
           <button className="icon-button" type="button" onClick={onClose} data-tooltip="关闭" aria-label="关闭"><X size={16} /></button>
         </header>
         <div className="trade-volume-report-body">
-          <div className="trade-volume-intro"><ShieldCheck size={16} /><span>按 WEEX 实际成交 `quoteQty` 汇总；不会修改策略、仓位、挂单或成交账本。</span></div>
+          <div className="trade-volume-intro"><ShieldCheck size={16} /><span>按 WEEX 实际成交金额汇总并去重写入累计交易量；不会修改策略、仓位或挂单。</span></div>
           <div className="trade-volume-actions">
             <button className="button" type="button" disabled={loading !== null} onClick={() => void load('week')}>
               {loading === 'week' ? <RefreshCw className="spin" size={15} /> : <BarChart3 size={15} />}统计最近 7 天
@@ -58,7 +66,13 @@ export function AccountTradeVolumeDialog({ account, onClose }: AccountTradeVolum
             </button>
           </div>
           {error && <div className="execution-warning" role="alert">{error}</div>}
-          {periods.length === 0 && !error && <div className="trade-volume-empty">选择一个统计周期后，系统会通过该账号自身的代理与 API 凭据读取已成交历史。</div>}
+          {ledgerUpdate && (
+            <div className="trade-volume-intro">
+              <ShieldCheck size={16} />
+              <span>已核验 {ledgerUpdate.ledgerScannedFillCount} 笔；新增 {ledgerUpdate.ledgerInsertedFillCount} 笔，跳过重复 {ledgerUpdate.ledgerDeduplicatedFillCount} 笔。账号列表累计交易量已更新为 {quote.format(Number(ledgerUpdate.accountVolume.lifetimeQuoteVolume))} USDT，今日 {quote.format(Number(ledgerUpdate.accountVolume.todayQuoteVolume))} USDT。</span>
+            </div>
+          )}
+          {periods.length === 0 && !error && <div className="trade-volume-empty">选择统计周期后，系统会通过该账号自身的代理读取成交历史，核验并去重写入累计交易量。</div>}
           {periods.map((period) => (
             <article className="trade-volume-period" key={period.lookbackDays}>
               <div><strong>近 {period.lookbackDays} 天</strong><span>{rangeText(period)}</span></div>

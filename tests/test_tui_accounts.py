@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from weex_cli.errors import ConfigurationError
-from weex_cli.tui_accounts import (
+from weex_cli.core.errors import ConfigurationError
+from weex_cli.tui.accounts import (
     DEFAULT_ACCOUNT_FILE,
     AccountInUseError,
     AccountLease,

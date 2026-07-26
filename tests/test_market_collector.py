@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from weex_cli.errors import ValidationError
-from weex_cli.market_collector import (
+from weex_cli.core.errors import ValidationError
+from weex_cli.market import (
     MarketCollector,
     Tick,
     TickStore,

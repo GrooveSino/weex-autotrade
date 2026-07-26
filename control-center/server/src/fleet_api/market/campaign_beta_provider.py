@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import DecimalException, localcontext
 from typing import Protocol
 
-from weex_cli.beta_allocation import BetaAllocation
+from weex_cli.control_api.allocation import BetaAllocation
 
 from fleet_api.execution import AllocationUnavailable
 from fleet_api.market.beta_source import BetaSourceRuntime

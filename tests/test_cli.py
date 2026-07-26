@@ -9,9 +9,12 @@ from typer._click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from weex_cli.cli import app
-from weex_cli.commands import account, home, maker_cli, market, order, orders, risk, trades
-from weex_cli.config import Settings
-from weex_cli.i18n import set_language
+from weex_cli.commands import home
+from weex_cli.commands.read import account, market, orders, trades
+from weex_cli.commands.trade import order, risk
+from weex_cli.commands.workflows import maker_cli
+from weex_cli.core.config import Settings
+from weex_cli.presentation.i18n import set_language
 
 runner = CliRunner()
 

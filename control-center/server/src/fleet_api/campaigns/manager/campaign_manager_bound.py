@@ -5,8 +5,8 @@ from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_allocation import BetaUnavailable
-from weex_cli.beta_campaign import (
+from weex_cli.control_api.allocation import BetaUnavailable
+from weex_cli.control_api.campaigns import (
     BetaVolumeCampaign,
     BetaVolumeCampaignStore,
     inspect_live_account,

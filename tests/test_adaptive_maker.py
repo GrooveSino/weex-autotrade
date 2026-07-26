@@ -4,8 +4,9 @@ from dataclasses import dataclass, replace
 
 import pytest
 
-from weex_cli.adaptive_executor import TargetRequest, VenueOrder, execute_adaptive_maker_target
-from weex_cli.adaptive_maker import (
+from weex_cli.core.errors import ValidationError
+from weex_cli.execution.adaptive import TargetRequest, VenueOrder, execute_adaptive_maker_target
+from weex_cli.execution.adaptive_maker import (
     AdaptiveMakerPolicy,
     MakerPolicyConfig,
     MarketSnapshot,
@@ -13,9 +14,8 @@ from weex_cli.adaptive_maker import (
     Side,
     WorkingQuote,
 )
-from weex_cli.errors import ValidationError
-from weex_cli.maker_benchmark import BenchmarkConfig, run_benchmark, run_trial
-from weex_cli.maker_simulator import SimulatedMakerVenue, SimulationConfig
+from weex_cli.execution.maker_simulator import SimulatedMakerVenue, SimulationConfig
+from weex_cli.reporting.benchmark import BenchmarkConfig, run_benchmark, run_trial
 
 
 def snapshot(*, timestamp_ms: int = 1000, bid: float = 100, ask: float = 100.2) -> MarketSnapshot:

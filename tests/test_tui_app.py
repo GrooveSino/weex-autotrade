@@ -9,9 +9,9 @@ import pytest
 from textual.widgets import Static
 
 from weex_cli.beta_campaign import live_profile_fingerprint
-from weex_cli.beta_campaign_workflow import CampaignPreviewRequest, CampaignRuntimePaths
-from weex_cli.tui_accounts import AccountLease, TuiAccount, TuiAccountCatalog, TuiSafety
-from weex_cli.tui_app import (
+from weex_cli.beta_campaign.workflow import CampaignPreviewRequest, CampaignRuntimePaths
+from weex_cli.tui.accounts import AccountLease, TuiAccount, TuiAccountCatalog, TuiSafety
+from weex_cli.tui.app import (
     AccountOverviewScreen,
     AccountSelectionScreen,
     CampaignFormScreen,

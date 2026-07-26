@@ -7,7 +7,7 @@ import hmac
 import pytest
 
 from weex_cli import live_websocket
-from weex_cli.config import Credentials
+from weex_cli.core.config import Credentials
 from weex_cli.live_websocket import (
     MarketStreamUnavailable,
     WeexPrivateOrderStream,

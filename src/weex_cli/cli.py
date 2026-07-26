@@ -8,28 +8,19 @@ import typer
 
 from weex_cli import __version__
 from weex_cli.cli_support import AppContext, gateway_for, invoke, selected_mode, settings_for
-from weex_cli.commands import (
-    account,
-    config_cmd,
-    home,
-    live,
-    maker_cli,
-    market,
-    order,
-    orders,
-    risk,
-    trades,
-    tui,
-    volume,
-)
-from weex_cli.i18n import (
+from weex_cli.commands import config_cmd, home, tui
+from weex_cli.commands.live import cli as live
+from weex_cli.commands.read import account, market, orders, trades
+from weex_cli.commands.trade import order, risk
+from weex_cli.commands.workflows import maker_cli, volume
+from weex_cli.presentation.i18n import (
     current_language,
     install_typer_i18n,
     localize_typer_app,
     set_language,
     text,
 )
-from weex_cli.output import emit
+from weex_cli.presentation.output import emit
 
 install_typer_i18n()
 

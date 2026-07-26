@@ -8,16 +8,15 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_volume import (
+from weex_cli.control_api.exchange import SafetyError, decimal_text
+from weex_cli.control_api.volume import (
+    ExecutionLane,
     LiveBetaVolumeService,
     PairLegPlan,
-    _accounting_summary,
-    _Lane,
-    _owned_position_quantity,
-    _signed_open_quantity,
+    accounting_summary,
+    owned_position_quantity,
+    signed_open_quantity,
 )
-from weex_cli.errors import SafetyError
-from weex_cli.models import decimal_text
 
 from fleet_api.campaigns.actors.campaign_actor_models import OpenCycle
 
@@ -28,7 +27,7 @@ def sampled_delay(minimum: float, maximum: float) -> float:
 
 def observe_positions(
     service: LiveBetaVolumeService,
-    lanes: Mapping[str, _Lane],
+    lanes: Mapping[str, ExecutionLane],
     round_number: int,
     *,
     action: str = "cycle_check",
@@ -69,8 +68,8 @@ def targets_reached(
     eth_plan: PairLegPlan,
 ) -> bool:
     expected = {
-        "BTC": Decimal(str(_signed_open_quantity(btc_plan))),
-        "ETH": Decimal(str(_signed_open_quantity(eth_plan))),
+        "BTC": Decimal(str(signed_open_quantity(btc_plan))),
+        "ETH": Decimal(str(signed_open_quantity(eth_plan))),
     }
     tolerances = {"BTC": btc_plan.amount_step / 2, "ETH": eth_plan.amount_step / 2}
     return all(
@@ -90,9 +89,27 @@ def positions_are_flat(
     )
 
 
+def owned_positions_match_cycle(positions: Mapping[str, Decimal | None], opened: OpenCycle) -> bool:
+    """Only retry a close when the observed exposure still matches this cycle."""
+    plans = {"BTC": opened.btc_plan, "ETH": opened.eth_plan}
+    legs = opened.open_summaries + opened.close_summaries
+    for symbol, plan in plans.items():
+        observed = positions.get(symbol)
+        if observed is None:
+            return False
+        owned = owned_position_quantity(legs, symbol, plan.position_side)
+        tolerance = plan.amount_step / 2
+        expected_sign = Decimal(str(signed_open_quantity(plan)))
+        if abs(observed) <= tolerance:
+            continue
+        if owned <= 0 or observed * expected_sign <= 0 or abs(observed) > owned + tolerance:
+            return False
+    return True
+
+
 def close_lanes(
     service: LiveBetaVolumeService,
-    lanes: Mapping[str, _Lane],
+    lanes: Mapping[str, ExecutionLane],
     opened: OpenCycle,
     stops: dict[str, tuple[str, str]],
 ) -> list[dict[str, Any]]:
@@ -128,7 +145,7 @@ def close_lanes(
                     offset,
                     plans[symbol],
                     lanes[symbol],
-                    owned_quantity=_owned_position_quantity(
+                    owned_quantity=owned_position_quantity(
                         opened.open_summaries,
                         symbol,
                         plans[symbol].position_side,
@@ -150,7 +167,7 @@ def close_lanes(
 
 def safe_stop(
     service: LiveBetaVolumeService,
-    lanes: Mapping[str, _Lane],
+    lanes: Mapping[str, ExecutionLane],
     opened: OpenCycle,
 ) -> dict[str, Any]:
     """Use the emergency I/O stage to converge only the current cycle's legs."""
@@ -160,7 +177,7 @@ def safe_stop(
             lanes,
             opened.preflight,
             opened.context.execution_started_at_ms,
-            summaries=opened.context.summaries + opened.open_summaries,
+            summaries=opened.context.summaries + opened.open_summaries + opened.close_summaries,
             cycles=opened.context.cycles,
             total_quote=opened.context.child_total_quote,
             round_number=opened.context.round_number,
@@ -200,7 +217,7 @@ def cycle_record(
         "round_gap_seconds": round_gap_seconds,
         "flat": flat,
         "positions": {key: None if value is None else decimal_text(value) for key, value in positions.items()},
-        "accounting": _accounting_summary(legs),
+        "accounting": accounting_summary(legs),
         "elapsed_ms": elapsed_ms,
         "legs": legs,
     }

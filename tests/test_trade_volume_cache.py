@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from weex_cli.trade_volume_cache import (
+from weex_cli.reporting.trade_volume import (
     DEMO_PAGE_LIMIT,
     DemoTradeVolumeSyncService,
     SQLiteTradeVolumeLedger,

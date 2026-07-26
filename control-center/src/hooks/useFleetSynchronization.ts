@@ -20,6 +20,7 @@ export function useFleetSynchronization(state: FleetState) {
     accounts, setAccounts, search, filter, setStrategies, toast, setToast,
     localUser, setLocalUser, setLocalUserError, setLocalUserLoading,
     setControlPlaneConnected, setControlPlaneAdapter, setControlPlaneExecutionEnabled,
+    setServiceReleaseId,
     setBoundStrategyExecutionEnabled, setInitialControlPlaneError,
     setExecutionCapacity,
     setInitialControlPlaneSnapshotLoaded, setSchedulerMetrics, setLastGlobalSync,
@@ -141,6 +142,7 @@ export function useFleetSynchronization(state: FleetState) {
         setStrategies(availableStrategies)
         setControlPlaneConnected(true)
         setControlPlaneAdapter(health.adapter)
+        setServiceReleaseId(health.apiReleaseId ?? null)
         setControlPlaneExecutionEnabled(health.executionEnabled)
         setBoundStrategyExecutionEnabled(health.boundStrategyExecutionEnabled)
         setExecutionCapacity({
@@ -204,7 +206,7 @@ export function useFleetSynchronization(state: FleetState) {
     }
   }, [localUser, setAccounts, setBoundStrategyExecutionEnabled, setControlPlaneAdapter,
     setControlPlaneConnected, setControlPlaneExecutionEnabled, setInitialControlPlaneError,
-    setExecutionCapacity, setInitialControlPlaneSnapshotLoaded, setLastGlobalSync, setStrategies, setToast])
+    setExecutionCapacity, setInitialControlPlaneSnapshotLoaded, setLastGlobalSync, setServiceReleaseId, setStrategies, setToast])
 
   useEffect(() => {
     if (!controlPlaneEnabled || !localUser) return

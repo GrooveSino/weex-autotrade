@@ -6,7 +6,7 @@ import threading
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 
-from weex_cli.beta_volume import BetaVolumePlanStore
+from weex_cli.control_api.volume import BetaVolumePlanStore
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext
 from fleet_api.campaigns.core.campaign_contracts import CampaignRecord, _AccountLease

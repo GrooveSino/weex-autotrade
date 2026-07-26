@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from weex_cli.beta_allocation import HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider  # noqa: F401
+from weex_cli.control_api.allocation import (
+    HttpBetaAllocationProvider as LiveCampaignBetaAllocationProvider,  # noqa: F401
+)
 
 from fleet_api.bootstrap.main_bootstrap import build_context, finish_context
 from fleet_api.bootstrap.main_campaign_lifecycle import install_campaign_lifecycle

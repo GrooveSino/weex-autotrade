@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_volume import _LegSpec, _signed_open_quantity
-from weex_cli.models import decimal_text
+from weex_cli.control_api.exchange import decimal_text
+from weex_cli.control_api.volume import CycleLegSpec, signed_open_quantity
 
 
 def open_pair(
@@ -37,18 +37,18 @@ def open_pair(
         leverage=plan.leverage,
     )
     specs = {
-        "BTC": _LegSpec(
+        "BTC": CycleLegSpec(
             btc_plan,
             "open",
             btc_plan.opening_side,
-            _signed_open_quantity(btc_plan),
+            signed_open_quantity(btc_plan),
             f"{plan.plan_id}-r{round_number:03d}-bo",
         ),
-        "ETH": _LegSpec(
+        "ETH": CycleLegSpec(
             eth_plan,
             "open",
             eth_plan.opening_side,
-            _signed_open_quantity(eth_plan),
+            signed_open_quantity(eth_plan),
             f"{plan.plan_id}-r{round_number:03d}-eo",
         ),
     }

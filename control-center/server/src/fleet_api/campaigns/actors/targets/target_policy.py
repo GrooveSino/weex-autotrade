@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.models import decimal_text
+from weex_cli.control_api.exchange import decimal_text
 
 from fleet_api.campaigns.actors.campaign_actor_models import CampaignActorContext
 from fleet_api.strategy.strategy import target_tolerance_quote

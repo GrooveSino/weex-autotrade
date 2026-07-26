@@ -6,13 +6,14 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from weex_cli.beta_campaign import BetaVolumeCampaign
+from weex_cli.control_api.campaigns import BetaVolumeCampaign
 
 from fleet_api.campaigns.actors.campaign_actor_models import (
     CampaignActorContext,
     CloseCycle,
     CycleConditionError,
     OpenCycle,
+    _actor_terminal_phase,
 )
 from fleet_api.campaigns.actors.campaign_actor_phases import CampaignActorPhases
 from fleet_api.campaigns.actors.conditions.condition_waiter import (
@@ -21,13 +22,10 @@ from fleet_api.campaigns.actors.conditions.condition_waiter import (
     wait_for_open_conditions,
     wait_for_shared_market,
 )
+from fleet_api.campaigns.actors.conditions.owned_close_retry import retry_owned_close
 from fleet_api.campaigns.core.campaign_helpers import _worker_exception_reason
 from fleet_api.execution.resources.market_data_hub import PublicMarketSnapshotService
 from fleet_api.execution.runtime.async_execution_orchestrator import ExecutionActor
-
-ResultSink = Callable[[dict[str, Any]], None]
-FailureSink = Callable[[Exception], None]
-EventSink = Callable[[dict[str, Any]], None]
 
 
 class CampaignActorProgram:
@@ -40,9 +38,9 @@ class CampaignActorProgram:
         *,
         proxy_key: str,
         shared_market: PublicMarketSnapshotService,
-        on_result: ResultSink,
-        on_failure: FailureSink,
-        on_event: EventSink,
+        on_result: Callable[[dict[str, Any]], None],
+        on_failure: Callable[[Exception], None],
+        on_event: Callable[[dict[str, Any]], None],
         resume_context: CampaignActorContext | None = None,
     ) -> None:
         self._campaign = campaign
@@ -108,11 +106,19 @@ class CampaignActorProgram:
                         },
                     )
                 outcome = await self._close(actor, opened)
+                outcome = (
+                    await retry_owned_close(
+                        actor,
+                        opened,
+                        outcome,
+                        close=self._close,
+                        emit_event=lambda event: self._emit_event(actor, event),
+                    )
+                    if outcome is not None
+                    else None
+                )
                 if outcome is None:
-                    # A stop can arrive after both opening legs have been
-                    # verified but before the normal close slot is admitted.
-                    # Keep the cycle context so safe_stop can cancel orders
-                    # and maker-close any real residual exposure.
+                    # Preserve verified exposure so a stop can safely close it.
                     await self._finish_stopped(actor, context, opened)
                     return
                 opened = None
@@ -127,7 +133,7 @@ class CampaignActorProgram:
                     return
                 if outcome.round_gap_seconds > 0:
                     completed_round = context.round_number - 1
-                    gap_started_at_ms = outcome.round_gap_started_at_ms or _now_ms()
+                    gap_started_at_ms = outcome.round_gap_started_at_ms or time.time_ns() // 1_000_000
                     deadline = gap_started_at_ms + int(outcome.round_gap_seconds * 1_000)
                     if not await actor.sleep_until(deadline, phase="holding", reason="round_gap"):
                         await self._finish_stopped(actor, context, None)
@@ -281,8 +287,16 @@ class CampaignActorProgram:
         await self._finish_stopped(actor, context, None, fallback_reason=reason)
 
     async def _deliver(self, actor: ExecutionActor, result: dict[str, Any], phase: str) -> None:
-        await actor.run_blocking(self._on_result, result)
         actor.transition(phase, reason=str(result.get("reason") or None))
+        try:
+            await actor.run_blocking(self._on_result, result)
+        except Exception as exc:
+            # The exchange-side final result is already durable at this point.
+            # A control-plane projection failure must never re-enter safe-stop.
+            await self._emit_event(
+                actor,
+                {"event": "terminal_result_projection_failed", "phase": phase, "error": type(exc).__name__},
+            )
 
     async def _emit_event(self, actor: ExecutionActor, event: dict[str, Any]) -> None:
         try:
@@ -327,14 +341,5 @@ class CampaignActorProgram:
         return self._resume_context
 
 
-def _now_ms() -> int:
-    return time.time_ns() // 1_000_000
-
-
 async def _no_conditions() -> None:
     return
-
-
-def _actor_terminal_phase(result: dict[str, Any]) -> str:
-    status = str(result.get("status") or "stopped")
-    return "recovering" if status == "uncertain" else "completed" if status == "completed" else "stopped"

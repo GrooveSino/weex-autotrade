@@ -11,7 +11,6 @@ from rich.console import Console
 from typer._click.utils import strip_ansi
 from typer.testing import CliRunner
 
-from weex_cli.beta_allocation import BetaAllocation
 from weex_cli.beta_campaign import (
     BetaVolumeCampaign,
     BetaVolumeCampaignStore,
@@ -20,13 +19,14 @@ from weex_cli.beta_campaign import (
     campaign_execute_command,
     campaign_id_from_confirmation,
 )
+from weex_cli.beta_campaign.allocation import BetaAllocation
 from weex_cli.beta_volume import BetaVolumePlanStore
 from weex_cli.cli import app
-from weex_cli.commands import live
-from weex_cli.config import Settings
-from weex_cli.errors import SafetyError, ValidationError
-from weex_cli.human_output import render_execution_event, render_human
+from weex_cli.commands.live import beta_campaign as live_beta_campaign
+from weex_cli.core.config import Settings
+from weex_cli.core.errors import SafetyError, ValidationError
 from weex_cli.live_profile import LiveProfile
+from weex_cli.presentation.human import render_execution_event, render_human
 
 runner = CliRunner()
 
@@ -526,10 +526,9 @@ def test_cli_uses_one_short_confirmation_and_keeps_live_environment_gate(
         allow_live_mutations=True,
         post_only_only=True,
     )
-    monkeypatch.setattr(live, "profile_for", lambda ctx: profile)
-    monkeypatch.setattr(live, "settings_for", lambda ctx: settings)
-    monkeypatch.setattr(live, "gateway_for", lambda ctx: Gateway())
-    monkeypatch.setattr(live, "HttpBetaAllocationProvider", lambda url: Provider(allocation))
+    monkeypatch.setattr(live_beta_campaign, "profile_for", lambda ctx: profile)
+    monkeypatch.setattr(live_beta_campaign, "gateway_for", lambda ctx: Gateway())
+    monkeypatch.setattr(live_beta_campaign, "HttpBetaAllocationProvider", lambda url: Provider(allocation))
     campaign_directory = tmp_path / "campaigns"
     child_directory = tmp_path / "children"
 

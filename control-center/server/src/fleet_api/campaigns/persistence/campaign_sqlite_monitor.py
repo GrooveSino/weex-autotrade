@@ -4,9 +4,10 @@ import json
 import time
 from typing import Any
 
-from weex_cli.execution_progress import ExecutionProgressProjector
+from weex_cli.control_api.progress import ExecutionProgressProjector
 
 from fleet_api.campaigns.core.campaign_contracts import ExecutionMonitorProjection
+from fleet_api.campaigns.persistence.json_codec import compact_json
 from fleet_api.services.control.service import UnsafeOperation
 
 
@@ -23,7 +24,7 @@ class SQLiteCampaignJournalMonitorMixin:
                     (
                         campaign_id.lower(),
                         sequence,
-                        json.dumps(stored_event, separators=(",", ":")),
+                        compact_json(stored_event),
                         int(time.time() * 1000),
                     ),
                 )
@@ -66,7 +67,7 @@ class SQLiteCampaignJournalMonitorMixin:
                     raise UnsafeOperation("execution monitor owner mismatch")
                 sequence = self._reserve_sequence(normalized_campaign_id)
                 stored_event = {**event, "sequence": sequence}
-                event_json = json.dumps(stored_event, separators=(",", ":"))
+                event_json = compact_json(stored_event)
                 projected_state = state
                 if projected_state is None:
                     projector = ExecutionProgressProjector.from_snapshot(
@@ -74,7 +75,7 @@ class SQLiteCampaignJournalMonitorMixin:
                     )
                     projector.apply(stored_event, at_ms=int(stored_event.get("at_ms") or 0))
                     projected_state = projector.snapshot()
-                state_json = json.dumps(projected_state, separators=(",", ":"))
+                state_json = compact_json(projected_state)
                 now_ms = int(event.get("at_ms") or time.time() * 1000)
                 self._connection.execute(
                     "INSERT INTO beta_campaign_events(campaign_id, sequence, payload, created_at_ms) "
@@ -115,7 +116,7 @@ class SQLiteCampaignJournalMonitorMixin:
                 }
                 self._connection.execute(
                     "UPDATE beta_campaigns SET metadata_json = ?, updated_at_ms = ? WHERE campaign_id = ?",
-                    (json.dumps(metadata, separators=(",", ":")), now_ms, normalized_campaign_id),
+                    (compact_json(metadata), now_ms, normalized_campaign_id),
                 )
             except Exception:
                 self._connection.rollback()
@@ -184,7 +185,7 @@ class SQLiteCampaignJournalMonitorMixin:
                     projection.executor_generation,
                     projection.projected_sequence,
                     projection.projection_version,
-                    json.dumps(projection.state, separators=(",", ":")),
+                    compact_json(projection.state),
                     projection.updated_at_ms,
                 ),
             )

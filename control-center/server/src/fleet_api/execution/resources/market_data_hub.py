@@ -8,9 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from weex_cli.config import Credentials, Settings
-from weex_cli.gateway import WeexGateway
-from weex_cli.live_websocket import WeexPublicOrderBookStream
+from weex_cli.control_api.exchange import Credentials, Settings, WeexGateway
+from weex_cli.control_api.streams import WeexPublicOrderBookStream
 
 _REST_FALLBACK_INTERVAL_SECONDS = 0.5
 

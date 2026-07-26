@@ -2,12 +2,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from pydantic import SecretStr
-from weex_cli.beta_allocation import BetaAllocation, BetaUnavailable
 from weex_cli.beta_campaign import (
     BetaVolumeCampaign,
     campaign_confirmation,
 )
-from weex_cli.config import Credentials, Settings
+from weex_cli.beta_campaign.allocation import BetaAllocation, BetaUnavailable
+from weex_cli.core.config import Credentials, Settings
 from weex_cli.live_profile import LiveProfile
 
 from fleet_api.config.config import ControlPlaneSettings

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from weex_cli.config import Settings
-from weex_cli.errors import SafetyError
-from weex_cli.models import OrderIntent
-from weex_cli.redaction import redact, redact_text
-from weex_cli.safety import action_confirmation, order_confirmation, require_execution
+from weex_cli.core.config import Settings
+from weex_cli.core.errors import SafetyError
+from weex_cli.core.models import OrderIntent
+from weex_cli.core.redaction import redact, redact_text
+from weex_cli.core.safety import action_confirmation, order_confirmation, require_execution
 
 
 def _intent(mode: str = "demo") -> OrderIntent:

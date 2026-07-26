@@ -23,7 +23,7 @@ from ..support.test_api_support import (
 def test_bound_strategy_preview_archives_incomplete_recovery_without_blocking_restart(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(
@@ -109,7 +109,7 @@ def test_bound_strategy_preview_archives_incomplete_recovery_without_blocking_re
 def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailable(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(
@@ -152,7 +152,7 @@ def test_bound_strategy_preview_returns_503_when_final_beta_source_is_unavailabl
 def test_reassigning_a_shared_strategy_invalidates_old_planned_preview(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(
@@ -214,7 +214,7 @@ def test_reassigning_a_shared_strategy_invalidates_old_planned_preview(
 def test_shared_strategy_update_is_rejected_while_bound_execution_is_active(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(

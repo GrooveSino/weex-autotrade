@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from weex_cli.config import Mode, normalize_mode
-from weex_cli.errors import ValidationError
-from weex_cli.gateway import WeexGateway
-from weex_cli.models import decimal_text
-from weex_cli.symbols import demo_symbol_id, live_symbol_id
+from weex_cli.core.config import Mode, normalize_mode
+from weex_cli.core.errors import ValidationError
+from weex_cli.core.models import decimal_text
+from weex_cli.core.symbols import demo_symbol_id, live_symbol_id
+from weex_cli.exchange.rest.gateway import WeexGateway
 
 DAY_MS = 24 * 60 * 60 * 1000
 LIVE_WINDOW_MS = 7 * DAY_MS

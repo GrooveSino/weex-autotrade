@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Mapping
 from contextlib import suppress
@@ -8,7 +7,12 @@ from decimal import Decimal
 from typing import Any
 
 from fleet_api.campaigns.core.campaign_contracts import CampaignRecord
-from fleet_api.campaigns.core.campaign_helpers import _reconciliation_confirmation, _reconciliation_required
+from fleet_api.campaigns.core.campaign_helpers import (
+    _dust_close_policy,
+    _reconciliation_confirmation,
+    _reconciliation_required,
+)
+from fleet_api.campaigns.core.event_projection import safe_event_text
 from fleet_api.models import BetaCampaignEvent, BetaCampaignView
 from fleet_api.services.control.service import ValidationFailed
 
@@ -46,7 +50,10 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "beta_version",
     }
     decimal_fields = {
-        "remaining_quote", "target_quote", "shortfall_quote", "tolerance_quote",
+        "remaining_quote",
+        "target_quote",
+        "shortfall_quote",
+        "tolerance_quote",
         "total_quote",
         "child_quote",
         "seconds",
@@ -106,7 +113,7 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
             fields["leg_sequence"] = int(payload["sequence"])
     for key in text_fields:
         if payload.get(key) is not None:
-            fields[key] = _safe_event_text(payload[key], limit=96)
+            fields[key] = safe_event_text(payload[key], limit=96)
     for key in decimal_fields:
         if payload.get(key) is None:
             continue
@@ -129,82 +136,12 @@ def _sanitize_event(payload: dict[str, Any]) -> dict[str, Any]:
     for key in ("symbols", "active_symbols", "completed_symbols"):
         values = payload.get(key)
         if isinstance(values, (list, tuple)):
-            fields[key] = [_safe_event_text(value, limit=16) for value in values[:2]]
+            fields[key] = [safe_event_text(value, limit=16) for value in values[:2]]
     if payload.get("error"):
-        fields["error"] = _safe_event_text(payload["error"], limit=80)
+        fields["error"] = safe_event_text(payload["error"], limit=80)
     event["fields"] = fields
     event["message"] = name.replace("_", " ")[:240]
     return event
-
-
-_SAFE_EVENT_TEXT = re.compile(r"[^A-Za-z0-9._:/+\- ]+")
-
-
-def _safe_event_text(value: object, *, limit: int) -> str:
-    return _SAFE_EVENT_TEXT.sub("", str(value)).strip()[:limit]
-
-
-def _phase_for_event(name: str) -> str:
-    if name.startswith("safe_stop"):
-        return "safe_stop"
-    if "planning" in name:
-        return "planning"
-    if name.startswith("condition_wait"):
-        return "condition_waiting"
-    if "run_started" in name:
-        return "opening"
-    if name.startswith("phase_pacing"):
-        return "phase_pacing"
-    if "run_completed" in name:
-        return "reconciled"
-    if "boundary" in name:
-        return "boundary"
-    if "finished" in name:
-        return "finished"
-    if "retry" in name:
-        return "recovery"
-    return name[:64]
-
-
-def _publishes_fleet_snapshot(name: str) -> bool:
-    return name in {
-        "campaign_boundary_completed",
-        "campaign_child_planning_completed",
-        "campaign_run_started",
-        "campaign_run_completed",
-        "preflight_completed",
-        "preflight_rejected",
-        "cycle_started",
-        "cycle_plan_created",
-        "cycle_completed",
-        "cycle_stopped",
-        # These are low-frequency, fill-reconciled state changes.  Publishing
-        # them makes the account table follow the same durable monitor
-        # projection without broadcasting the 125ms maker-wait heartbeats.
-        "leg_completed",
-        "leg_stopped",
-        "leg_uncertain",
-        "hold_started",
-        "hold_completed",
-        "round_gap_started",
-        "round_gap_completed",
-        "final_acceptance_completed",
-        "workflow_finished",
-        "campaign_finished",
-        "campaign_uncertain",
-        "campaign_recovering",
-        "launch_aborted",
-        "phase_pacing_started",
-        "phase_pacing_completed",
-        "phase_pacing_cancelled",
-        "condition_waiting",
-        "condition_wait_resumed",
-        "dust_close_detected",
-        "market_close_intent_persisted",
-        "market_close_accepted",
-        "market_close_verified",
-        "market_close_uncertain",
-    }
 
 
 def submission_attempted(record: CampaignRecord) -> bool:
@@ -279,12 +216,10 @@ def _view(record: CampaignRecord | None, *, include_events: bool = True) -> Beta
         ),
         leverage=campaign.leverage,
         margin_mode=campaign.margin_mode,
-        dust_close_policy={
-            "enabled": campaign.schema_version >= 5,
-            "maxQuote": str(campaign.dust_close_max_quote),
-            "stages": ["normal_close", "safe_stop"],
-            "marketCloseOnce": True,
-        },
+        dust_close_policy=_dust_close_policy(
+            enabled=campaign.schema_version >= 5,
+            max_quote=campaign.dust_close_max_quote,
+        ),
         target_quote=campaign.target_turnover_quote,
         round_turnover_quote_min=campaign.round_turnover_quote_min,
         cycle_volume=campaign.round_turnover_quote,

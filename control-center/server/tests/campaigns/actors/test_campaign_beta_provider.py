@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from weex_cli.beta_allocation import BetaAllocation
+from weex_cli.beta_campaign.allocation import BetaAllocation
 
 from fleet_api.market.campaign_beta_provider import CachedCampaignBetaProvider
 from fleet_api.models import BetaMarketSnapshot

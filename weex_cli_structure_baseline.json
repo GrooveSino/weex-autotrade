@@ -1,0 +1,23 @@
+{
+  "files": {
+    "src/weex_cli/adaptive_executor.py": 801,
+    "src/weex_cli/beta_campaign.py": 1031,
+    "src/weex_cli/beta_volume.py": 3176,
+    "src/weex_cli/commands/live.py": 509,
+    "src/weex_cli/demo_maker_venue.py": 356,
+    "src/weex_cli/human_output.py": 1215,
+    "src/weex_cli/i18n.py": 549,
+    "src/weex_cli/live_maker_venue.py": 498,
+    "src/weex_cli/live_volume.py": 947,
+    "src/weex_cli/maker_benchmark.py": 374,
+    "src/weex_cli/maker_run_report.py": 415,
+    "src/weex_cli/maker_volume.py": 476,
+    "src/weex_cli/market_collector.py": 481,
+    "src/weex_cli/trade_volume_cache.py": 596,
+    "src/weex_cli/tui_app.py": 1109
+  },
+  "directories": {
+    "src/weex_cli": 41,
+    "src/weex_cli/commands": 13
+  }
+}

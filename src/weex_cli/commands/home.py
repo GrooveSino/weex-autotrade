@@ -5,7 +5,7 @@ from typing import Annotated, Any
 import typer
 
 from weex_cli.cli_support import compact_rows, gateway_for, invoke, selected_mode, settings_for
-from weex_cli.output import emit
+from weex_cli.presentation.output import emit
 from weex_cli.trade_reporting import TradeReportService, current_timestamp_ms
 
 

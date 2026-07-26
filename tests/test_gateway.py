@@ -6,10 +6,10 @@ import ccxt
 import pytest
 
 from tests.fakes import FakeExchange
-from weex_cli.config import Credentials, Settings
-from weex_cli.errors import UnsupportedModeError, ValidationError
-from weex_cli.gateway import WeexGateway, build_client, ensure_live
-from weex_cli.models import OrderIntent
+from weex_cli.core.config import Credentials, Settings
+from weex_cli.core.errors import UnsupportedModeError, ValidationError
+from weex_cli.core.models import OrderIntent
+from weex_cli.exchange.rest.gateway import WeexGateway, build_client, ensure_live
 
 
 @pytest.fixture

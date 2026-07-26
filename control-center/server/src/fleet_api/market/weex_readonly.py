@@ -6,8 +6,7 @@ from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
-from weex_cli.config import Credentials, Settings
-from weex_cli.gateway import WeexGateway
+from weex_cli.control_api.exchange import Credentials, Settings, WeexGateway
 
 from fleet_api.auth.vault import CredentialMaterial
 from fleet_api.models import ExposureSnapshot, TradingMode, WalletSnapshot

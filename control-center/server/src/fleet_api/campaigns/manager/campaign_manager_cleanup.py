@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import time
 
-from weex_cli.gateway import WeexGateway
-from weex_cli.reliability import NETWORK_ERRORS
+from weex_cli.control_api.exchange import NETWORK_ERRORS, WeexGateway
 
 from fleet_api.accounts.account_boundary_reader import AccountBoundaryReader
 from fleet_api.auth.vault import CredentialMaterial

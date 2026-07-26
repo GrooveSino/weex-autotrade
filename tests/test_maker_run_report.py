@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from weex_cli.maker_run_report import build_maker_run_report, build_maker_soak_report
+from weex_cli.reporting import build_maker_run_report, build_maker_soak_report
 
 
 def test_report_summarizes_run_without_order_identifiers() -> None:

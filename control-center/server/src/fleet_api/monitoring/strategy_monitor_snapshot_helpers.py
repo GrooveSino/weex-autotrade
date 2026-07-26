@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.execution_progress import ExecutionProgressProjector, event_name
+from weex_cli.control_api.progress import ExecutionProgressProjector, event_name
 
 from fleet_api.campaigns.persistence.campaigns import CampaignRecord
 from fleet_api.models import ExecutionTimelineEntry, LogLevel

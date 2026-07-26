@@ -7,13 +7,11 @@ from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_allocation import BetaUnavailable
-from weex_cli.beta_volume import _is_uncertain_stop, _terminal_reason
-from weex_cli.models import decimal_text
+from weex_cli.control_api.allocation import BetaUnavailable
+from weex_cli.control_api.volume import terminal_reason
 
 from fleet_api.campaigns.actors.campaign_actor_cycles import (
     close_lanes,
-    cycle_record,
     observe_positions,
     positions_are_flat,
     safe_stop,
@@ -34,10 +32,9 @@ from fleet_api.campaigns.actors.campaign_actor_planning import (
     check_cycle_conditions,
     new_actor_context,
     prepare_cycle_leverage,
-    retry_cycle_condition,
 )
+from fleet_api.campaigns.actors.closing.close_cycle import close_cycle
 from fleet_api.campaigns.actors.phase_helpers.open_pair import open_pair
-from fleet_api.campaigns.actors.targets.target_policy import campaign_completion_floor, emit_tolerance_acceptance
 
 
 class CampaignActorPhases:
@@ -183,10 +180,35 @@ class CampaignActorPhases:
                 outcome = CloseCycle(Decimal(0), safe_stop(service, lanes, opened), "stop_requested", None, 0)
             else:
                 outcome = self._close_cycle(service, lanes, campaign, opened)
-            self._ownership_sink(opened, "closed" if outcome.uncertain_reason is None else "uncertain")
+            ownership_state = (
+                "uncertain"
+                if outcome.uncertain_reason is not None
+                else "closing_retry"
+                if outcome.close_condition
+                else "closed"
+            )
+            self._ownership_sink(opened, ownership_state)
             return outcome
         finally:
             environment.close()
+
+    def _close_cycle(
+        self,
+        service: Any,
+        lanes: Mapping[str, Any],
+        campaign: Campaign,
+        opened: OpenCycle,
+    ) -> CloseCycle:
+        return close_cycle(
+            service,
+            lanes,
+            campaign,
+            opened,
+            close_lanes_fn=close_lanes,
+            observe_positions_fn=observe_positions,
+            flat_checker=positions_are_flat,
+            terminal_reason_fn=terminal_reason,
+        )
 
     def safe_stop(self, opened: OpenCycle) -> dict[str, Any]:
         environment = self._environment_factory("safe_stop")
@@ -248,92 +270,3 @@ class CampaignActorPhases:
             deadline_at_ms=started_at_ms + int(delay * 1_000),
         )
         return delay, started_at_ms
-
-    def _close_cycle(
-        self,
-        service: Any,
-        lanes: Mapping[str, Any],
-        campaign: Campaign,
-        opened: OpenCycle,
-    ) -> CloseCycle:
-        context = opened.context
-        stops = dict(opened.lane_stops)
-        service._emit("close_barrier_started", round=context.round_number)
-        close_summaries = close_lanes(service, lanes, opened, stops)
-        service._emit("pair_wait_completed", round=context.round_number, action="close")
-        legs = opened.open_summaries + close_summaries
-        service._refresh_pending_accounting(context.round_number, legs, lanes, stops)
-        positions = observe_positions(service, lanes, context.round_number)
-        flat = positions_are_flat(positions, opened.btc_plan, opened.eth_plan)
-        quote = sum((Decimal(str(row.get("quote_volume") or 0)) for row in legs), Decimal(0))
-        context.child_total_quote += quote
-        context.summaries.extend(legs)
-        reason = _terminal_reason(stops)
-        uncertain = any(_is_uncertain_stop(stop) for stop in stops.values())
-        retry_condition = retry_cycle_condition(reason, quote, flat, uncertain)
-        record_reason = None if retry_condition is not None else reason
-        completion_floor = campaign_completion_floor(context)
-        should_continue = (
-            not uncertain
-            and record_reason is None
-            and flat
-            and retry_condition is None
-            and completion_floor is None
-        )
-        gap = sampled_delay(campaign.round_gap_min_seconds, campaign.round_gap_max_seconds) if should_continue else 0
-        record = cycle_record(
-            opened,
-            legs,
-            quote,
-            positions,
-            flat=flat,
-            reason=record_reason,
-            uncertain=uncertain,
-            round_gap_seconds=gap,
-            elapsed_ms=max(0, service.now_ms() - opened.started_at_ms),
-        )
-        context.cycles.append(record)
-        service._emit(
-            "cycle_completed" if record["status"] in {"completed", "recovered", "empty"} else "cycle_stopped",
-            round=context.round_number,
-            status=record["status"],
-            reason=record["reason"],
-            quote_volume=decimal_text(quote),
-            total_quote=decimal_text(context.child_total_quote),
-            target_quote=decimal_text(context.child.target_turnover_quote),
-            remaining_quote=decimal_text(
-                max(context.child.target_turnover_quote - context.child_total_quote, Decimal(0))
-            ),
-            elapsed_ms=record["elapsed_ms"],
-        )
-        if uncertain:
-            return CloseCycle(quote, None, None, reason or "lane_execution_uncertain", 0)
-        if completion_floor is not None:
-            emit_tolerance_acceptance(service, context, completion_floor)
-            result = service._final_acceptance(
-                context.child,
-                context.summaries,
-                context.cycles,
-                context.child_total_quote,
-                lanes,
-                opened.preflight,
-                context.execution_started_at_ms,
-                minimum_accepted_quote=completion_floor,
-            )
-            return CloseCycle(quote, result, None, None, 0)
-        if retry_condition is not None:
-            if quote > 0:
-                context.round_number += 1
-            return CloseCycle(quote, None, None, None, 0, condition=retry_condition)
-        if reason is not None or not flat:
-            return CloseCycle(quote, None, reason or "paired_cycle_not_flat", None, 0)
-        context.round_number += 1
-        gap_started_at_ms = service.now_ms()
-        service._emit(
-            "round_gap_started",
-            round=context.round_number - 1,
-            seconds=gap,
-            started_at_ms=gap_started_at_ms,
-            deadline_at_ms=gap_started_at_ms + int(gap * 1_000),
-        )
-        return CloseCycle(quote, None, None, None, gap, gap_started_at_ms)

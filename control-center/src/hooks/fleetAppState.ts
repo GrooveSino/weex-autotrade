@@ -68,6 +68,7 @@ export function useFleetState() {
   const [lastGlobalSync, setLastGlobalSync] = useState(controlPlaneEnabled ? '等待加载' : snapshotTimeText())
   const [controlPlaneConnected, setControlPlaneConnected] = useState(!controlPlaneEnabled)
   const [controlPlaneAdapter, setControlPlaneAdapter] = useState(controlPlaneEnabled ? 'connecting' : 'browser-mock')
+  const [serviceReleaseId, setServiceReleaseId] = useState<string | null>(null)
   const [controlPlaneExecutionEnabled, setControlPlaneExecutionEnabled] = useState(!controlPlaneEnabled)
   const [boundStrategyExecutionEnabled, setBoundStrategyExecutionEnabled] = useState(!controlPlaneEnabled)
   const [executionCapacity, setExecutionCapacity] = useState<ExecutionCapacity | null>(null)
@@ -99,6 +100,7 @@ export function useFleetState() {
     closePositionsAccount, setClosePositionsAccount, stopDialogOpen, setStopDialogOpen,
     stopPhrase, setStopPhrase, toast, setToast, lastGlobalSync, setLastGlobalSync,
     controlPlaneConnected, setControlPlaneConnected, controlPlaneAdapter, setControlPlaneAdapter,
+    serviceReleaseId, setServiceReleaseId,
     controlPlaneExecutionEnabled, setControlPlaneExecutionEnabled,
     boundStrategyExecutionEnabled, setBoundStrategyExecutionEnabled,
     executionCapacity, setExecutionCapacity,

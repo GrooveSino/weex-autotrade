@@ -3,7 +3,7 @@ from __future__ import annotations
 import ccxt
 import pytest
 
-from weex_cli.reliability import ReadRetryPolicy, retry_read
+from weex_cli.core.reliability import ReadRetryPolicy, retry_read
 
 
 def test_retry_read_recovers_with_exponential_capped_backoff() -> None:

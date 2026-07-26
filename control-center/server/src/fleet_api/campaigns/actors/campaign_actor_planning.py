@@ -7,12 +7,15 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
-from weex_cli.beta_allocation import BetaAllocation
-from weex_cli.beta_volume import _size_cycle, inspect_live_account
-from weex_cli.dust_position_close import classify_minimum_order_rejection
-from weex_cli.errors import SafetyError, ValidationError
-from weex_cli.models import decimal_text
-from weex_cli.reliability import NETWORK_ERRORS
+from weex_cli.control_api.allocation import BetaAllocation
+from weex_cli.control_api.exchange import (
+    NETWORK_ERRORS,
+    SafetyError,
+    ValidationError,
+    classify_minimum_order_rejection,
+    decimal_text,
+)
+from weex_cli.control_api.volume import inspect_live_account, size_cycle
 
 from fleet_api.campaigns.actors.campaign_actor_models import (
     BOUNDARY_COUNTS,
@@ -115,7 +118,7 @@ def build_cycle_plan(
     try:
         lanes = service._create_lanes(plan)
         btc_plan, eth_plan, sizing = service._read_with_retry(
-            lambda: _size_cycle(plan, lanes, desired, market_data=getattr(service, "market_data", None)),
+            lambda: size_cycle(plan, lanes, desired, market_data=getattr(service, "market_data", None)),
             operation="cycle_sizing",
             retry_event="cycle_sizing_retry",
             round=context.round_number,
@@ -139,7 +142,12 @@ def build_cycle_plan(
         "beta_version": allocation.version,
         "beta_as_of_ms": str(allocation.as_of_ms),
     }
-    return plan, {"allocation": allocation, "account": account}, btc_plan, eth_plan, sizing, lanes
+    preflight = {
+        **account,
+        "fresh_beta_version": allocation.version,
+        "fresh_beta_as_of_ms": allocation.as_of_ms,
+    }
+    return plan, preflight, btc_plan, eth_plan, sizing, lanes
 
 
 def _remaining_cycle_target(context: CampaignActorContext) -> Decimal:
@@ -209,3 +217,28 @@ def retry_cycle_condition(
             action="等待下一次受控 Maker 尝试",
         )
     return None
+
+
+def retry_owned_close_condition(
+    reason: str | None,
+    *,
+    flat: bool,
+    uncertain: bool,
+    owned: bool,
+) -> CycleCondition | None:
+    """Retry a confirmed passive close without releasing an owned position."""
+    if flat or uncertain or not owned:
+        return None
+    if reason not in {
+        "post_only_rejected",
+        "stale_price",
+        "maximum_residence",
+        "unknown_liquidity",
+        "recovery_attempts_exhausted",
+    }:
+        return None
+    return CycleCondition(
+        code="owned_close_maker_retry",
+        detail="本任务持仓仍在，平仓 Maker 报价暂不可成交；系统会重新读取盘口后继续被动平仓",
+        action="等待最新行情后自动重新报价平仓",
+    )

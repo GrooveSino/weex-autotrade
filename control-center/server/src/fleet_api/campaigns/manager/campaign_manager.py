@@ -6,7 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from threading import RLock
 from typing import Any
 
-from weex_cli.beta_allocation import HttpBetaAllocationProvider
+from weex_cli.control_api.allocation import HttpBetaAllocationProvider
 
 from fleet_api.auth.vault import CredentialVault
 from fleet_api.campaigns.core.campaign_contracts import CampaignJournal, CampaignRecord, _AccountLease

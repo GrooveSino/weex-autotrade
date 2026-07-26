@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from weex_cli.beta_campaign_workflow import CampaignRuntimePaths
-from weex_cli.tui_runtime import TuiCampaignJournal, reconciliation_confirmation
+from weex_cli.beta_campaign.workflow import CampaignRuntimePaths
+from weex_cli.tui.runtime import TuiCampaignJournal, reconciliation_confirmation
 
 
 def test_event_journal_is_private_and_redacts_sensitive_values(tmp_path: Path) -> None:

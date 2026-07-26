@@ -87,7 +87,7 @@ def test_beta_source_settings_update_runtime_without_storing_endpoint_credential
 def test_bound_strategy_live_preview_is_read_only_and_confirmation_gated(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(
@@ -178,7 +178,7 @@ def test_bound_strategy_live_preview_is_read_only_and_confirmation_gated(
 def test_bound_strategy_preview_automatically_converges_a_flat_uncertain_run(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from weex_cli.config import Credentials, Settings
+    from weex_cli.core.config import Credentials, Settings
     from weex_cli.live_profile import LiveProfile
 
     settings = ControlPlaneSettings(

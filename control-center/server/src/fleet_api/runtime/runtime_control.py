@@ -24,6 +24,8 @@ class RuntimeControlMixin:
         instance_id: str,
         started_at_ms: int,
         end_ms: int,
+        *,
+        timeout_seconds: float | None = None,
     ) -> tuple[tuple[NormalizedTradeFill, ...], bool, str]:
         lock = self._locks.setdefault(instance_id, asyncio.Lock())
         async with lock:
@@ -42,7 +44,7 @@ class RuntimeControlMixin:
                 return fills, True, "local_authoritative_adapter"
             return await asyncio.wait_for(
                 reader(context, start_ms=started_at_ms, end_ms=end_ms),
-                timeout=self._poll_timeout_seconds,
+                timeout=timeout_seconds or self._poll_timeout_seconds,
             )
 
     async def sync_history_step(self, instance_id: str):

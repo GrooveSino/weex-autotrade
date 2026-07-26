@@ -6,7 +6,7 @@ from decimal import Decimal
 from threading import RLock
 from typing import Any
 
-from weex_cli.execution_progress import (
+from weex_cli.control_api.progress import (
     EXECUTION_PROGRESS_PROJECTION_VERSION,
     ExecutionProgressProjector,
     condition_presentation,

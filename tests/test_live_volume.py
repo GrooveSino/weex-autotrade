@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 
-from weex_cli.adaptive_executor import TargetExecutionResult, TargetRequest
-from weex_cli.adaptive_maker import MarketSnapshot
-from weex_cli.errors import SafetyError
-from weex_cli.execution_reconciliation import LegFillReport, LegFillRequest
-from weex_cli.live_volume import (
+from weex_cli.core.errors import SafetyError
+from weex_cli.execution.adaptive import TargetExecutionResult, TargetRequest
+from weex_cli.execution.adaptive_maker import MarketSnapshot
+from weex_cli.execution.reconciliation import LegFillReport, LegFillRequest
+from weex_cli.volume.live import (
     LiveMakerVolumePlan,
     LiveMakerVolumePlanStore,
     LiveMakerVolumeService,
