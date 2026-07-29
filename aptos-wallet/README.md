@@ -40,6 +40,38 @@ pnpm start
 
 代码无法阻止拥有本机系统账户和管理员权限的人主动建立外网隧道，也无法在操作系统已被恶意软件控制时保护屏幕、剪贴板或进程内存。因此不要把它运行在共享主机、云服务器或不可信电脑上。
 
+## 本机自动化 API
+
+为批量管理账户提供了一个刻意受限的本机 API。它**不能转账、不能读取或导出助记词/私钥、不能解锁保险库、不能读取钱包或交易记录**，只允许：
+
+- 批量创建账户并设置别名；
+- 修改单个账户别名；
+- 归档单个账户或整个钱包；
+- 批量新增地址簿条目。
+
+所有请求都必须满足以下条件：服务仍仅监听 `127.0.0.1`；不携带浏览器 Cookie；不带 `Origin`；带 `X-Aptos-Local-Api: 1`；并在 JSON 正文中提供主密码。主密码不会写入审计记录、日志或数据库。服务若原本锁定，会仅为当前请求临时解密，完成后立即重新锁定；它不会创建网页会话或持久解锁状态。不要把密码放进 shell 历史、命令行参数、脚本文件或 `.env`。
+
+接口如下，所有写请求均为 `POST`：
+
+```text
+/api/v1/local-api/wallet-groups/:groupId/accounts
+  { "password": "...", "accounts": [{ "label": "账户别名" }] }
+
+/api/v1/local-api/wallets/:walletId/alias
+  { "password": "...", "label": "新别名" }
+
+/api/v1/local-api/wallets/:walletId/archive
+  { "password": "..." }
+
+/api/v1/local-api/wallet-groups/:groupId/archive
+  { "password": "..." }
+
+/api/v1/local-api/address-book
+  { "password": "...", "entries": [{ "label": "别名", "address": "0x..." }] }
+```
+
+每批账户或地址簿条目最多 200 条。地址簿批量写入会先验证整批数据，发现重复地址、无效地址或容量不足时不会部分写入。自动化脚本应从受保护的终端提示中读取密码，并在请求后立即清除内存变量。
+
 ## 主网门禁
 
 默认只允许查询、编辑和预览。启用真实 Mainnet 提交必须在启动前显式设置：

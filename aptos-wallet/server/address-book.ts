@@ -55,6 +55,32 @@ export class AddressBookService {
     return this.get(id)
   }
 
+  createMany(entries: Array<{ label: string; address: string }>): AddressBookEntry[] {
+    if (!entries.length) throw new Error('至少需要一条地址簿记录')
+    const normalized = entries.map(({ label, address }) => ({
+      id: randomUUID(),
+      label: normalizeLabel(label),
+      address: normalizeAptosAddress(address),
+    }))
+    const addresses = new Set<string>()
+    for (const entry of normalized) {
+      if (addresses.has(entry.address)) throw new Error('批量地址簿中存在重复地址')
+      addresses.add(entry.address)
+      this.assertCanUseAddress(entry.address)
+    }
+    const count = (this.db.prepare('SELECT COUNT(*) AS count FROM address_book_entries').get() as { count: number }).count
+    if (count + normalized.length > MAX_ADDRESS_BOOK_ENTRIES) throw new Error(`地址簿最多保存 ${MAX_ADDRESS_BOOK_ENTRIES} 个地址`)
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const entry of normalized) {
+        this.db.prepare('INSERT INTO address_book_entries(id, label, address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+          .run(entry.id, entry.label, entry.address, now, now)
+        this.audit('address_book.created', entry.id)
+      }
+    })()
+    return normalized.map((entry) => this.get(entry.id))
+  }
+
   update(id: string, label: string, address: string): AddressBookEntry {
     this.get(id)
     const normalizedLabel = normalizeLabel(label)

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { randomInt, randomUUID } from 'node:crypto'
 import { AccountAddress } from '@aptos-labs/ts-sdk'
-import { formatAmount, hasAtMostDecimals, parseAmount, randomAmountInclusive } from '../shared/amounts.js'
+import { formatAmount, hasAtMostDecimals, parseAmount, randomAmountInclusive, randomBigIntInclusive } from '../shared/amounts.js'
 import {
   ASSETS,
   type AssetId,
@@ -18,6 +18,7 @@ import {
 } from '../shared/types.js'
 import type { ChainGateway, ChainTransferCandidate, TransferRequest } from './aptos-gateway.js'
 import type { SqliteDatabase } from './database.js'
+import { accountFamily, spreadShuffle } from './transfer-shuffle.js'
 import { WalletService } from './wallets.js'
 
 const GAS_RESERVE_BASE_UNITS = 100_000n
@@ -34,7 +35,7 @@ interface ChainSyncResult {
 
 export interface JobPreflightProgress {
   jobId: string
-  phase: 'prepare' | 'asset' | 'balances' | 'simulation' | 'finalizing' | 'complete' | 'failed'
+  phase: 'prepare' | 'asset' | 'balances' | 'projection' | 'finalizing' | 'complete' | 'failed'
   message: string
   completed: number
   total: number
@@ -237,7 +238,9 @@ export class JobService extends EventEmitter {
       this.emit('preflight-progress', { jobId: id, phase, message, completed, total } satisfies JobPreflightProgress)
     }
     report('prepare', '正在整理转账清单')
-    const ordered = job.shuffle ? shuffle(rows) : rows
+    const ordered = job.shuffle
+      ? this.shuffleWithAccountSpacing(rows, (row) => ({ sourceWalletId: row.source_wallet_id, targetWalletId: row.target_wallet_id }))
+      : rows
     const frozen = ordered.map((row, position) => freezeStep(row, position, job.intervalMinSeconds, job.intervalMaxSeconds, position === ordered.length - 1))
     try {
       validateMaxOrdering(frozen)
@@ -306,9 +309,8 @@ export class JobService extends EventEmitter {
         error: null,
       }))
     validateMaxOrdering(ordered)
-    // Amounts, gas estimates, and intervals are already frozen by the initial
-    // preview. Reordering must stay local and must not repeat Mainnet reads or
-    // simulations; execution performs fresh per-step checks before submission.
+    // Amounts and intervals are already frozen by the initial preview.
+    // Reordering stays local; execution performs fresh per-step checks before submission.
     const summary = job.summary
     if (!summary) throw new Error('预览数据已过期，请重新生成预览')
     const checks: TransferStepCheck[] = ordered.map((step) => ({
@@ -331,6 +333,12 @@ export class JobService extends EventEmitter {
     })()
     this.emitChange()
     return { valid: true, job: this.get(id), checks, summary }
+  }
+
+  async shufflePreview(id: string): Promise<JobPreflight> {
+    const job = this.get(id)
+    if (job.status !== 'previewed') throw new Error('只有已完成预览的任务可以打乱顺序')
+    return this.reorderPreview(id, this.shuffleWithAccountSpacing(job.steps, (step) => ({ sourceWalletId: step.sourceWalletId, targetWalletId: step.targetWalletId })).map((step) => step.id))
   }
 
   confirm(id: string, confirmation: string): TransferJob {
@@ -372,36 +380,55 @@ export class JobService extends EventEmitter {
   retryFailed(id: string, confirmation: string): TransferJob {
     if (!this.executionEnabled) throw new Error('主网执行门禁未开启：APTOS_MAINNET_EXECUTION_ENABLED 必须为 true')
     const job = this.get(id)
-    if (job.status !== 'failed') throw new Error('只有链上已失败的任务可以从错误位置重试')
+    if (!['failed', 'paused', 'completed'].includes(job.status)) throw new Error('当前任务不能重试失败条目')
     if (!job.confirmationPhrase || confirmation !== job.confirmationPhrase) throw new Error('确认短语不匹配')
     if (job.steps.some((step) => step.status === 'uncertain')) throw new Error('存在结果不确定的交易，必须先重新核对，禁止重试')
-    const failedStep = job.steps.find((step) => step.status === 'failed')
+    const failedSteps = job.steps.filter((step) => step.status === 'failed')
+    const failedStep = failedSteps[0]
     if (!failedStep) throw new Error('任务没有可重试的失败条目')
     if (job.steps.some((step) => step.position < failedStep.position && step.status !== 'confirmed')) {
       throw new Error('错误位置之前存在未确认条目，禁止跳过重试')
     }
-    const failedAttempt = this.db.prepare(`
-      SELECT id FROM transaction_attempts
-      WHERE job_id = ? AND step_id = ? AND state = 'failed'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).get(id, failedStep.id)
-    if (!failedAttempt) throw new Error('未找到已确定失败的链上交易，禁止重试')
+    // A normal failed run stops at its first failed item and then continues
+    // through still-pending steps. Older records may incorrectly say
+    // “completed” despite multiple failed items; in that case retry every
+    // definitely failed item, never an already-confirmed one.
+    const retrySteps = job.status === 'completed' ? failedSteps : [failedStep]
+    for (const step of retrySteps) {
+      const attempts = this.db.prepare(`
+        SELECT tx_hash, state FROM transaction_attempts
+        WHERE job_id = ? AND step_id = ?
+        ORDER BY created_at DESC
+      `).all(id, step.id) as Array<{ tx_hash: string | null; state: string }>
+      const hasDefiniteFailure = attempts.some((attempt) => attempt.state === 'failed')
+      const wasNeverPrepared = attempts.length === 0 && !step.txHash
+      // A gateway/read failure can happen before a transaction is prepared,
+      // so old records legitimately have no attempt row or hash. It is safe
+      // to let the user explicitly retry those. Any prepared/submitted state
+      // without a definite chain failure remains blocked for reconciliation.
+      if (!hasDefiniteFailure && !wasNeverPrepared) {
+        throw new Error(`第 ${step.position + 1} 笔可能已签名或提交，必须先核对链上结果，禁止重试`)
+      }
+    }
     const active = this.db.prepare(`SELECT id FROM jobs WHERE status IN ('running','paused','uncertain') AND id <> ? LIMIT 1`).get(id)
     if (active) throw new Error('当前已有其他活动任务')
 
     const now = new Date().toISOString()
     this.db.transaction(() => {
-      this.db.prepare(`UPDATE job_steps SET status = 'pending', tx_hash = NULL, error = NULL, updated_at = ? WHERE id = ?`)
-        .run(now, failedStep.id)
+      const reset = this.db.prepare(`UPDATE job_steps SET status = 'pending', tx_hash = NULL, error = NULL, updated_at = ? WHERE id = ?`)
+      for (const step of retrySteps) reset.run(now, step.id)
       this.db.prepare(`UPDATE jobs SET status = 'running', error = NULL, updated_at = ? WHERE id = ?`).run(now, id)
-      this.audit('job.retry_from_failed_step', id, { stepId: failedStep.id, position: failedStep.position })
+      this.audit('job.retry_failed_steps', id, {
+        stepIds: retrySteps.map((step) => step.id),
+        positions: retrySteps.map((step) => step.position),
+        repairedCompletedRecord: job.status === 'completed',
+      })
     })()
     this.pauseRequested = false
     this.cancelRequested = false
     this.emitChange()
-    // The failed item is retried immediately. Normal randomized waits resume
-    // from the following pair, so the rest of the frozen schedule is intact.
+    // The first failed item is retried immediately. Normal randomized waits
+    // resume from the following pair, so the frozen schedule remains intact.
     this.startWorker(id, failedStep.id)
     return this.get(id)
   }
@@ -680,6 +707,19 @@ export class JobService extends EventEmitter {
       const outcome = await this.executeStep(jobId, step)
       if (outcome !== 'confirmed') return
     }
+    const final = this.get(jobId)
+    if (final.steps.some((step) => step.status === 'failed')) {
+      this.setJobStatus(jobId, 'failed', '存在失败条目，未将任务标记为完成。')
+      return
+    }
+    if (final.steps.some((step) => step.status === 'uncertain')) {
+      this.setJobStatus(jobId, 'uncertain', '存在结果不确定的交易，等待人工核对。')
+      return
+    }
+    if (!final.steps.every((step) => step.status === 'confirmed')) {
+      this.setJobStatus(jobId, 'paused', '仍有未完成条目，等待手动恢复。')
+      return
+    }
     this.setJobStatus(jobId, 'completed', null)
     this.audit('job.completed', jobId, {})
   }
@@ -866,13 +906,16 @@ export class JobService extends EventEmitter {
     const totalChecks = balanceRequirements.size + steps.length
     let completedChecks = 0
     report('balances', `正在读取 ${balanceRequirements.size} 项必要余额`, completedChecks, totalChecks)
-    await Promise.all([...balanceRequirements.values()].map(async ({ walletId, asset }) => {
+    // Preview reads stay deliberately serial. The public Fullnode is rate limited,
+    // while the order-dependent projection below cannot safely run in parallel.
+    for (const { walletId, asset } of balanceRequirements.values()) {
       const wallet = walletById.get(walletId)!
       const balance = await this.gateway.getBalance(wallet.address, asset, 'high')
       ledger.set(key(walletId, asset), balance)
       completedChecks += 1
       report('balances', `已读取 ${wallet.label} 的 ${ASSETS[asset].symbol} 余额`, completedChecks, totalChecks)
-    }))
+    }
+    const constrainedRandomGroups = this.fitRandomAmountsToBudget(job, steps, ledger)
     let aptTotal = 0n
     let usdtTotal = 0n
     let estimatedGas = 0n
@@ -902,7 +945,7 @@ export class JobService extends EventEmitter {
         check.error = '不能转账给同一个账户'
         checks.push(check)
         completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔地址检查未通过`, completedChecks, totalChecks)
+        report('projection', `第 ${step.position + 1} 笔地址检查未通过`, completedChecks, totalChecks)
         continue
       }
       let amount = step.frozenAmountBaseUnits ? BigInt(step.frozenAmountBaseUnits) : sourceBalance
@@ -910,56 +953,45 @@ export class JobService extends EventEmitter {
         check.error = `${ASSETS[step.asset].symbol} 可转余额不足`
         checks.push(check)
         completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔余额不足，已跳过模拟`, completedChecks, totalChecks)
+        report('projection', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
         continue
       }
       if (step.amountMode !== 'max' && sourceBalance < amount) {
         check.error = `${ASSETS[step.asset].symbol} 余额不足，需要 ${formatAmount(amount, step.asset)} ${ASSETS[step.asset].symbol}`
         checks.push(check)
         completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔余额不足，已跳过模拟`, completedChecks, totalChecks)
+        report('projection', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
         continue
       }
-      const estimateAmount = step.asset === 'APT' && step.amountMode === 'max' && !sponsored ? 1n : amount > 0n ? amount : 1n
-      let gasCost: bigint
-      try {
-        report('simulation', `正在模拟第 ${step.position + 1} / ${steps.length} 笔链上交易`, completedChecks, totalChecks)
-        const estimate = await this.gateway.estimateGas(this.transferRequest(job, step, estimateAmount, gasBalance))
-        gasCost = estimate.gasUnitPrice * estimate.maxGasAmount
-        check.estimatedGasBaseUnits = gasCost.toString()
-        estimatedGas += gasCost
-      } catch (error) {
-        check.error = safeError(error, sponsored ? walletById.get(gasWalletId)?.label : undefined)
-        checks.push(check)
-        completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔模拟失败`, completedChecks, totalChecks)
-        continue
-      }
+      const gasCost = GAS_RESERVE_BASE_UNITS
+      check.estimatedGasBaseUnits = gasCost.toString()
+      estimatedGas += gasCost
       if (step.asset === 'APT' && step.amountMode === 'max' && !sponsored) {
-        const reserve = gasCost > GAS_RESERVE_BASE_UNITS ? gasCost : GAS_RESERVE_BASE_UNITS
-        amount = sourceBalance - reserve
+        amount = sourceBalance - gasCost
       }
       if (amount <= 0n) {
         check.error = `${ASSETS[step.asset].symbol} 可转余额不足`
         checks.push(check)
         completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
+        report('projection', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
         continue
       }
       if (sourceBalance < amount) {
         check.error = `${ASSETS[step.asset].symbol} 余额不足，需要 ${formatAmount(amount, step.asset)} ${ASSETS[step.asset].symbol}`
         checks.push(check)
         completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
+        report('projection', `第 ${step.position + 1} 笔余额不足`, completedChecks, totalChecks)
         continue
       }
       const assetAfterTransfer = sourceBalance - amount
       const gasAvailableAfterTransfer = gasWalletId === step.sourceWalletId && step.asset === 'APT' ? assetAfterTransfer : gasBalance
       if (gasAvailableAfterTransfer < gasCost) {
-        check.error = `APT 手续费不足，预计需要 ${formatAmount(gasCost, 'APT')} APT，可用 ${formatAmount(gasAvailableAfterTransfer, 'APT')} APT`
+        check.error = sponsored
+          ? `手续费账户“${walletById.get(gasWalletId)?.label ?? gasWalletId}”的 APT 余额不足，需要预留 ${formatAmount(gasCost, 'APT')} APT`
+          : `APT 手续费预留不足，需要 ${formatAmount(gasCost, 'APT')} APT，可用 ${formatAmount(gasAvailableAfterTransfer, 'APT')} APT`
         checks.push(check)
         completedChecks += 1
-        report('simulation', `第 ${step.position + 1} 笔手续费不足`, completedChecks, totalChecks)
+        report('projection', `第 ${step.position + 1} 笔手续费预留不足`, completedChecks, totalChecks)
         continue
       }
       ledger.set(sourceKey, assetAfterTransfer)
@@ -974,10 +1006,12 @@ export class JobService extends EventEmitter {
       check.valid = true
       checks.push(check)
       completedChecks += 1
-      report('simulation', `第 ${step.position + 1} 笔模拟通过`, completedChecks, totalChecks)
+      report('projection', `已完成第 ${step.position + 1} / ${steps.length} 笔资金推演`, completedChecks, totalChecks)
     }
     if ([...pairCounts.values()].some((count) => count > 1)) warnings.push('清单包含重复的来源、目标与资产组合')
     if (steps.some((step) => step.amountMode === 'max')) warnings.push('全额转账以执行时链上余额为准，预览金额仅供参考')
+    if (constrainedRandomGroups > 0) warnings.push(`已在随机范围内为 ${constrainedRandomGroups} 个余额受限账户生成可执行金额组合`)
+    warnings.push(`预览按每笔 ${formatAmount(GAS_RESERVE_BASE_UNITS, 'APT')} APT 保守预留手续费，不逐笔请求节点模拟；执行前仍会逐笔构建并模拟实际交易`)
     return {
       projectedMaxAmounts,
       checks,
@@ -991,6 +1025,71 @@ export class JobService extends EventEmitter {
         warnings,
       },
     }
+  }
+
+  private fitRandomAmountsToBudget(job: TransferJob, steps: FrozenTransferStep[], ledger: Map<string, bigint>): number {
+    const key = (walletId: string, asset: AssetId) => `${walletId}:${asset}`
+    const grouped = new Map<string, FrozenTransferStep[]>()
+    for (const step of steps) {
+      const groupKey = key(step.sourceWalletId, step.asset)
+      const group = grouped.get(groupKey) ?? []
+      group.push(step)
+      grouped.set(groupKey, group)
+    }
+
+    let constrainedGroups = 0
+    for (const group of grouped.values()) {
+      const [first] = group
+      const randomSteps = group.filter((step) => step.amountMode === 'random')
+      if (!randomSteps.length) continue
+
+      const fixedTotal = group.reduce((total, step) => {
+        if (step.amountMode === 'max' || step.amountMode === 'random') return total
+        return total + BigInt(step.frozenAmountBaseUnits ?? '0')
+      }, 0n)
+      const selfPaidApt = first.asset === 'APT' && (!job.gasPayerWalletId || job.gasPayerWalletId === first.sourceWalletId)
+      const gasReserve = selfPaidApt ? GAS_RESERVE_BASE_UNITS * BigInt(group.length) : 0n
+      const budget = (ledger.get(key(first.sourceWalletId, first.asset)) ?? 0n) - fixedTotal - gasReserve
+
+      const quantum = 10n ** BigInt(ASSETS[first.asset].decimals - 2)
+      const ranges = randomSteps.map((step) => {
+        const min = parseAmount(step.amountMin!, first.asset)
+        const max = parseAmount(step.amountMax!, first.asset)
+        return { step, min, extra: (max - min) / quantum }
+      })
+      const minimumTotal = ranges.reduce((total, range) => total + range.min, 0n)
+      const maximumExtra = ranges.reduce((total, range) => total + range.extra, 0n)
+      if (budget < minimumTotal || budget >= minimumTotal + maximumExtra * quantum) continue
+
+      let remainingExtra = randomBigIntInclusive(0n, (budget - minimumTotal) / quantum)
+      let remainingCapacity = maximumExtra
+      for (const range of ranges) {
+        remainingCapacity -= range.extra
+        const minimumHere = remainingExtra > remainingCapacity ? remainingExtra - remainingCapacity : 0n
+        const maximumHere = remainingExtra < range.extra ? remainingExtra : range.extra
+        const extra = randomBigIntInclusive(minimumHere, maximumHere)
+        const amount = range.min + extra * quantum
+        range.step.frozenAmountBaseUnits = amount.toString()
+        range.step.frozenAmountDisplay = formatAmount(amount, first.asset)
+        remainingExtra -= extra
+      }
+      constrainedGroups += 1
+    }
+    return constrainedGroups
+  }
+
+  private shuffleWithAccountSpacing<T>(
+    steps: readonly T[],
+    walletIds: (step: T) => { sourceWalletId: string; targetWalletId: string | null },
+  ): T[] {
+    const labels = new Map(this.wallets.list().map((wallet) => [wallet.id, wallet.label]))
+    return spreadShuffle(steps, (step) => {
+      const { sourceWalletId, targetWalletId } = walletIds(step)
+      return [
+        accountFamily(labels.get(sourceWalletId)),
+        accountFamily(targetWalletId ? labels.get(targetWalletId) : null),
+      ].filter((family): family is string => Boolean(family))
+    })
   }
 
   private replaceSteps(jobId: string, steps: Array<FrozenTransferStep | (FrozenTransferStep & { position: number }) | (Record<string, unknown> & { position: number })>): void {
@@ -1149,15 +1248,6 @@ function validateMaxOrdering(steps: FrozenTransferStep[]): void {
       throw new Error(`第 ${index + 1} 笔全额转账必须是该钱包对应资产的最后一笔出账`)
     }
   })
-}
-
-function shuffle<T>(values: T[]): T[] {
-  const copy = [...values]
-  for (let index = copy.length - 1; index > 0; index -= 1) {
-    const selected = randomInt(index + 1)
-    ;[copy[index], copy[selected]] = [copy[selected], copy[index]]
-  }
-  return copy
 }
 
 async function sleepInterruptible(milliseconds: number, interrupted: () => boolean): Promise<void> {

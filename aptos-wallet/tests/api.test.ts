@@ -37,7 +37,7 @@ async function setup(executionEnabled = false) {
 }
 
 describe('local API safety', () => {
-  it('returns a clear mainnet connectivity error instead of a raw fetch failure', async () => {
+  it('does not let preview depend on the per-step simulation endpoint', async () => {
     const { app, headers, gateway, wallets } = await setup()
     const source = wallets.importPrivateKey('转出账户', Account.generate().privateKey.toString())
     const target = wallets.importPrivateKey('收款账户', Account.generate().privateKey.toString())
@@ -56,7 +56,7 @@ describe('local API safety', () => {
     const preview = await app.inject({ method: 'POST', url: `/api/v1/jobs/${jobId}/check`, headers })
 
     expect(preview.statusCode).toBe(200)
-    expect(preview.json().checks[0]).toMatchObject({ valid: false, error: 'Aptos 主网连接暂时中断，已自动重试仍未恢复；请稍后重新预览。' })
+    expect(preview.json().checks[0]).toMatchObject({ valid: true, error: null })
   })
 
   it('requires a fresh exact confirmation before retrying a definitely failed step', async () => {
@@ -275,6 +275,46 @@ describe('local API safety', () => {
     expect(refreshed.statusCode).toBe(200)
     expect(refreshed.json().accounts).toHaveLength(2)
     expect(refreshed.json().accounts[1].balances[0]).toMatchObject({ asset: 'APT', baseUnits: '30000000', display: '0.3' })
+  })
+
+  it('limits the password-gated local automation API to account, alias, archive and address-book writes', async () => {
+    const { app, config, headers, wallets } = await setup()
+    const group = wallets.restoreGroup('自动化钱包', MNEMONIC, 1)
+    const accountUrl = `/api/v1/local-api/wallet-groups/${group.id}/accounts`
+    const localHeaders = { 'x-aptos-local-api': '1' }
+
+    expect((await app.inject({ method: 'POST', url: '/api/v1/vault/lock', headers })).statusCode).toBe(200)
+
+    expect((await app.inject({ method: 'POST', url: accountUrl, payload: { password: PASSWORD, accounts: [{ label: 'api-1' }] } })).statusCode).toBe(403)
+    expect((await app.inject({ method: 'POST', url: accountUrl, headers: { ...localHeaders, origin: config.webOrigin }, payload: { password: PASSWORD, accounts: [{ label: 'api-1' }] } })).statusCode).toBe(403)
+    expect((await app.inject({ method: 'POST', url: accountUrl, headers: localHeaders, payload: { password: 'wrong password value', accounts: [{ label: 'api-1' }] } })).statusCode).toBe(400)
+
+    const created = await app.inject({ method: 'POST', url: accountUrl, headers: localHeaders, payload: { password: PASSWORD, accounts: [{ label: 'api-1' }, { label: 'api-2' }] } })
+    expect(created.statusCode).toBe(200)
+    expect(created.json().accounts).toEqual([
+      expect.objectContaining({ label: 'api-1', accountIndex: 1 }),
+      expect.objectContaining({ label: 'api-2', accountIndex: 2 }),
+    ])
+    expect((await app.inject({ method: 'GET', url: '/api/v1/status', headers: { origin: config.webOrigin } })).json().unlocked).toBe(false)
+
+    const renamed = await app.inject({ method: 'POST', url: `/api/v1/local-api/wallets/${created.json().accounts[0].id}/alias`, headers: localHeaders, payload: { password: PASSWORD, label: 'api-1-renamed' } })
+    expect(renamed.statusCode).toBe(200)
+    expect(renamed.json()).toMatchObject({ label: 'api-1-renamed' })
+
+    const entries = await app.inject({ method: 'POST', url: '/api/v1/local-api/address-book', headers: localHeaders, payload: {
+      password: PASSWORD,
+      entries: [
+        { label: '外部一', address: `0x${'1'.repeat(64)}` },
+        { label: '外部二', address: `0x${'2'.repeat(64)}` },
+      ],
+    } })
+    expect(entries.statusCode).toBe(200)
+    expect(entries.json().entries).toHaveLength(2)
+
+    const archived = await app.inject({ method: 'POST', url: `/api/v1/local-api/wallets/${created.json().accounts[1].id}/archive`, headers: localHeaders, payload: { password: PASSWORD } })
+    expect(archived.statusCode).toBe(200)
+    expect(archived.json().archivedAt).toBeTruthy()
+    expect((await app.inject({ method: 'POST', url: '/api/v1/local-api/jobs', headers: localHeaders, payload: { password: PASSWORD } })).statusCode).toBe(404)
   })
 })
 

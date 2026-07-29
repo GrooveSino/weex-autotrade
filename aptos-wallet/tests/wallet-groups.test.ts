@@ -156,7 +156,7 @@ describe('Aptos HD wallet groups', () => {
     expect(refreshed.balanceError).toBe('gateway unavailable')
   })
 
-  it('refreshes every account with at most ten concurrent balance requests', async () => {
+  it('refreshes every account one at a time in the configured account order', async () => {
     const group = wallets.restoreGroup('并发刷新钱包', MNEMONIC, 25)
     const originalGetBalances = gateway.getBalances.bind(gateway)
     let active = 0
@@ -178,6 +178,24 @@ describe('Aptos HD wallet groups', () => {
     expect(refreshed).toHaveLength(group.accounts.length)
     expect(calls).toBe(group.accounts.length)
     expect(peak).toBe(BALANCE_REFRESH_CONCURRENCY)
+  })
+
+  it('never refreshes archived accounts, including through the global refresh entry point', async () => {
+    const group = wallets.restoreGroup('归档不刷新', MNEMONIC, 3)
+    const archived = group.accounts[1]
+    wallets.archive(archived.id)
+    const calls: string[] = []
+    const originalGetBalances = gateway.getBalances.bind(gateway)
+    gateway.getBalances = async (address: string) => {
+      calls.push(address)
+      return originalGetBalances(address)
+    }
+
+    const refreshed = await wallets.refreshAll()
+    expect(refreshed.map((wallet) => wallet.id)).not.toContain(archived.id)
+    expect(calls).toHaveLength(2)
+    expect(calls).not.toContain(archived.address)
+    await expect(wallets.refresh(archived.id)).rejects.toThrow('账户已归档，不能刷新余额')
   })
 
   it('refreshes only active accounts in one wallet with at most ten concurrent requests', async () => {

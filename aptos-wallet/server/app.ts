@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { resolve } from 'node:path'
+import { extname, resolve, sep } from 'node:path'
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
 import cookie from '@fastify/cookie'
-import fastifyStatic from '@fastify/static'
 import { z } from 'zod'
 import type { JobDraftInput } from '../shared/types.js'
 import { AddressBookService } from './address-book.js'
@@ -15,7 +15,11 @@ import { JobService, type JobPreflightProgress } from './jobs.js'
 import { EncryptedVault, VaultLockedError } from './vault.js'
 import { WalletService } from './wallets.js'
 
-const passwordSchema = z.object({ password: z.string().min(12).max(1024) })
+// Existing vaults may have been created before the 12-character policy.
+// Unlock must accept their actual password; the stricter requirement applies
+// only when setting or changing a password.
+const unlockPasswordSchema = z.object({ password: z.string().min(1).max(1024) })
+const newPasswordSchema = z.object({ password: z.string().min(12).max(1024) })
 const walletIdParams = z.object({ id: z.string().uuid() })
 const walletGroupIdParams = z.object({ id: z.string().uuid() })
 const jobIdParams = z.object({ id: z.string().uuid() })
@@ -23,6 +27,17 @@ const addressBookIdParams = z.object({ id: z.string().uuid() })
 const addressBookEntrySchema = z.object({
   label: z.string().min(1).max(120),
   address: z.string().min(1).max(128),
+})
+const localApiPasswordSchema = z.string().min(12).max(1024)
+const localApiAccountBatchSchema = z.object({
+  password: localApiPasswordSchema,
+  accounts: z.array(z.object({ label: z.string().trim().min(1).max(120) })).min(1).max(200),
+})
+const localApiWalletAliasSchema = z.object({ password: localApiPasswordSchema, label: z.string().trim().min(1).max(120) })
+const localApiPasswordOnlySchema = z.object({ password: localApiPasswordSchema })
+const localApiAddressBookBatchSchema = z.object({
+  password: localApiPasswordSchema,
+  entries: z.array(addressBookEntrySchema.extend({ label: z.string().trim().min(1).max(120) })).min(1).max(200),
 })
 const transferLogQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(100),
@@ -101,23 +116,38 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   let failedPasswordAttempts = 0
   let passwordBlockedUntil = 0
   const sseClients = new Set<NodeJS.WritableStream>()
+  const writeSse = (client: NodeJS.WritableStream, payload: string): boolean => {
+    const state = client as NodeJS.WritableStream & { destroyed?: boolean; writableEnded?: boolean }
+    if (state.destroyed || state.writableEnded) return false
+    try {
+      client.write(payload)
+      return true
+    } catch {
+      return false
+    }
+  }
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 })
   await app.register(cookie)
 
   const allowedOrigins = new Set([config.webOrigin, `http://${config.host}:${config.port}`])
-  app.addHook('onSend', async (request, reply, payload) => {
+  const isLocalAutomationRequest = (request: FastifyRequest) => request.url.startsWith('/api/v1/local-api/')
+  app.addHook('onRequest', async (request, reply) => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value)
-    const contentType = String(reply.getHeader('content-type') ?? '')
-    if (request.url.startsWith('/api/') || request.url === '/' || request.url.endsWith('.html') || contentType.startsWith('text/html')) {
+    if (request.url.startsWith('/api/') || request.url === '/' || request.url.endsWith('.html')) {
       reply.header('Cache-Control', 'no-store').header('Pragma', 'no-cache')
     }
-    return payload
-  })
-  app.addHook('onRequest', async (request, reply) => {
     if (!isLoopbackHostHeader(request.headers.host)) return reply.code(403).send({ error: '仅允许通过本机回环地址访问' })
     const fetchSite = request.headers['sec-fetch-site']
     if (fetchSite === 'cross-site') return reply.code(403).send({ error: '禁止跨站请求' })
     if (!request.url.startsWith('/api/')) return
+    if (isLocalAutomationRequest(request)) {
+      // Local automation never uses browser cookies. The explicit non-simple
+      // header plus an absent Origin prevents a website from driving it via CSRF.
+      if (request.headers.origin || request.headers.cookie || request.headers['x-aptos-local-api'] !== '1') {
+        return reply.code(403).send({ error: '本机自动化接口只接受无 Cookie 的本机命令请求' })
+      }
+      return
+    }
     const origin = request.headers.origin
     if (origin && !allowedOrigins.has(origin)) return reply.code(403).send({ error: '不允许的请求来源' })
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
@@ -139,8 +169,9 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
 
   const closeSseClients = (reason: 'session-replaced' | 'vault-locked') => {
     for (const client of sseClients) {
-      client.write(`event: ${reason}\ndata: {}\n\n`)
-      client.end()
+      writeSse(client, `event: ${reason}\ndata: {}\n\n`)
+      if (!(client as NodeJS.WritableStream & { destroyed?: boolean; writableEnded?: boolean }).destroyed
+        && !(client as NodeJS.WritableStream & { writableEnded?: boolean }).writableEnded) client.end()
     }
     sseClients.clear()
   }
@@ -167,6 +198,7 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     }
     sessionLastSeenAt = Date.now()
   }
+  const requireLocalAutomation = async () => undefined
   const assertPasswordAttemptAllowed = () => {
     const remaining = passwordBlockedUntil - Date.now()
     if (remaining > 0) throw new PasswordRateLimitError(Math.ceil(remaining / 1000))
@@ -188,6 +220,31 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     if (valid) recordPasswordSuccess()
     else recordPasswordFailure()
     return valid
+  }
+  const runLocalAutomation = async <T>(password: string, operation: () => Promise<T> | T): Promise<T> => {
+    assertPasswordAttemptAllowed()
+    const wasUnlocked = vault.unlocked
+    try {
+      if (wasUnlocked) {
+        if (!await vault.verifyPassword(password)) {
+          recordPasswordFailure()
+          throw new Error('主密码错误')
+        }
+      } else {
+        try {
+          await vault.unlock(password)
+        } catch {
+          recordPasswordFailure()
+          throw new Error('主密码错误')
+        }
+      }
+      recordPasswordSuccess()
+      return await operation()
+    } finally {
+      // A local API call may briefly unlock a previously locked vault, but it
+      // must never create a durable unlocked session or browser credential.
+      if (!wasUnlocked && vault.unlocked) vault.lock()
+    }
   }
   const broadcast = () => {
     const payload = `event: snapshot\ndata: ${JSON.stringify({ wallets: vault.unlocked ? wallets.list() : [], groups: vault.unlocked ? wallets.listGroups() : [], jobs: vault.unlocked ? jobs.list() : [], addressBook: vault.unlocked ? addressBook.list() : [] })}\n\n`
@@ -214,13 +271,13 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   }))
 
   app.post('/api/v1/vault/initialize', async (request, reply) => {
-    const { password } = passwordSchema.parse(request.body)
+    const { password } = newPasswordSchema.parse(request.body)
     await vault.initialize(password)
     setSession(reply)
     return { ok: true }
   })
   app.post('/api/v1/vault/unlock', async (request, reply) => {
-    const { password } = passwordSchema.parse(request.body)
+    const { password } = unlockPasswordSchema.parse(request.body)
     assertPasswordAttemptAllowed()
     try {
       await vault.unlock(password)
@@ -426,6 +483,51 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
     return { ok: true }
   })
 
+  // Deliberately narrow command-line API. It can only manage local labels,
+  // accounts and address-book records; it has no transfer, secret, backup or
+  // vault-unlock endpoint. Each mutation validates the master password.
+  app.post('/api/v1/local-api/wallet-groups/:id/accounts', { preHandler: requireLocalAutomation }, async (request) => {
+    const { id } = walletGroupIdParams.parse(request.params)
+    const body = localApiAccountBatchSchema.parse(request.body)
+    const created = await runLocalAutomation(body.password, () => {
+      const firstIndex = wallets.getGroup(id).nextAccountIndex
+      const group = wallets.addAccounts(id, body.accounts.length)
+      return group.accounts
+        .filter((account) => account.accountIndex !== null && account.accountIndex >= firstIndex)
+        .sort((left, right) => (left.accountIndex ?? 0) - (right.accountIndex ?? 0))
+        .map((account, index) => wallets.rename(account.id, body.accounts[index].label))
+    })
+    broadcast()
+    return { accounts: created }
+  })
+  app.post('/api/v1/local-api/wallets/:id/alias', { preHandler: requireLocalAutomation }, async (request) => {
+    const { id } = walletIdParams.parse(request.params)
+    const body = localApiWalletAliasSchema.parse(request.body)
+    const wallet = await runLocalAutomation(body.password, () => wallets.rename(id, body.label))
+    broadcast()
+    return wallet
+  })
+  app.post('/api/v1/local-api/wallets/:id/archive', { preHandler: requireLocalAutomation }, async (request) => {
+    const { id } = walletIdParams.parse(request.params)
+    const body = localApiPasswordOnlySchema.parse(request.body)
+    const wallet = await runLocalAutomation(body.password, () => wallets.archive(id))
+    broadcast()
+    return wallet
+  })
+  app.post('/api/v1/local-api/wallet-groups/:id/archive', { preHandler: requireLocalAutomation }, async (request) => {
+    const { id } = walletGroupIdParams.parse(request.params)
+    const body = localApiPasswordOnlySchema.parse(request.body)
+    const group = await runLocalAutomation(body.password, () => wallets.archiveGroup(id))
+    broadcast()
+    return group
+  })
+  app.post('/api/v1/local-api/address-book', { preHandler: requireLocalAutomation }, async (request) => {
+    const body = localApiAddressBookBatchSchema.parse(request.body)
+    const entries = await runLocalAutomation(body.password, () => addressBook.createMany(body.entries))
+    broadcast()
+    return { entries }
+  })
+
   app.get('/api/v1/jobs', { preHandler: requireSession }, async () => jobs.list())
   app.get('/api/v1/jobs/:id', { preHandler: requireSession }, async (request) => jobs.getWithGasBackfill(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs', { preHandler: requireSession }, async (request) => jobs.createDraft(jobDraftSchema.parse(request.body) as JobDraftInput))
@@ -433,8 +535,12 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
   app.post('/api/v1/jobs/:id/check', { preHandler: requireSession }, async (request) => jobs.checkAndPreview(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs/:id/preview', { preHandler: requireSession }, async (request) => jobs.preview(jobIdParams.parse(request.params).id))
   app.post('/api/v1/jobs/:id/reorder', { preHandler: requireSession }, async (request) => {
-    const { stepIds } = z.object({ stepIds: z.array(z.string().uuid()).min(1).max(1000) }).parse(request.body)
-    return jobs.reorderPreview(jobIdParams.parse(request.params).id, stepIds)
+    const body = z.union([
+      z.object({ stepIds: z.array(z.string().uuid()).min(1).max(1000) }),
+      z.object({ shuffle: z.literal(true) }),
+    ]).parse(request.body)
+    const jobId = jobIdParams.parse(request.params).id
+    return 'shuffle' in body ? jobs.shufflePreview(jobId) : jobs.reorderPreview(jobId, body.stepIds)
   })
   app.post('/api/v1/jobs/:id/confirm', { preHandler: requireSession }, async (request) => {
     const { confirmation } = z.object({ confirmation: z.string().min(1).max(500) }).parse(request.body)
@@ -458,24 +564,91 @@ export async function createApp(config: AppConfig, overrides: Partial<AppService
       ...SECURITY_HEADERS,
       Connection: 'keep-alive',
     })
-    sseClients.add(reply.raw)
-    reply.raw.write(`event: snapshot\ndata: ${JSON.stringify({ wallets: wallets.list(), groups: wallets.listGroups(), jobs: jobs.list(), addressBook: addressBook.list() })}\n\n`)
-    const heartbeat = setInterval(() => reply.raw.write(': heartbeat\n\n'), 15_000)
-    request.raw.on('close', () => {
-      clearInterval(heartbeat)
+    let heartbeat: NodeJS.Timeout | null = null
+    const removeClient = () => {
+      if (heartbeat) clearInterval(heartbeat)
+      heartbeat = null
       sseClients.delete(reply.raw)
-    })
+    }
+    reply.raw.once('error', removeClient)
+    request.raw.once('close', removeClient)
+    sseClients.add(reply.raw)
+    if (!writeSse(reply.raw, `event: snapshot\ndata: ${JSON.stringify({ wallets: wallets.list(), groups: wallets.listGroups(), jobs: jobs.list(), addressBook: addressBook.list() })}\n\n`)) {
+      removeClient()
+      return
+    }
+    heartbeat = setInterval(() => {
+      if (!writeSse(reply.raw, ': heartbeat\n\n')) removeClient()
+    }, 15_000)
   })
 
   const webDist = resolve(config.webDistPath ?? resolve(process.cwd(), 'dist'))
   if (existsSync(webDist)) {
-    await app.register(fastifyStatic, { root: webDist, wildcard: true })
-    app.setNotFoundHandler(async (request, reply) => {
-      if (request.url.startsWith('/api/')) return reply.code(404).send({ error: '接口不存在' })
-      if (!['GET', 'HEAD'].includes(request.method) || request.url.startsWith('/assets/')) {
-        return reply.code(404).type('text/plain').send('Not Found')
+    const assetRoot = resolve(webDist, 'assets')
+    const sendStaticFile = (request: FastifyRequest, reply: FastifyReply, file: string, contentType: string, cacheControl: string) => {
+      reply.hijack()
+      void (async () => {
+        let body: Buffer | undefined
+        for (let attempt = 0; attempt < 3 && !body; attempt += 1) {
+          try {
+            body = await readFile(file)
+          } catch {
+            if (attempt < 2) await new Promise((resolveDelay) => setTimeout(resolveDelay, (attempt + 1) * 100))
+          }
+        }
+        if (!body) {
+          reply.raw.writeHead(503, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+          reply.raw.end('本地页面资源暂时不可读取，请稍后刷新。')
+          return
+        }
+        reply.raw.writeHead(200, {
+          ...SECURITY_HEADERS,
+          'Content-Type': contentType,
+          'Cache-Control': cacheControl,
+          'Content-Length': body.byteLength,
+        })
+        reply.raw.end(request.method === 'HEAD' ? undefined : body)
+      })()
+    }
+    const sendIndex = (request: FastifyRequest, reply: FastifyReply) => {
+      sendStaticFile(request, reply, resolve(webDist, 'index.html'), 'text/html; charset=utf-8', 'no-store')
+    }
+    const assetContentType = (file: string) => ({
+      '.css': 'text/css; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+      '.map': 'application/json; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.webp': 'image/webp',
+      '.woff2': 'font/woff2',
+    })[extname(file).toLowerCase()] ?? 'application/octet-stream'
+
+    app.get('/', (request, reply) => sendIndex(request, reply))
+    app.get('/assets/*', (request, reply) => {
+      const requested = decodeURIComponent(String((request.params as { '*': string })['*'] ?? ''))
+      if (!requested || requested.includes('\0') || requested.split('/').some((part) => part === '' || part === '.' || part === '..')) {
+        reply.code(404).type('text/plain').send('Not Found')
+        return
       }
-      return reply.header('Cache-Control', 'no-store').header('Pragma', 'no-cache').sendFile('index.html')
+      const file = resolve(assetRoot, requested)
+      if (!file.startsWith(`${assetRoot}${sep}`) || !existsSync(file)) {
+        reply.code(404).type('text/plain').send('Not Found')
+        return
+      }
+      sendStaticFile(request, reply, file, assetContentType(file), 'public, max-age=31536000, immutable')
+    })
+    app.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith('/api/')) {
+        reply.code(404).send({ error: '接口不存在' })
+        return
+      }
+      if (!['GET', 'HEAD'].includes(request.method) || request.url.startsWith('/assets/')) {
+        reply.code(404).type('text/plain').send('Not Found')
+        return
+      }
+      sendIndex(request, reply)
     })
   }
 

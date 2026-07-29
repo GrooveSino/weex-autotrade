@@ -11,6 +11,7 @@ import { download, getStatus, loadWorkspace, post, request, saveAndPreviewJob, s
 import { createMnemonic, parseAccountIndexes, pickConfirmationIndexes } from './mnemonic'
 import { requestEncryptedSecret } from './secret-transport'
 import { pairTransferEndpoints } from './transfer-pairing'
+import { walletDisplayRefreshOrder } from './wallet-display-order'
 
 const AUTO_REFRESH_STORAGE_KEY = 'aptos-wallet.auto-refresh'
 
@@ -24,7 +25,7 @@ type Modal = 'create' | 'restore' | 'private' | 'confirm' | 'retryFailed' | 'sec
 type SecretTarget = { kind: 'mnemonic'; group: WalletGroup } | { kind: 'privateKey'; wallet: WalletRecord }
 const statusLabels: Record<string, string> = {
   draft: '草稿', previewed: '待确认', running: '运行中', paused: '已暂停', cancelled: '已取消',
-  failed: '失败', uncertain: '待核对', completed: '已完成', pending: '待执行', waiting: '等待中',
+  failed: '失败', partial_failed: '部分失败', uncertain: '待核对', completed: '已完成', pending: '待执行', waiting: '等待中',
   preparing: '准备中', submitting: '提交中', confirmed: '已确认',
   unused: '未激活', used: '已使用', funded: '有余额', standalone: '独立账户',
 }
@@ -35,6 +36,14 @@ function presentError(error: string): string {
     return 'Aptos 公共节点暂时限流。程序已自动降速；本笔交易没有自动重发，可稍后重新核对或重新预览后发送。'
   }
   return error
+}
+
+function failedStepCount(job: TransferJob): number {
+  return job.steps.filter((step) => step.status === 'failed').length
+}
+
+function displayJobStatus(job: TransferJob): string {
+  return job.status === 'completed' && failedStepCount(job) > 0 ? 'partial_failed' : job.status
 }
 
 export function App() {
@@ -138,7 +147,7 @@ export function App() {
           setJobs(nextJobs)
           setAddressBook(nextAddressBook)
           setPreviewJob((current) => current ? nextJobs.find((job) => job.id === current.id) ?? current : null)
-        }, (progress) => setPreflightProgress((current) => !current || current.jobId === progress.jobId ? progress : current))
+        }, (progress) => setPreflightProgress((current) => current?.jobId === progress.jobId ? progress : current))
       } catch (error) {
         if (active) setToast(error instanceof Error ? error.message : '无法加载本地钱包状态')
       }
@@ -196,7 +205,7 @@ export function App() {
           onDetails={(wallet) => { setSelectedWallet(wallet); setModal('accountDetails') }}
           onTransfer={(wallet) => { setTransferSourceWalletId(wallet.id); setView('transfer') }} /></div>
         {view === 'addressBook' && <AddressBookView entries={addressBook} run={run} reload={reload} />}
-        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} addressBook={addressBook} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreflightStart={(jobId) => setPreflightProgress({ jobId, phase: 'prepare', message: '正在创建预览检查', completed: 0, total: 0 })} onPreflightFinished={(jobId) => setPreflightProgress((current) => current?.jobId === jobId ? null : current)} onPreview={(result) => { setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
+        {view === 'transfer' && <TransferView key={transferSourceWalletId ?? 'new'} wallets={wallets} groups={groups} addressBook={addressBook} busy={busy} run={run} initialSourceWalletId={transferSourceWalletId} onPreflightStart={(jobId) => setPreflightProgress({ jobId, phase: 'prepare', message: '正在创建预览检查', completed: 0, total: 0 })} onPreflightFinished={(jobId) => setPreflightProgress((current) => current?.jobId === jobId ? null : current)} onPreview={(result) => { setPreflightProgress((current) => current?.jobId === result.job.id ? null : current); setPreviewPreflight(result); setPreviewJob(result.job); setModal('confirm') }} />}
         {view === 'jobs' && <JobsView jobs={jobs} wallets={wallets} addressBook={addressBook} run={run} inspectJob={inspectJob} focusedJobId={focusedJobId} onFocusedJobHandled={handleFocusedJob} setPreviewJob={(job) => { setPreviewPreflight(null); setPreviewJob(job) }} setModal={setModal} />}
       </main>
       {modal === 'create' && <CreateWalletDialog close={() => setModal(null)} run={run} reload={reload} />}
@@ -252,8 +261,8 @@ function VaultGate({ status, onDone, setToast }: { status: VaultStatus; onDone: 
       <div className="vault-icon"><KeyRound size={28} /></div>
       <h1>{status.initialized ? '解锁 Aptos 钱包' : '设置本地钱包'}</h1>
       <p>{status.initialized ? '密钥仅在本机内存中解密。' : '主密码不会保存，丢失后无法恢复钱包。'}</p>
-      <form onSubmit={submit}>
-        <label>主密码<input autoFocus type="password" minLength={12} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" /></label>
+      <form noValidate onSubmit={submit}>
+        <label>主密码<input autoFocus type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={status.initialized ? '输入主密码' : '至少 12 个字符'} /></label>
         {!status.initialized && <label>确认主密码<input type="password" minLength={12} value={confirm} onChange={(event) => setConfirm(event.target.value)} /></label>}
         <button className="primary wide" disabled={busy}>{busy ? '处理中...' : status.initialized ? '解锁' : '完成设置'}</button>
       </form>
@@ -345,50 +354,46 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
   const refreshingAllRef = useRef(false)
   const backgroundRefreshInFlightRef = useRef(false)
   latestWalletsRef.current = wallets
-  const standalone = wallets.filter((wallet) => !wallet.groupId)
-  const totalApt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'APT')?.baseUnits ?? '0'), 0n)
-  const totalUsdt = wallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'USDT')?.baseUnits ?? '0'), 0n)
+  const activeWallets = wallets.filter((wallet) => !wallet.archivedAt)
+  const standalone = activeWallets.filter((wallet) => !wallet.groupId)
+  const totalApt = activeWallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'APT')?.baseUnits ?? '0'), 0n)
+  const totalUsdt = activeWallets.reduce((sum, wallet) => sum + BigInt(wallet.balances.find((balance) => balance.asset === 'USDT')?.baseUnits ?? '0'), 0n)
   const refreshWalletBatch = async (candidates: WalletRecord[]) => {
-    const available = candidates.filter((wallet) => !refreshingWalletIdsRef.current.has(wallet.id))
+    const available = candidates.filter((wallet) => !wallet.archivedAt && !refreshingWalletIdsRef.current.has(wallet.id))
     if (!available.length) return { refreshed: 0, failed: 0 }
     // Reserve the complete batch immediately so background, global, and group refreshes
-    // cannot enqueue the same account twice. Only accounts that reach a worker are
-    // exposed as loading in the UI.
+    // cannot enqueue the same account twice. Only the account with an active request is
+    // exposed as loading, and the queue deliberately advances one visible row at a time.
     available.forEach((wallet) => refreshingWalletIdsRef.current.add(wallet.id))
-    let nextIndex = 0
     let failed = 0
-    const worker = async () => {
-      while (nextIndex < available.length) {
-        const wallet = available[nextIndex++]
-        setRefreshingWalletIds((current) => new Set(current).add(wallet.id))
-        const before = wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
-        try {
-          const updated = await post<WalletRecord>(`/api/v1/wallets/${wallet.id}/refresh`)
-          onWalletUpdated(updated)
-          const after = updated.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
-          if (before !== after) {
-            setChangedWalletIds((current) => new Set(current).add(wallet.id))
-            window.setTimeout(() => setChangedWalletIds((current) => {
-              const next = new Set(current); next.delete(wallet.id); return next
-            }), 1_800)
-          }
-          if (updated.balanceError) failed += 1
-        } catch (error) {
-          failed += 1
-          onWalletUpdated({ ...wallet, balanceError: error instanceof Error ? error.message : '余额刷新失败' })
-        } finally {
-          refreshingWalletIdsRef.current.delete(wallet.id)
-          setRefreshingWalletIds((current) => { const next = new Set(current); next.delete(wallet.id); return next })
+    for (const wallet of available) {
+      setRefreshingWalletIds((current) => new Set(current).add(wallet.id))
+      const before = wallet.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
+      try {
+        const updated = await post<WalletRecord>(`/api/v1/wallets/${wallet.id}/refresh`)
+        onWalletUpdated(updated)
+        const after = updated.balances.map((balance) => `${balance.asset}:${balance.baseUnits}`).join('|')
+        if (before !== after) {
+          setChangedWalletIds((current) => new Set(current).add(wallet.id))
+          window.setTimeout(() => setChangedWalletIds((current) => {
+            const next = new Set(current); next.delete(wallet.id); return next
+          }), 1_800)
         }
+        if (updated.balanceError) failed += 1
+      } catch (error) {
+        failed += 1
+        onWalletUpdated({ ...wallet, balanceError: error instanceof Error ? error.message : '余额刷新失败' })
+      } finally {
+        refreshingWalletIdsRef.current.delete(wallet.id)
+        setRefreshingWalletIds((current) => { const next = new Set(current); next.delete(wallet.id); return next })
       }
     }
-    await Promise.all(Array.from({ length: Math.min(2, available.length) }, worker))
     return { refreshed: available.length, failed }
   }
   const refreshAll = async (source: 'manual' | 'background' = 'manual') => {
     if (source === 'background' && backgroundRefreshInFlightRef.current) return
     if (source === 'manual' && refreshingAllRef.current) return
-    const currentWallets = latestWalletsRef.current
+    const currentWallets = walletDisplayRefreshOrder(latestWalletsRef.current, groups)
     if (!currentWallets.length) return
     if (source === 'background') backgroundRefreshInFlightRef.current = true
     refreshingAllRef.current = true
@@ -406,13 +411,13 @@ function WalletView({ wallets, groups, setModal, run, reload, onWalletUpdated, o
     try { window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefreshEnabled)) } catch { /* storage may be unavailable */ }
   }, [autoRefreshEnabled])
   useEffect(() => {
-    if (!autoRefreshEnabled || !wallets.length) return
+    if (!autoRefreshEnabled || !wallets.some((wallet) => !wallet.archivedAt)) return
     const timer = window.setInterval(() => { void refreshAll('background') }, 30_000)
     return () => window.clearInterval(timer)
-  }, [autoRefreshEnabled, wallets.length])
+  }, [autoRefreshEnabled, wallets])
   const refreshGroup = async (group: WalletGroup) => {
     if (refreshingGroupIds.has(group.id)) return
-    const before = wallets.filter((wallet) => wallet.groupId === group.id)
+    const before = wallets.filter((wallet) => wallet.groupId === group.id && !wallet.archivedAt)
     if (before.some((wallet) => refreshingWalletIdsRef.current.has(wallet.id))) {
       onToast(`${group.label} 正在刷新中，请稍后再试`)
       return
@@ -645,7 +650,7 @@ function TransferView({ wallets, groups, addressBook, busy, run, onPreview, onPr
     </section>
     {preflight && <div className={`preflight-summary ${preflight.valid ? 'valid' : 'invalid'}`}>
       {preflight.valid ? <Check size={17} /> : <ShieldAlert size={17} />}
-      <div><strong>{preflight.valid ? '检查通过' : `${preflight.checks.filter((check) => !check.valid).length} 笔转账需要处理`}</strong><span>预计手续费 {formatAmount(preflight.summary?.estimatedGasBaseUnits ?? '0', 'APT')} APT</span></div>
+      <div><strong>{preflight.valid ? '检查通过' : `${preflight.checks.filter((check) => !check.valid).length} 笔转账需要处理`}</strong><span>手续费预留 {formatAmount(preflight.summary?.estimatedGasBaseUnits ?? '0', 'APT')} APT</span></div>
     </div>}
     <section className="transfer-compose-grid">
       <div className="selection-panel source-panel">
@@ -752,6 +757,7 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
   const waitingElapsedSeconds = Number.isFinite(waitingStartedAt) ? Math.max(0, (clock - waitingStartedAt) / 1000) : 0
   const waitingRemainingSeconds = waitingStep ? Math.max(0, Math.ceil((waitingTotalSeconds - waitingElapsedSeconds) * 10) / 10) : 0
   const activeStep = selected?.steps.find((step) => step.status === 'preparing' || step.status === 'submitting')
+  const selectedFailedStepCount = selected ? failedStepCount(selected) : 0
   const confirmedCount = selected?.steps.filter((step) => step.status === 'confirmed').length ?? 0
   const actualGasFeeBaseUnits = selected?.steps.reduce((total, step) => total + BigInt(step.gasFeeBaseUnits ?? '0'), 0n) ?? 0n
   const hasActualGasFee = selected?.steps.some((step) => step.gasFeeBaseUnits !== null && step.gasFeeBaseUnits !== undefined) ?? false
@@ -772,7 +778,7 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
       </div>
       {filteredJobs.length === 0 ? <Empty icon={<FileClock size={28} />} text={jobs.length ? '这个日期范围内没有转账记录。' : '还没有转账任务。'} /> : <>
         <div className="job-list-items">{visibleJobs.map((job) => <button key={job.id} className={`job-item ${selected?.id === job.id ? 'selected' : ''}`} onClick={() => setSelectedId(job.id)}>
-          <div><strong>{job.name}</strong><span>{new Date(job.createdAt).toLocaleString()}</span></div><div><Status value={job.status} /><ChevronRight size={16} /></div>
+          <div><strong>{job.name}</strong><span>{new Date(job.createdAt).toLocaleString()}</span></div><div><Status value={displayJobStatus(job)} /><ChevronRight size={16} /></div>
         </button>)}</div>
         <div className="job-list-pagination" aria-label="执行记录分页">
           <button className="secondary small" disabled={currentPage <= 1} onClick={() => setPageIndex((page) => Math.max(1, page - 1))}>上一页</button>
@@ -785,15 +791,16 @@ function JobsView({ jobs, wallets, addressBook, run, inspectJob, focusedJobId, o
         </div>
       </>}
     </section>{selected && <section className="job-detail">
-      <div className="job-detail-head"><div><h2>{selected.name}</h2><Status value={selected.status} /></div><div className="header-actions">
+      <div className="job-detail-head"><div><h2>{selected.name}</h2><Status value={displayJobStatus(selected)} /></div><div className="header-actions">
         {selected.status === 'previewed' && <button className="primary" onClick={() => { setPreviewJob(selected); setModal('confirm') }}><Check size={16} />确认执行</button>}
         {selected.status === 'running' && <button className="secondary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/pause`) })}>暂停</button>}
         {selected.status === 'paused' && <button className="primary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/resume`) })}>恢复</button>}
         {selected.status === 'uncertain' && <button className="secondary" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/reconcile`) }, '已重新核对链上状态')}>重新核对</button>}
-        {selected.status === 'failed' && selected.steps.find((step) => step.status === 'failed') && <button className="primary" onClick={() => { setPreviewJob(selected); setModal('retryFailed') }}><RotateCcw size={16} />从第 {selected.steps.find((step) => step.status === 'failed')!.position + 1} 笔重试</button>}
+        {selectedFailedStepCount > 0 && ['failed', 'paused', 'completed'].includes(selected.status) && <button className="primary" onClick={() => { setPreviewJob(selected); setModal('retryFailed') }}><RotateCcw size={16} />重试失败（{selectedFailedStepCount} 笔）</button>}
         {['draft', 'previewed', 'running', 'paused'].includes(selected.status) && <button className="danger-button" onClick={() => void run(async () => { await post(`/api/v1/jobs/${selected.id}/cancel`) })}>取消</button>}
       </div></div>
       {selected.error && <div className="error-banner"><ShieldAlert size={17} />{presentError(selected.error)}</div>}
+      {selectedFailedStepCount > 0 && selected.status === 'completed' && <div className="error-banner"><ShieldAlert size={17} />该记录有 {selectedFailedStepCount} 笔失败，未视为真正完成；可使用右侧“重试失败”继续。</div>}
       <div className="progress-line"><span style={{ width: `${selected.steps.length ? selected.steps.filter((step) => step.status === 'confirmed').length / selected.steps.length * 100 : 0}%` }} /></div>
       <div className="detail-meta"><span>{confirmedCount}/{selected.steps.length} 笔已确认</span><span>实际手续费 {hasActualGasFee ? formatGasFee(actualGasFeeBaseUnits.toString()) : '-'}</span><span>{selected.intervalMaxSeconds > 0 ? `间隔 ${formatSeconds(selected.intervalMinSeconds)}-${formatSeconds(selected.intervalMaxSeconds)} 秒` : '连续执行'}</span><span>{selected.shuffle ? '随机顺序' : '清单顺序'}</span></div>
       {activityText && <div className={`job-activity ${waitingStep ? 'is-waiting' : 'is-active'}`} aria-live="polite">
@@ -1149,8 +1156,7 @@ function ConfirmDialog({ job, wallets, addressBook, initialPreflight, executionE
     if (!preview.valid || currentJob.steps.length < 2 || shuffling) return
     setShuffling(true)
     void run(async () => {
-      const ids = secureShuffle(currentJob.steps.map((step) => step.id))
-      const result = await post<JobPreflight>(`/api/v1/jobs/${currentJob.id}/reorder`, { stepIds: ids })
+      const result = await post<JobPreflight>(`/api/v1/jobs/${currentJob.id}/reorder`, { shuffle: true })
       setPreview(result)
       setConfirmation('')
       onChanged(result)
@@ -1158,9 +1164,9 @@ function ConfirmDialog({ job, wallets, addressBook, initialPreflight, executionE
   }
   return <Dialog title="转账预览" close={close} wide><div className="transfer-preview-dialog">
     <div className={`confirm-banner ${preview.valid ? 'valid' : ''}`}><ShieldAlert size={20} /><div><strong>{preview.valid ? '预览已生成' : '预览未通过检查'}</strong><span>{preview.valid ? '下面显示本次将要执行的全部转账。发送前仍需输入完整确认短语。' : '所有转账条目仍保留在下方；修正余额、手续费或顺序问题后返回编辑。'}</span></div></div>
-    <div className="confirm-metrics"><Metric label="来源钱包" value={summary.sourceWalletCount.toString()} /><Metric label="转账笔数" value={summary.stepCount.toString()} /><Metric label="APT 总额" value={formatAmount(summary.aptBaseUnits, 'APT')} /><Metric label="USDt 总额" value={formatAmount(summary.usdtBaseUnits, 'USDT')} /><Metric label="预计手续费" value={`${formatAmount(summary.estimatedGasBaseUnits, 'APT')} APT`} /></div>
+    <div className="confirm-metrics"><Metric label="来源钱包" value={summary.sourceWalletCount.toString()} /><Metric label="转账笔数" value={summary.stepCount.toString()} /><Metric label="APT 总额" value={formatAmount(summary.aptBaseUnits, 'APT')} /><Metric label="USDt 总额" value={formatAmount(summary.usdtBaseUnits, 'USDT')} /><Metric label="手续费预留" value={`${formatAmount(summary.estimatedGasBaseUnits, 'APT')} APT`} /></div>
     {summary.warnings.map((warning) => <div className="warning-line" key={warning}>{warning}</div>)}
-    <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2 || shuffling} onClick={shuffle}><Shuffle className={shuffling ? 'spin' : ''} size={16} />{shuffling ? '正在打乱' : '随机打乱条目'}</button></div>
+    <div className="preview-toolbar"><div><strong>执行顺序</strong><span>每一行的来源、目标、金额和等待时间始终绑定</span></div><button className="secondary" disabled={!preview.valid || currentJob.steps.length < 2 || shuffling} onClick={shuffle}><Shuffle className={shuffling ? 'spin' : ''} size={16} />{shuffling ? '正在调整' : '智能打乱条目'}</button></div>
     <div className="preview-list">{currentJob.steps.map((step) => { const check = checks.get(step.id); return <div className={`preview-step ${check && !check.valid ? 'invalid' : ''}`} key={step.id}><span className="preview-step-position">{step.position + 1}</span><div className="preview-step-source"><small>转出</small><TransferParty wallet={wallets.find((wallet) => wallet.id === step.sourceWalletId)} address={wallets.find((wallet) => wallet.id === step.sourceWalletId)?.address ?? step.sourceWalletId} /></div><div className="preview-step-target"><small>收款</small><TransferParty wallet={step.targetWalletId ? wallets.find((wallet) => wallet.id === step.targetWalletId) : null} address={step.targetAddress} addressBook={addressBook} /></div><strong className="preview-step-amount"><span>{step.amountMode === 'max' ? '全额' : step.frozenAmountDisplay ?? step.amountMin}</span><em>{step.asset === 'USDT' ? 'USDt' : 'APT'}</em></strong><small className="preview-step-wait"><Clock3 size={13} />{step.waitAfterSeconds > 0 ? `下一笔前等待 ${formatSeconds(step.waitAfterSeconds)} 秒` : step.position === currentJob.steps.length - 1 ? '最后一笔，无需等待' : '连续执行，无额外等待'}</small>{check && !check.valid && <div className="preview-step-error"><ShieldAlert size={13} /><span>{check.error ?? '检查未通过，请返回编辑修正'}</span></div>}</div> })}</div>
     {preview.valid && <label>输入完整确认短语<div className="phrase-row"><code className="phrase">{currentJob.confirmationPhrase}</code><button type="button" className="secondary small phrase-copy" title="复制确认短语" aria-label="复制确认短语" onClick={() => void navigator.clipboard.writeText(currentJob.confirmationPhrase ?? '')}><Copy size={14} />复制</button></div><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>}
     {!liveExecutionEnabled && <div className="error-banner"><Lock size={17} />当前页面记录的是仅预览状态。发送前会重新检查本机服务；若仍未开启真实转账，会保留在预览页面。</div>}
@@ -1180,11 +1186,13 @@ function RetryFailedDialog({ job, executionEnabled, close, run, onStarted }: {
 }) {
   const [confirmation, setConfirmation] = useState('')
   const [liveExecutionEnabled, setLiveExecutionEnabled] = useState(executionEnabled)
-  const failedStep = job.steps.find((step) => step.status === 'failed')
+  const failedSteps = job.steps.filter((step) => step.status === 'failed')
+  const failedStep = failedSteps[0]
   if (!failedStep) return null
   const confirmedCount = job.steps.filter((step) => step.status === 'confirmed').length
-  return <Dialog title="从失败位置继续" close={close}><div className="retry-failed-dialog">
-    <div className="warning-box"><ShieldAlert size={17} /><div><strong>原失败交易不会重发</strong><span>系统只会从第 {failedStep.position + 1} 笔重新构建一笔新交易。已确认的 {confirmedCount} 笔保持不变，原失败哈希会留在记录中。</span></div></div>
+  const retriesAllFailedSteps = job.status === 'completed'
+  return <Dialog title={retriesAllFailedSteps ? '重试失败项目' : '从失败位置继续'} close={close}><div className="retry-failed-dialog">
+    <div className="warning-box"><ShieldAlert size={17} /><div><strong>原失败交易不会重发</strong><span>{retriesAllFailedSteps ? `系统会为这 ${failedSteps.length} 笔失败项目分别重新构建新交易。` : `系统会从第 ${failedStep.position + 1} 笔重新构建一笔新交易。`} 已确认的 {confirmedCount} 笔保持不变，原失败哈希会留在记录中。</span></div></div>
     <div className="retry-step-summary"><span>重新开始位置</span><strong>第 {failedStep.position + 1} 笔 · {failedStep.asset === 'USDT' ? 'USDt' : 'APT'} · {failedStep.amountMode === 'max' ? '全部余额' : failedStep.frozenAmountDisplay ?? failedStep.amountMin}</strong><small>{presentError(failedStep.error ?? job.error ?? '链上执行失败')}</small></div>
     <label>再次输入完整确认短语<div className="phrase-row"><code className="phrase">{job.confirmationPhrase}</code><button type="button" className="secondary small phrase-copy" title="复制确认短语" aria-label="复制确认短语" onClick={() => void navigator.clipboard.writeText(job.confirmationPhrase ?? '')}><Copy size={14} />复制</button></div><input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
     {!liveExecutionEnabled && <div className="error-banner"><Lock size={17} />本机服务未开启真实转账，不能从失败位置继续。</div>}
@@ -1194,7 +1202,7 @@ function RetryFailedDialog({ job, executionEnabled, close, run, onStarted }: {
       if (!latestStatus.unlocked) throw new Error('保险库已锁定，请重新解锁')
       if (!latestStatus.executionEnabled) throw new Error('本机服务未开启真实转账')
       onStarted(await post<TransferJob>(`/api/v1/jobs/${job.id}/retry-failed`, { confirmation }))
-    }, `已从第 ${failedStep.position + 1} 笔重新开始`)}><RotateCcw size={16} />确认并继续执行</button></div>
+    }, retriesAllFailedSteps ? `已开始重试 ${failedSteps.length} 笔失败项目` : `已从第 ${failedStep.position + 1} 笔重新开始`)}><RotateCcw size={16} />确认并继续执行</button></div>
   </div></Dialog>
 }
 
@@ -1259,7 +1267,7 @@ function PreflightProgressDialog({ progress }: { progress: PreflightProgress }) 
       <div className="preflight-progress-heading"><span>正在检查转账计划</span><strong>{preflightPhaseLabel(progress.phase)}</strong></div>
       <p>{progress.message}</p>
       <div className="preflight-progress-track" aria-label={progress.total > 0 ? `检查进度 ${progress.completed} / ${progress.total}` : '正在准备检查'}><span style={{ width: `${percent}%` }} /></div>
-      <div className="preflight-progress-meta"><span>{progress.total > 0 ? `${progress.completed} / ${progress.total}` : '正在连接本地服务'}</span><span>{progress.phase === 'simulation' ? '逐笔模拟中' : '安全检查中'}</span></div>
+      <div className="preflight-progress-meta"><span>{progress.total > 0 ? `${progress.completed} / ${progress.total}` : '正在连接本地服务'}</span><span>{progress.phase === 'projection' ? '本地资金推演中' : '安全检查中'}</span></div>
       <button type="button" className="preflight-log-toggle" onClick={() => setExpanded((value) => !value)}>{expanded ? '收起详细日志' : '展开详细日志'}</button>
       {expanded && <ol className="preflight-log">{logs.map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ol>}
     </section>
@@ -1267,7 +1275,7 @@ function PreflightProgressDialog({ progress }: { progress: PreflightProgress }) 
 }
 
 function preflightPhaseLabel(phase: PreflightProgress['phase']) {
-  return ({ prepare: '整理转账清单', asset: '校验 USDt', balances: '读取必要余额', simulation: '模拟链上交易', finalizing: '冻结执行计划', complete: '检查完成', failed: '检查未通过' })[phase]
+  return ({ prepare: '整理转账清单', asset: '校验 USDt', balances: '读取必要余额', projection: '本地资金推演', finalizing: '冻结执行计划', complete: '检查完成', failed: '检查未通过' })[phase]
 }
 function DialogActions({ close, submit, onSubmit, disabled = false }: { close: () => void; submit: string; onSubmit?: () => void; disabled?: boolean }) { return <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>取消</button><button type={onSubmit ? 'button' : 'submit'} className="primary" onClick={onSubmit} disabled={disabled}>{submit}</button></div> }
 interface DialogProps { close: () => void; run: (action: () => Promise<void>, success?: string, showGlobalBusy?: boolean) => Promise<void>; reload: () => Promise<void> }
@@ -1295,16 +1303,6 @@ function addressBookEntryFor(address: string, entries: AddressBookEntry[]) {
 }
 function hasAtMostOneDecimalNumber(value: number) { return Number.isFinite(value) && Math.abs(value * 10 - Math.round(value * 10)) < 1e-9 }
 function formatSeconds(value: number) { return value.toFixed(1) }
-function secureShuffle<T>(values: T[]): T[] {
-  const copy = [...values]
-  const random = new Uint32Array(1)
-  for (let index = copy.length - 1; index > 0; index -= 1) {
-    crypto.getRandomValues(random)
-    const selected = random[0] % (index + 1)
-    ;[copy[index], copy[selected]] = [copy[selected], copy[index]]
-  }
-  return copy
-}
 function walletOptionLabel(wallet: WalletRecord, groups: WalletGroup[]) { const group = groups.find((item) => item.id === wallet.groupId); return group ? `${group.label} · ${accountLabel(wallet)}` : wallet.label }
 function walletLabel(id: string, wallets: WalletRecord[]) { const wallet = wallets.find((item) => item.id === id); return wallet ? accountLabel(wallet) : id }
 function walletAlias(wallet: WalletRecord): string | null {

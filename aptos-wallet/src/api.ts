@@ -41,16 +41,18 @@ export async function request<T>(path: string, init: RequestInit = {}, retriedAf
   } catch {
     throw new Error('本地钱包服务连接在收到响应前中断；请刷新页面确认当前状态。系统不会自动重复提交交易。')
   }
+  const errorMessage = typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string'
+    ? body.error
+    : null
   if (response.status === 403 && !retriedAfterCsrf && method !== 'GET' && method !== 'HEAD'
-    && typeof body === 'object' && body?.error === 'CSRF 校验失败') {
-    const status = await refreshCsrfToken()
-    if (!status.unlocked) {
-      window.location.reload()
-      throw new Error('本地钱包服务已重启，请重新解锁')
-    }
+    && errorMessage === 'CSRF 校验失败') {
+    // A restart replaces the CSRF token and also locks the vault. Unlock is
+    // precisely the request that must still work in that locked state, so a
+    // refreshed token is enough to safely retry this one rejected request.
+    await refreshCsrfToken()
     return request<T>(path, init, true)
   }
-  if (!response.ok) throw new Error(typeof body === 'object' && body?.error ? body.error : `请求失败 (${response.status})`)
+  if (!response.ok) throw new Error(errorMessage ?? `请求失败 (${response.status})`)
   return body as T
 }
 
@@ -68,7 +70,7 @@ export async function loadWorkspace(): Promise<{ wallets: WalletRecord[]; groups
 
 export interface PreflightProgress {
   jobId: string
-  phase: 'prepare' | 'asset' | 'balances' | 'simulation' | 'finalizing' | 'complete' | 'failed'
+  phase: 'prepare' | 'asset' | 'balances' | 'projection' | 'finalizing' | 'complete' | 'failed'
   message: string
   completed: number
   total: number

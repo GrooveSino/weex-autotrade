@@ -33,7 +33,7 @@ export const MAX_ACCOUNT_BATCH = 200
 // Keep wallet refreshes below the public fullnode's anonymous request budget.
 // The gateway has a second global limiter; matching it here avoids building a
 // large burst of queued account reads during a full refresh.
-export const BALANCE_REFRESH_CONCURRENCY = 2
+export const BALANCE_REFRESH_CONCURRENCY = 1
 export const BALANCE_REFRESH_MAX_ATTEMPTS = 3
 export const BALANCE_REFRESH_RETRY_DELAY_MS = 250
 export const APTOS_HD_PATH = (index: number) => `m/44'/637'/${index}'/0'/0'`
@@ -330,6 +330,7 @@ export class WalletService {
   }
 
   async refresh(id: string, priority: ReadPriority = 'normal'): Promise<WalletRecord> {
+    if (this.get(id).archivedAt) throw new Error('账户已归档，不能刷新余额')
     const active = this.activeRefreshes.get(id)
     if (active) return active
     const operation = this.refreshOnce(id, priority)
@@ -343,6 +344,7 @@ export class WalletService {
 
   async refreshAsset(id: string, asset: AssetId, priority: ReadPriority = 'normal'): Promise<WalletRecord> {
     const wallet = this.get(id)
+    if (wallet.archivedAt) throw new Error('账户已归档，不能刷新余额')
     try {
       const baseUnits = await retryBalanceRead(() => this.balanceReader.getBalance(wallet.address, asset, priority))
       const balances = wallet.balances.map((balance) => balance.asset === asset
@@ -393,14 +395,7 @@ export class WalletService {
   }
 
   private async refreshIds(ids: string[]): Promise<void> {
-    let nextIndex = 0
-    const worker = async () => {
-      while (nextIndex < ids.length) {
-        const id = ids[nextIndex++]
-        await this.refresh(id)
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(BALANCE_REFRESH_CONCURRENCY, ids.length) }, worker))
+    for (const id of ids) await this.refresh(id)
   }
 
   revealPrivateKeyEncrypted(id: string, publicKeyPem: string): EncryptedSecretResponse {

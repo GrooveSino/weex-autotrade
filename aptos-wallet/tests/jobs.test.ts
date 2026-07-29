@@ -67,6 +67,56 @@ describe('transfer jobs', () => {
     expect(gateway.submissions).toBe(2)
   })
 
+  it('repairs a legacy completed record that still contains failed items without resubmitting confirmed steps', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'legacy partial failure', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [
+        { id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null },
+        { id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null },
+      ] })
+    const preview = await jobs.preview(draft.id)
+    gateway.failNextTransaction = true
+    jobs.confirm(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'failed')
+    // Simulate the historical bad state: a failed item persisted under an
+    // incorrectly completed record, while confirmed items remain immutable.
+    db!.prepare(`UPDATE jobs SET status = 'completed', error = NULL WHERE id = ?`).run(draft.id)
+
+    jobs.retryFailed(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    expect(jobs.get(draft.id).steps.every((step) => step.status === 'confirmed')).toBe(true)
+    expect(gateway.submissions).toBe(3)
+  })
+
+  it('retries a legacy pre-submit failure with no attempt or transaction hash', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'legacy gateway failure', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    const stepId = jobs.get(draft.id).steps[0].id
+    // Historical public-node failures happened before preparation, so there
+    // is neither a hash nor an attempt to reconcile.
+    db!.prepare(`UPDATE jobs SET status = 'completed', error = NULL WHERE id = ?`).run(draft.id)
+    db!.prepare(`UPDATE job_steps SET status = 'failed', tx_hash = NULL, error = '公共节点限流' WHERE id = ?`).run(stepId)
+
+    jobs.retryFailed(draft.id, preview.confirmationPhrase!)
+    await waitFor(() => jobs.get(draft.id).status === 'completed')
+    expect(jobs.get(draft.id).steps[0].status).toBe('confirmed')
+    expect(gateway.submissions).toBe(1)
+  })
+
+  it('does not retry a legacy failed step with an unverified transaction hash', async () => {
+    const { jobs, source, target } = await setup()
+    const draft = jobs.createDraft({ name: 'legacy uncertain hash', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
+    const preview = await jobs.preview(draft.id)
+    const stepId = jobs.get(draft.id).steps[0].id
+    db!.prepare(`UPDATE jobs SET status = 'completed', error = NULL WHERE id = ?`).run(draft.id)
+    db!.prepare(`UPDATE job_steps SET status = 'failed', tx_hash = '0xunverified', error = '网络中断' WHERE id = ?`).run(stepId)
+
+    expect(() => jobs.retryFailed(draft.id, preview.confirmationPhrase!)).toThrow('必须先核对链上结果')
+  })
+
   it('uses a fee payer and permits a full USDt transfer', async () => {
     const { jobs, gateway, wallets, source, target, payer } = await setup()
     const refreshes: Array<{ id: string; priority: string | undefined }> = []
@@ -261,8 +311,8 @@ describe('transfer jobs', () => {
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
     const result = await jobs.checkAndPreview(draft.id)
     expect(result.valid).toBe(false)
-    expect(result.checks[0].error).toContain('APT 手续费不足')
-    expect(result.checks[0].estimatedGasBaseUnits).toBe('10')
+    expect(result.checks[0].error).toContain('APT 手续费预留不足')
+    expect(result.checks[0].estimatedGasBaseUnits).toBe('100000')
     expect(jobs.get(draft.id).status).toBe('draft')
   })
 
@@ -282,7 +332,7 @@ describe('transfer jobs', () => {
     ]))
     expect(getBalance.mock.calls.map(([address]) => address)).not.toContain(target.address)
     expect(progress.map((event) => event.phase)).toContain('balances')
-    expect(progress.map((event) => event.phase)).toContain('simulation')
+    expect(progress.map((event) => event.phase)).toContain('projection')
     expect(progress.at(-1)?.phase).toBe('complete')
   })
 
@@ -292,37 +342,56 @@ describe('transfer jobs', () => {
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'random', amountMin: '1.001', amountMax: '2' }] })).toThrow('随机金额最多支持 2 位小数')
   })
 
-  it('turns Aptos fee simulation errors into an actionable message', async () => {
+  it('finds a valid random amount combination when independent draws could exceed the sender balance', async () => {
+    const { jobs, gateway, source, target } = await setup()
+    gateway.setBalance(source.address, 'USDT', 1_250_000_000n)
+    const draft = jobs.createDraft({ name: 'budgeted random range', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
+      steps: Array.from({ length: 10 }, () => ({
+        id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id,
+        asset: 'USDT' as const, amountMode: 'random' as const, amountMin: '120', amountMax: '130',
+      })) })
+
+    const preview = await jobs.preview(draft.id)
+    const amounts = preview.steps.map((step) => BigInt(step.frozenAmountBaseUnits!))
+    const total = amounts.reduce((sum, amount) => sum + amount, 0n)
+
+    expect(total).toBeLessThanOrEqual(1_250_000_000n)
+    expect(amounts.every((amount) => amount >= 120_000_000n && amount <= 130_000_000n)).toBe(true)
+    expect(preview.summary?.warnings).toContain('已在随机范围内为 1 个余额受限账户生成可执行金额组合')
+  })
+
+  it('keeps preview local and does not call per-step gas simulation', async () => {
     const { jobs, gateway, source, target } = await setup()
     gateway.estimateError = '交易模拟失败：INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE'
+    const estimateGas = vi.spyOn(gateway, 'estimateGas')
     const draft = jobs.createDraft({ name: 'clear fee error', gasPayerWalletId: null, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
     const result = await jobs.checkAndPreview(draft.id)
-    expect(result.valid).toBe(false)
-    expect(result.checks[0].error).toBe('交易无法支付 APT 网络手续费：请给转出账户充值 APT，或选择一个有 APT 余额的手续费账户。')
+    expect(result.valid).toBe(true)
+    expect(estimateGas).not.toHaveBeenCalled()
   })
 
-  it('shows simulated gas and accepts a separate fee payer for a USDt sender without APT', async () => {
+  it('uses the conservative local gas reserve and accepts a separate fee payer for a USDt sender without APT', async () => {
     const { jobs, gateway, source, target, payer } = await setup()
     gateway.setBalance(source.address, 'APT', 0n)
     const draft = jobs.createDraft({ name: 'sponsored gas', gasPayerWalletId: payer.id, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
     const result = await jobs.checkAndPreview(draft.id)
     expect(result.valid).toBe(true)
-    expect(result.checks[0]).toMatchObject({ valid: true, gasWalletId: payer.id, estimatedGasBaseUnits: '10' })
-    expect(result.summary?.estimatedGasBaseUnits).toBe('10')
+    expect(result.checks[0]).toMatchObject({ valid: true, gasWalletId: payer.id, estimatedGasBaseUnits: '100000' })
+    expect(result.summary?.estimatedGasBaseUnits).toBe('100000')
   })
 
   it('names the selected fee payer when its APT cannot cover the transaction', async () => {
     const { jobs, gateway, source, target, payer } = await setup()
-    gateway.estimateError = '交易模拟失败：INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE'
+    gateway.setBalance(payer.address, 'APT', 0n)
     const draft = jobs.createDraft({ name: 'sponsor lacks gas', gasPayerWalletId: payer.id, intervalMinSeconds: 0, intervalMaxSeconds: 0, shuffle: false,
       steps: [{ id: crypto.randomUUID(), sourceWalletId: source.id, targetAddress: target.address, targetWalletId: target.id, asset: 'USDT', amountMode: 'fixed', amountMin: '1', amountMax: null }] })
 
     const result = await jobs.checkAndPreview(draft.id)
 
     expect(result.valid).toBe(false)
-    expect(result.checks[0].error).toBe(`手续费账户“${payer.label}”的 APT 余额不足，请充值或改用其他手续费账户。`)
+    expect(result.checks[0].error).toBe(`手续费账户“${payer.label}”的 APT 余额不足，需要预留 0.001 APT`)
   })
 
   it('reorders frozen preview steps as whole records and invalidates the old phrase', async () => {
