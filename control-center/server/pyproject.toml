@@ -20,7 +20,7 @@ weex-autotrade = { path = "../..", editable = true }
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3,<9",
+    "pytest>=8.3,<10",
     "ruff>=0.9,<1",
 ]
 
